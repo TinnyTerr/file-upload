@@ -321,6 +321,7 @@ from __future__ import annotations
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 
 class Base(DeclarativeBase):
@@ -328,8 +329,15 @@ class Base(DeclarativeBase):
 
 
 def make_engine(database_url: str) -> Engine:
-    connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-    engine = create_engine(database_url, connect_args=connect_args, future=True)
+    connect_args: dict = {}
+    extra: dict = {}
+    if database_url.startswith("sqlite"):
+        connect_args["check_same_thread"] = False
+        # In-memory DBs are per-connection; a single shared connection
+        # (StaticPool) is required so all sessions/threads see the same tables.
+        if ":memory:" in database_url or database_url == "sqlite://":
+            extra["poolclass"] = StaticPool
+    engine = create_engine(database_url, connect_args=connect_args, future=True, **extra)
 
     # Enforce foreign keys + better concurrency for SQLite.
     if database_url.startswith("sqlite"):
@@ -457,15 +465,20 @@ def test_update_and_delete_are_blocked():
 
 
 def test_tampered_chain_fails_verification():
-    Session = _setup()
+    # Use an engine WITHOUT append-only triggers so a row CAN be mutated at the
+    # storage layer, then prove verify_chain detects the broken chain.
+    from sqlalchemy import update
+    from app.db import make_engine, make_session_factory, init_db
+    engine = make_engine("sqlite:///:memory:")
+    init_db(engine)
+    Session = make_session_factory(engine)
     with Session() as s:
         record(s, actor="root", action="a", ip="1.1.1.1")
         record(s, actor="root", action="b", ip="1.1.1.1")
-    # Tamper directly via raw connection (bypassing ORM/triggers is not possible
-    # for UPDATE, so simulate corruption by checking verify catches a bad hash).
-    with Session() as s:
-        first = s.query(AuditEntry).order_by(AuditEntry.id).first()
-        object.__setattr__(first, "entry_hash", "deadbeef")
+        assert verify_chain(s) is True
+        s.execute(update(AuditEntry).where(AuditEntry.id == 1).values(action="tampered"))
+        s.commit()
+        s.expire_all()
         assert verify_chain(s) is False
 ```
 
