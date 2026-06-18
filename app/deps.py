@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable, Iterator
 
 from fastapi import Depends, HTTPException, Request
@@ -80,3 +81,33 @@ def require_permission(name: str) -> Callable[..., User]:
         return user
 
     return _dep
+
+
+def require_api_key(request: Request, db: Session = Depends(get_db)):
+    from app.models.api_key import ApiKey
+    from app.security.api_keys import hash_key, bind_or_reject
+    from app.audit.log import record
+
+    header = request.headers.get("authorization", "")
+    if not header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="missing api key")
+    raw = header[len("Bearer "):].strip()
+    if not raw:
+        raise HTTPException(status_code=401, detail="missing api key")
+
+    api_key = (
+        db.query(ApiKey)
+        .filter_by(key_hash=hash_key(raw), active=True)
+        .one_or_none()
+    )
+    if api_key is None:
+        raise HTTPException(status_code=401, detail="invalid api key")
+
+    ip = client_ip(request)
+    if not bind_or_reject(api_key, ip, datetime.now(timezone.utc)):
+        record(db, actor=f"apikey:{api_key.id}", action="apikey.ip_rejected",
+               target=f"apikey:{api_key.id}", ip=ip)
+        db.commit()
+        raise HTTPException(status_code=403, detail="api key ip mismatch")
+    db.commit()
+    return api_key
