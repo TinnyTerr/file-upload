@@ -27,10 +27,11 @@ def _generate_file(path: Path) -> None:
         f"SECRET_KEY={secret_key}\n"
         f"MASTER_KEY_B64={master_key_b64}\n"
     )
-    # Write then tighten perms to owner-only.
-    path.write_text(body, encoding="utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(body)
     if os.name == "posix":
-        os.chmod(path, 0o600)
+        os.chmod(path, 0o600)  # definitive, in case a restrictive umask altered the create mode
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -49,11 +50,19 @@ def load_settings(config_path: str | None = None) -> Settings:
     if not path.exists():
         _generate_file(path)
     raw = _parse_env_file(path)
+    try:
+        secret_key = raw["SECRET_KEY"]
+        master_key_b64 = raw["MASTER_KEY_B64"]
+    except KeyError as exc:
+        raise ValueError(
+            f"Config file {path} is missing required key {exc}. "
+            "Delete the file to regenerate it."
+        ) from exc
     return Settings(
         app_env=raw.get("APP_ENV", "dev"),
         database_url=raw.get("DATABASE_URL", "sqlite:///./data/app.db"),
-        secret_key=raw["SECRET_KEY"],
-        master_key_b64=raw["MASTER_KEY_B64"],
+        secret_key=secret_key,
+        master_key_b64=master_key_b64,
         config_path=str(path),
     )
 
