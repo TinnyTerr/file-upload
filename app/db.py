@@ -73,4 +73,5 @@ def init_db(engine: Engine) -> None:
     from app.models import audit as _audit  # noqa: F401
     from app.models import session as _session  # noqa: F401
     from app.models import login_attempt as _la  # noqa: F401
+    from app.models import permission as _permission  # noqa: F401
     Base.metadata.create_all(engine)
