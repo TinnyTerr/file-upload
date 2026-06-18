@@ -76,4 +76,5 @@ def init_db(engine: Engine) -> None:
     from app.models import permission as _permission  # noqa: F401
     from app.models import file as _file  # noqa: F401
     from app.models import link as _link  # noqa: F401
+    from app.models import api_key as _api_key  # noqa: F401
     Base.metadata.create_all(engine)
