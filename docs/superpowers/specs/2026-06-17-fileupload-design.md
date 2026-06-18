@@ -44,7 +44,7 @@ Design priorities: fast transfers, strict memory/disk discipline, real client-si
 - **permissions** — per-user flags (see §6). Notably `can_upload_client_encrypted` (default **off**), quotas, max file size, allowed retention ranges, can-delete, can-regenerate-links, `can_use_api_keys`, `can_use_p2p`.
 - **api_keys** — id, owner_id, hashed key, **bound_ip** (NULL until first use), created_at, last_used_at, active?.
 - **files** — id, owner_id, internal storage path, original filename, size (plaintext logical size), stored_size (actual bytes on disk), content-type, encryption mode (`none`|`server`|`client`), compressed?, archived?, archive_codec, retention settings (permanent/temp + expiry, archive-after-N-idle-days, auto-unarchive-on-download, delete-if-not-downloaded-in-X-days), created_at, last_downloaded_at.
-- **links** — id, file_id, **public random slug** (the `<id>` in `/file/<id>`), max_uses, use_count, expires_at, active?. A file may have multiple links so old ones can expire while new ones with different options are minted **without re-uploading**.
+- **links** — id, file_id, **public random slug** (the `<id>` in `/file/<id>`; **`secrets.token_urlsafe(16)` → 128 bits of entropy**, non-enumerable), max_uses, use_count, expires_at, active?. A file may have multiple links so old ones can expire while new ones with different options are minted **without re-uploading**.
 - **audit_log** — actor (user/api-key/anonymous), action, file/link ref, timestamp, IP.
 
 **Separation of concerns:** a **file** = stored bytes + options; a **link** = a public, randomized, independently-revocable access path to a file.
@@ -62,8 +62,23 @@ All AES-256-GCM. Three per-file modes. **The only difference between server-side
 | **client-side** | `#ek=KEY` (fragment) | **browser** (WebCrypto) | **never** | **no, ever** |
 
 - **Server-side:** file is **encrypted at rest** with a per-file key wrapped by a server master key (a stolen `storage/` dir is useless without the running app's master key). Because the server holds the (wrapped) key, the **master can always preview/manage server-side files** in the panel. The shared **`?ek=` value is the access credential** required to download via a link — the server validates it, then decrypts with its stored per-file key and streams. (Conceptually it's "the key you share"; mechanically the real crypto key stays server-side, which is what lets the master see these files.)
+  - **Master key custody:** 32-byte key from `secrets.token_bytes(32)`, stored in the first-run-generated env file with `0600` perms, kept on a separate volume from `storage/`. Per-file key wrapping uses **AES-256-GCM with a random 12-byte IV** (not raw/ECB).
+  - **At-rest threat model:** stolen `storage/` alone = useless (goal met). Stolen env file **+** `storage/` = server-side encryption broken — the env file must be protected independently. Client-side files remain safe in all cases (key never on the server).
+  - **`?ek=` leakage mitigation (it rides in the query string):** all file-serving and download-page responses set `Referrer-Policy: no-referrer`; Nginx + uvicorn access-log formats for `/file/` must **exclude query strings** (documented deployment requirement). Contrast: the client-side `#ek=` **fragment is never sent to the server, logged, or sent in `Referer`** — which is exactly why it's used for the keys the server must never see.
 - **Client-side:** the key is generated **in the browser**, lives only in the `#ek=` you share, and is **never sent to the server** in any header, query, or body. Gated by the `can_upload_client_encrypted` permission (**off by default**) — these files are ones the server/master genuinely cannot read.
-- **Chunked AEAD (STREAM-style) framing:** files are encrypted as a sequence of independently-authenticated chunks (per-chunk nonce derived from a base nonce + counter). This enables O(chunk) memory, resumable uploads, range reads, and progressive video playback of partially-uploaded files.
+- **Chunked AEAD (STREAM-style) framing:** files are encrypted as a sequence of independently-authenticated chunks. This enables O(chunk) memory, resumable uploads, range reads, and progressive video playback of partially-uploaded files. The exact wire format is specified in §4.1 — it is **mandatory**, not implementation-defined, because nonce/ordering/truncation handling is security-critical.
+
+### 4.1 Chunked AEAD wire format (mandatory)
+
+Based on the well-studied **STREAM** construction (Tink / Miscreant), to defeat nonce reuse, chunk reordering, and truncation attacks:
+
+- **Key:** 32-byte AES-256 key. Client-side: generated in-browser via `crypto.getRandomValues`, encoded in `#ek=` as **unpadded base64url**. Server-side: per-file key from `secrets.token_bytes(32)`.
+- **File header (stored with ciphertext):** `4-byte magic || 1-byte version || 12-byte base_nonce || 4-byte total_chunk_count (big-endian)`. The `base_nonce` is random per file (`crypto.getRandomValues` / `token_bytes(12)`) and **never reused across files**.
+- **Chunk size:** fixed **2 MiB** plaintext per chunk.
+- **Per-chunk nonce:** `base_nonce XOR (uint32_be(chunk_index) || last_flag_byte)` (counter occupies the low bytes; final byte = `0x01` for the last chunk, else `0x00`).
+- **Per-chunk AAD (authenticated, not encrypted):** `file_uuid || uint32_be(chunk_index) || is_last_byte`. This binds each chunk to its file, position, and finality — so a truncated prefix, a reordered chunk, or a spliced chunk from another upload all **fail authentication**.
+- **Per-chunk output:** `ciphertext || 16-byte GCM tag`.
+- Decryption (server, browser, or Service Worker) must verify the tag of every chunk, that indices are contiguous from 0, and that exactly one final-flagged chunk closes the stream matching `total_chunk_count`.
 
 ---
 
@@ -84,6 +99,7 @@ All AES-256-GCM. Three per-file modes. **The only difference between server-side
 - Archived files **must be unarchived (decompressed) before download.**
 - Storage accounting credits only the **actual bytes saved** by compression (`stored_size` updated to the compressed size).
 - **Unarchive safety:** decompressing *needs* room. Before unarchiving, **pre-check free space + quota** for the decompressed size. If it would overflow user quota or disk, **fail gracefully** with a clear error and leave the archived file intact — including the auto-unarchive-on-download path (returns a clean error, never corrupts state).
+- **Decompression-bomb guard:** any server-side decompression (archival unpack, or any case where the server expands a user archive) enforces a **max decompression ratio (50:1)** and a hard decompressed-size cap; exceeding either aborts and flags the file. Note: the **folder-zip-on-upload** feature zips *client-side* and the server treats the result as an opaque blob (no server-side unzip, so no ZipSlip surface); if that ever changes, entries with paths escaping the target dir must be rejected.
 
 ### Reclamation jobs (APScheduler)
 - **Archive** idle eligible files; **idle-delete** (delete if not downloaded in X days); **temp-storage expiry**; **link expiry**; **GC of abandoned chunked-upload sessions** (temp sessions past a TTL).
@@ -93,9 +109,12 @@ All AES-256-GCM. Three per-file modes. **The only difference between server-side
 ## 6. Authentication, Roles & Permissions
 
 ### First-run & auth
-- Ships with a default admin (the **master**). **First login forces username + password change.**
-- Optional **TOTP 2FA** (enroll via QR) and **passkeys** (WebAuthn; RP ID/origin configurable for localhost → domain).
-- **Argon2** password hashing, **brute-force lockout** on login, **signed session cookies**.
+- Ships with a default admin (the **master**). **First login forces username + password change.** The default password is **randomly generated at first-run startup and printed to the console** (never hardcoded, never stored); the setup wizard must complete before any other endpoint is served, closing the "attacker reaches first-login before admin" window.
+- The **`must_change_credentials` flag gates every authenticated endpoint** — a flagged account can do nothing but change its credentials, regardless of how it obtained a session.
+- Optional **TOTP 2FA** (enroll via QR; ±1 step / 30s tolerance; **secret stored encrypted at rest** under the server master key) and **passkeys** (WebAuthn). RP ID/origin are config values; the **RP ID + `Origin` header are validated on every assertion** (not assumed from the library). WebAuthn requires a secure context (HTTPS or localhost) — true for both deployment targets.
+- **Password hashing:** `argon2id`, `m=65536` (64 MiB), `t=3`, `p=4`, 16-byte salt, 32-byte hash.
+- **Brute-force lockout:** 5 failed attempts → 15-minute lockout **per username**, plus per-IP tracking to blunt distributed attempts; every failed attempt logged to `audit_log` with IP.
+- **Session cookies:** `HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=86400`, signed. (`Secure` is dropped only in local HTTP dev mode and required in prod.)
 
 ### Roles
 - **master** — manages users, permissions, and **all** files; sees all files split into **per-user sections** plus its own section.
@@ -108,7 +127,8 @@ All AES-256-GCM. Three per-file modes. **The only difference between server-side
 
 ### API keys (per-IP, for curl uploads)
 - Gated by `can_use_api_keys`. Secure random key shown once.
-- **Binds to the first IP that uses it**; requests from any other IP are rejected (can't be shared after first use).
+- **Binds to the first IP that uses it**; requests from any other IP are rejected (can't be shared after first use). **Client IP is derived safely:** the app trusts exactly **one** proxy hop (`X-Forwarded-For` rightmost entry, via Starlette `ProxyHeadersMiddleware` with `trusted_proxy_count=1`) and **binds only to `127.0.0.1`** so Nginx is the only path in — otherwise a client could spoof `X-Forwarded-For` to bind/bypass the key.
+- **Reset-IP action:** the key's owner (and the master) gets a **"Reset/regenerate IP" button** in the panel that clears `bound_ip` back to NULL, so the next request re-binds it. Covers **dynamic IPs** without forcing a full key reissue. Because it's security-sensitive, the reset **requires re-authentication** (password or 2FA confirmation) and is recorded in the audit log.
 - Stored hashed. Used for `curl`-based uploads (and downloads where applicable).
 
 ---
@@ -145,8 +165,12 @@ Logged-in user → **upload page**: an Uppy drag-drop zone supporting **single f
 - **`/file/<id>/raw`** → raw bytes for curl (same ID, just a suffix).
   - Server-side: `?ek=` makes the server decrypt + stream plaintext.
   - Client-side: streams ciphertext; the copy button provides the cross-platform decrypt command.
-- **HTTP Range** support for fast/resumable downloads. Each use decrements remaining `max_uses`; expired/used-up/inactive links return 404.
+- **HTTP Range** support for fast/resumable downloads. `max_uses` is enforced **atomically** (`UPDATE links SET use_count = use_count + 1 WHERE id = ? AND use_count < max_uses` checked by rowcount — no read-modify-write race); expired/used-up/inactive links return 404.
 - Archived files are **unarchived first** (per §5 safety rules) before streaming.
+
+### Preview hardening (download page is an XSS surface)
+- All file-serving responses set **`X-Content-Type-Options: nosniff`**; the download page sets a **CSP** (`default-src 'self'; script-src 'self'; object-src 'none'`) and `Referrer-Policy: no-referrer`.
+- **HTML/SVG are never rendered inline** — offered as download-only. **PDF/video** previews render in a **sandboxed `<iframe>`** (no `allow-scripts` where avoidable; ideally served from a separate origin/subdomain). **Text** previews render via escaped `<pre>` (never `innerHTML`). Image previews via `<img>` only.
 
 ---
 
@@ -171,6 +195,7 @@ Dark, minimal, function-first. Hand-rolled CSS, one accent color, generous spaci
 - Both **UI wrapper** and **raw** stream variants are supported.
 - When upload completes, the **same URL seamlessly becomes a normal file link with no URL change** — the Service Worker simply exits "live" mode.
 - Encryption handled for all three modes in the streaming path (client-side decrypt in the SW for `#ek`; server decrypt for `?ek`; passthrough for none).
+- **Security:** the Service Worker is registered with a **narrow scope (`/file/`)** so it never intercepts login/admin/auth flows. The `#ek=` key it holds to decrypt chunks stays **in memory only** — never persisted to Cache Storage or IndexedDB.
 
 *(Interface-level here; detailed design happens in the Phase 2 plan.)*
 
@@ -180,8 +205,9 @@ Dark, minimal, function-first. Hand-rolled CSS, one accent color, generous spaci
 
 - A **separate tab** for **WebRTC** peer-to-peer streaming/transfer. **No server-stored file, no size limit.**
 - The server is the **signaling middleman** (WebSocket) and an **optional relay** (TURN) when a direct peer connection can't be established.
-- Transit is **DTLS-encrypted by WebRTC** itself.
+- Transit is **DTLS-encrypted by WebRTC** itself (no app-layer crypto needed on top).
 - Gated by the `can_use_p2p` permission.
+- **Security notes:** WebRTC ICE can reveal a peer's local/public IP to the other peer even with a relay — surface this in the P2P UI. A self-hosted **TURN relay (coturn) must use short-lived HMAC time-limited credentials**, never static username/password (which would be extractable from the browser's offer/answer).
 
 *(Interface-level here; detailed design happens in the Phase 3 plan.)*
 
