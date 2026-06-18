@@ -15,3 +15,4 @@ def test_can_persist_and_read_user():
         assert u.role == "master"
         assert u.must_change_credentials is True
         assert u.created_at is not None
+        assert u.created_at.tzinfo is not None
