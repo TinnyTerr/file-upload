@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.audit.log import record
 from app.models.user import User
+from app.permissions.policy import ensure_permissions
 from app.security.passwords import hash_password
 
 DEFAULT_USERNAME = "admin"
@@ -24,6 +25,7 @@ def ensure_master(session: Session, print_fn: Callable[[str], None] = print) -> 
     )
     session.add(master)
     session.flush()
+    ensure_permissions(session, master.id, master=True)
     record(session, actor="system", action="bootstrap.master_created",
            target=f"user:{master.id}")
     session.commit()
