@@ -49,3 +49,14 @@ def current_session(request: Request, db: Session = Depends(get_db)) -> SessionR
     if row is None:
         raise HTTPException(status_code=401, detail="not authenticated")
     return row
+
+
+def require_active_user(session_row: SessionRow = Depends(current_session),
+                        db: Session = Depends(get_db)) -> "User":
+    from app.models.user import User
+    user = db.get(User, session_row.user_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail="not authenticated")
+    if user.must_change_credentials:
+        raise HTTPException(status_code=403, detail="must change credentials")
+    return user

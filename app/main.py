@@ -12,6 +12,7 @@ from app.deps import AppState
 from app.security.lockout import LockoutPolicy
 from app.security.sessions import SessionManager
 from app.routes.auth import router as auth_router
+from app.routes.account import router as account_router
 
 
 def create_app(config_path: str | None = None, database_url: str | None = None) -> FastAPI:
@@ -44,4 +45,5 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
         return {"status": "ok"}
 
     app.include_router(auth_router)
+    app.include_router(account_router)
     return app
