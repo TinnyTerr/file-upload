@@ -3,7 +3,7 @@ from __future__ import annotations
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from itsdangerous import BadSignature, URLSafeSerializer
+from itsdangerous import BadData, URLSafeSerializer
 from sqlalchemy.orm import Session
 
 from app.models.session import SessionRow
@@ -35,7 +35,7 @@ class SessionManager:
     def _unsign(self, cookie_value: str) -> str | None:
         try:
             return self._serializer.loads(cookie_value)
-        except BadSignature:
+        except BadData:
             return None
 
     def resolve(self, session: Session, cookie_value: str | None) -> SessionRow | None:
