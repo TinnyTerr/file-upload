@@ -13,6 +13,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# httpx2 (separate module from httpx) silences Starlette's TestClient deprecation warning; both coexist
 dev = ["pytest>=8.0", "httpx>=0.27", "httpx2>=2.4"]
 
 [build-system]
