@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterator
+from typing import Callable, Iterator
 
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -60,3 +60,23 @@ def require_active_user(session_row: SessionRow = Depends(current_session),
     if user.must_change_credentials:
         raise HTTPException(status_code=403, detail="must change credentials")
     return user
+
+
+def require_master(user: User = Depends(require_active_user)) -> User:
+    if user.role != "master":
+        raise HTTPException(status_code=403, detail="master only")
+    return user
+
+
+def require_permission(name: str) -> Callable[..., User]:
+    from app.permissions.policy import ensure_permissions, has_permission
+
+    def _dep(user: User = Depends(require_active_user),
+             db: Session = Depends(get_db)) -> User:
+        perm = ensure_permissions(db, user.id, master=(user.role == "master"))
+        db.commit()
+        if not has_permission(perm, name):
+            raise HTTPException(status_code=403, detail=f"permission denied: {name}")
+        return user
+
+    return _dep
