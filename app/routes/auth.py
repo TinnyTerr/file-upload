@@ -6,7 +6,9 @@ from sqlalchemy.orm import Session
 
 from app.audit.log import record
 from app.deps import AppState, client_ip, get_db, get_state
+from app.models.session import SessionRow
 from app.models.user import User
+from app.security.csrf import require_csrf
 from app.security.passwords import verify_password
 from app.security.sessions import COOKIE_NAME
 
@@ -44,9 +46,12 @@ def login(body: LoginBody, request: Request, response: Response,
 
 
 @router.post("/logout")
-def logout(request: Request, response: Response, db: Session = Depends(get_db)) -> dict:
+def logout(request: Request, response: Response,
+           session_row: SessionRow = Depends(require_csrf),
+           db: Session = Depends(get_db)) -> dict:
     state: AppState = get_state(request)
     cookie = request.cookies.get(COOKIE_NAME)
     state.session_manager.destroy(db, cookie)
     response.delete_cookie(COOKIE_NAME, path="/")
+    record(db, actor=str(session_row.user_id), action="logout", ip=client_ip(request))
     return {"status": "logged_out"}
