@@ -70,4 +70,5 @@ def make_session_factory(engine: Engine) -> sessionmaker:
 def init_db(engine: Engine) -> None:
     # Import models so they register on Base.metadata before create_all.
     from app.models import user as _user  # noqa: F401
+    from app.models import audit as _audit  # noqa: F401
     Base.metadata.create_all(engine)
