@@ -39,6 +39,15 @@ class LockoutPolicy:
         if row is None:
             row = LoginAttempt(identifier=identifier, identifier_type=identifier_type, failed_count=0)
             session.add(row)
+        elif row.locked_until is not None:
+            # A prior lockout that has fully expired starts a fresh window, so a
+            # 15-minute lockout is a temporary penalty rather than permanent.
+            until = row.locked_until
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=timezone.utc)
+            if until <= _utcnow():
+                row.failed_count = 0
+                row.locked_until = None
         row.failed_count += 1
         row.updated_at = _utcnow()
         if row.failed_count >= self.max_attempts:
