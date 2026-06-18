@@ -45,7 +45,7 @@ Design priorities: fast transfers, strict memory/disk discipline, real client-si
 - **api_keys** — id, owner_id, hashed key, **bound_ip** (NULL until first use), created_at, last_used_at, active?.
 - **files** — id, owner_id, internal storage path, original filename, size (plaintext logical size), stored_size (actual bytes on disk), content-type, encryption mode (`none`|`server`|`client`), compressed?, archived?, archive_codec, retention settings (permanent/temp + expiry, archive-after-N-idle-days, auto-unarchive-on-download, delete-if-not-downloaded-in-X-days), created_at, last_downloaded_at.
 - **links** — id, file_id, **public random slug** (the `<id>` in `/file/<id>`; **`secrets.token_urlsafe(16)` → 128 bits of entropy**, non-enumerable), max_uses, use_count, expires_at, active?. A file may have multiple links so old ones can expire while new ones with different options are minted **without re-uploading**.
-- **audit_log** — actor (user/api-key/anonymous), action, file/link ref, timestamp, IP.
+- **audit_log** — actor (user/api-key/anonymous), action, file/link ref, timestamp, IP, plus `prev_hash` + `entry_hash`. **Append-only and tamper-evident:** the app only ever INSERTs; SQLite triggers reject UPDATE/DELETE on the table; each row stores `entry_hash = SHA-256(prev_hash || row_fields)` forming a hash chain, so any retroactive edit/removal breaks the chain and is detectable. The panel exposes a "verify chain" check.
 
 **Separation of concerns:** a **file** = stored bytes + options; a **link** = a public, randomized, independently-revocable access path to a file.
 
@@ -104,6 +104,15 @@ Based on the well-studied **STREAM** construction (Tink / Miscreant), to defeat 
 ### Reclamation jobs (APScheduler)
 - **Archive** idle eligible files; **idle-delete** (delete if not downloaded in X days); **temp-storage expiry**; **link expiry**; **GC of abandoned chunked-upload sessions** (temp sessions past a TTL).
 
+### Archive/unarchive job concurrency & memory safety
+A single archive or unarchive can take many minutes (e.g. 10 min each on a large file). These must never block request handling, starve each other, or exhaust RAM:
+- **Off the event loop:** compression/decompression runs in a **bounded worker pool** (`max_concurrent_archive_jobs`, default **2**, configurable). Codecs that release the GIL (zstd) run in a thread pool; otherwise a process pool. The FastAPI request path is **never** blocked by a job — it `await`s a future or returns "processing."
+- **Bounded queue:** jobs beyond the concurrency cap are **queued**, not spawned, so 100 idle files don't launch 100 simultaneous compressions. The scheduler enqueues; the pool drains at a fixed width.
+- **Streaming, O(chunk) memory:** both directions stream through fixed-size buffers (e.g. zstd streaming (de)compression) — a multi-GB file uses bounded RAM regardless of size. Total memory is bounded by `pool_width × buffer_size`, a known constant. No whole-file buffering.
+- **Per-file locking / dedupe:** a file has a single lifecycle state (`active | archiving | archived | unarchiving`). A second request to unarchive an in-progress file **attaches to the existing job** rather than starting a duplicate; concurrent downloads during `unarchiving` wait on the same future (with a timeout → "processing, try again") instead of each kicking off their own decompress.
+- **Early-abort bomb guard:** the decompression-bomb ratio/size cap (above) is checked **incrementally as bytes are produced**, so an archival bomb is aborted mid-stream — never fully expanded into memory or disk first.
+- **Crash/restart safety:** in-progress states are persisted; on startup, files stuck mid-`archiving`/`unarchiving` are reconciled (temp output discarded, state reset) so a crash never leaves a half-written or double-counted file.
+
 ---
 
 ## 6. Authentication, Roles & Permissions
@@ -115,6 +124,7 @@ Based on the well-studied **STREAM** construction (Tink / Miscreant), to defeat 
 - **Password hashing:** `argon2id`, `m=65536` (64 MiB), `t=3`, `p=4`, 16-byte salt, 32-byte hash.
 - **Brute-force lockout:** 5 failed attempts → 15-minute lockout **per username**, plus per-IP tracking to blunt distributed attempts; every failed attempt logged to `audit_log` with IP.
 - **Session cookies:** `HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=86400`, signed. (`Secure` is dropped only in local HTTP dev mode and required in prod.)
+- **CSRF protection:** all state-changing requests (panel actions, user/permission management, link mint/expire, settings) require a **per-session CSRF token** submitted via a custom request header (`X-CSRF-Token`), validated server-side (double-submit pattern), layered on top of `SameSite=Strict`. Endpoints reject any cookie-authenticated mutating request lacking a valid token. API-key and Tus upload requests authenticate via the `Authorization` header (not the session cookie), so they are not cross-site-forgeable and are exempt. Safe methods (GET/HEAD) are never state-changing.
 
 ### Roles
 - **master** — manages users, permissions, and **all** files; sees all files split into **per-user sections** plus its own section.
