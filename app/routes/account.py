@@ -32,10 +32,13 @@ def change_credentials(body: ChangeCredsBody, request: Request,
     existing = db.query(User).filter_by(username=body.new_username).one_or_none()
     if existing is not None and existing.id != user.id:
         raise HTTPException(status_code=409, detail="username taken")
+    # Capture the authenticating identity before the rename so the audit log
+    # records who performed the change, not the new name they chose.
+    actor = user.username
     user.username = body.new_username
     user.password_hash = hash_password(body.new_password)
     user.must_change_credentials = False
-    record(db, actor=user.username, action="account.credentials_changed",
+    record(db, actor=actor, action="account.credentials_changed",
            target=f"user:{user.id}", ip=client_ip(request))
     db.commit()
     return {"status": "updated"}

@@ -50,6 +50,8 @@ def test_credentials_change_and_audit_are_atomic(client):
             .all()
         )
         assert len(audit_entries) == 1
+        # The actor is the authenticating identity ("admin"), not the new name.
+        assert audit_entries[0].actor == "admin"
 
         user = fresh_db.query(User).filter_by(username="axo").one()
         assert user.must_change_credentials is False
