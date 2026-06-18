@@ -33,7 +33,8 @@ def change_credentials(body: ChangeCredsBody, request: Request,
     user.username = body.new_username
     user.password_hash = hash_password(body.new_password)
     user.must_change_credentials = False
-    db.commit()
+    # record() commits internally, persisting the credential change and its audit
+    # entry in one transaction so the change can never land unlogged.
     record(db, actor=user.username, action="account.credentials_changed",
            target=f"user:{user.id}", ip=client_ip(request))
     return {"status": "updated"}
