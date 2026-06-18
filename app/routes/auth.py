@@ -30,13 +30,13 @@ def login(body: LoginBody, request: Request, response: Response,
 
     user = db.query(User).filter_by(username=body.username).one_or_none()
     if user is None or not verify_password(body.password, user.password_hash):
-        state.lockout.register_failure(db, body.username, "user")
-        state.lockout.register_failure(db, ip, "ip")
+        state.lockout.register_failure(db, body.username, identifier_type="user")
+        state.lockout.register_failure(db, ip, identifier_type="ip")
         record(db, actor=body.username, action="login.failure", ip=ip)
         raise HTTPException(status_code=401, detail="invalid credentials")
 
-    state.lockout.reset(db, body.username, "user")
-    state.lockout.reset(db, ip, "ip")
+    state.lockout.reset(db, body.username, identifier_type="user")
+    state.lockout.reset(db, ip, identifier_type="ip")
     cookie_value, csrf = state.session_manager.create(db, user.id)
     response.set_cookie(COOKIE_NAME, cookie_value, **state.session_manager.cookie_params())
     record(db, actor=user.username, action="login.success", target=f"user:{user.id}", ip=ip)
