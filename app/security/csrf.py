@@ -7,6 +7,7 @@ from app.models.session import SessionRow
 
 
 def require_csrf(request: Request, session_row: SessionRow = Depends(current_session)) -> SessionRow:
+    """Validate the X-CSRF-Token header against the session's csrf_token and return the SessionRow."""
     header = request.headers.get("x-csrf-token")
     if not header or header != session_row.csrf_token:
         raise HTTPException(status_code=403, detail="invalid or missing CSRF token")

@@ -29,7 +29,7 @@ class SessionManager:
             expires_at=_utcnow() + timedelta(seconds=SESSION_TTL_SECONDS),
         )
         session.add(row)
-        session.commit()
+        session.flush()
         return self._serializer.dumps(sid), csrf
 
     def _unsign(self, cookie_value: str) -> str | None:
@@ -63,7 +63,7 @@ class SessionManager:
         row = session.get(SessionRow, sid)
         if row is not None:
             session.delete(row)
-            session.commit()
+            session.flush()
 
     def cookie_params(self) -> dict:
         return {

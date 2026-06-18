@@ -28,6 +28,7 @@ def login(body: LoginBody, request: Request, response: Response,
 
     if not state.lockout.check_login_allowed(db, body.username, ip):
         record(db, actor=body.username, action="login.locked_out", ip=ip)
+        db.commit()
         raise HTTPException(status_code=429, detail="too many attempts, try later")
 
     user = db.query(User).filter_by(username=body.username).one_or_none()
@@ -35,6 +36,7 @@ def login(body: LoginBody, request: Request, response: Response,
         state.lockout.register_failure(db, body.username, identifier_type="user")
         state.lockout.register_failure(db, ip, identifier_type="ip")
         record(db, actor=body.username, action="login.failure", ip=ip)
+        db.commit()
         raise HTTPException(status_code=401, detail="invalid credentials")
 
     state.lockout.reset(db, body.username, identifier_type="user")
@@ -42,6 +44,7 @@ def login(body: LoginBody, request: Request, response: Response,
     cookie_value, csrf = state.session_manager.create(db, user.id)
     response.set_cookie(COOKIE_NAME, cookie_value, **state.session_manager.cookie_params())
     record(db, actor=user.username, action="login.success", target=f"user:{user.id}", ip=ip)
+    db.commit()
     return {"csrf_token": csrf, "must_change_credentials": user.must_change_credentials}
 
 
@@ -54,4 +57,5 @@ def logout(request: Request, response: Response,
     state.session_manager.destroy(db, cookie)
     response.delete_cookie(COOKIE_NAME, path="/")
     record(db, actor=str(session_row.user_id), action="logout", ip=client_ip(request))
+    db.commit()
     return {"status": "logged_out"}

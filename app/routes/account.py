@@ -24,6 +24,8 @@ class ChangeCredsBody(BaseModel):
 def change_credentials(body: ChangeCredsBody, request: Request,
                        session_row: SessionRow = Depends(require_csrf),
                        db: Session = Depends(get_db)) -> dict:
+    if len(body.new_password) < 12:
+        raise HTTPException(status_code=400, detail="new password too short")
     user = db.get(User, session_row.user_id)
     if user is None or not verify_password(body.current_password, user.password_hash):
         raise HTTPException(status_code=401, detail="invalid current password")
@@ -33,10 +35,9 @@ def change_credentials(body: ChangeCredsBody, request: Request,
     user.username = body.new_username
     user.password_hash = hash_password(body.new_password)
     user.must_change_credentials = False
-    # record() commits internally, persisting the credential change and its audit
-    # entry in one transaction so the change can never land unlogged.
     record(db, actor=user.username, action="account.credentials_changed",
            target=f"user:{user.id}", ip=client_ip(request))
+    db.commit()
     return {"status": "updated"}
 
 

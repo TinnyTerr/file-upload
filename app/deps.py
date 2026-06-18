@@ -7,9 +7,10 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.config import Settings
+from app.models.session import SessionRow
+from app.models.user import User
 from app.security.lockout import LockoutPolicy
 from app.security.sessions import COOKIE_NAME, SessionManager
-from app.models.session import SessionRow
 
 
 @dataclass
@@ -52,8 +53,7 @@ def current_session(request: Request, db: Session = Depends(get_db)) -> SessionR
 
 
 def require_active_user(session_row: SessionRow = Depends(current_session),
-                        db: Session = Depends(get_db)) -> "User":
-    from app.models.user import User
+                        db: Session = Depends(get_db)) -> User:
     user = db.get(User, session_row.user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="not authenticated")

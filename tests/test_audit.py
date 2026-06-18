@@ -18,6 +18,7 @@ def test_record_builds_chain_and_verifies():
     with Session() as s:
         record(s, actor="root", action="login.success", ip="1.2.3.4")
         record(s, actor="root", action="link.create", target="file:1", ip="1.2.3.4")
+        s.commit()
         assert verify_chain(s) is True
         rows = s.query(AuditEntry).order_by(AuditEntry.id).all()
         assert rows[1].prev_hash == rows[0].entry_hash
@@ -27,6 +28,7 @@ def test_update_and_delete_are_blocked():
     Session = _setup()
     with Session() as s:
         record(s, actor="root", action="login.success", ip="1.2.3.4")
+        s.commit()
     with Session() as s:
         with pytest.raises((IntegrityError, OperationalError)):
             s.execute(AuditEntry.__table__.update().values(action="tampered"))
@@ -48,6 +50,7 @@ def test_tampered_chain_fails_verification():
     with Session() as s:
         record(s, actor="root", action="a", ip="1.1.1.1")
         record(s, actor="root", action="b", ip="1.1.1.1")
+        s.commit()
         assert verify_chain(s) is True
         s.execute(update(AuditEntry).where(AuditEntry.id == 1).values(action="tampered"))
         s.commit()
@@ -56,6 +59,8 @@ def test_tampered_chain_fails_verification():
 
 
 def test_delimiter_injection_does_not_collide():
-    h1 = _hash_row("0" * 64, "a|b", "c", None, "ip")
-    h2 = _hash_row("0" * 64, "a", "b|c", None, "ip")
+    from datetime import datetime, timezone
+    ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    h1 = _hash_row("0" * 64, "a|b", "c", None, "ip", ts)
+    h2 = _hash_row("0" * 64, "a", "b|c", None, "ip", ts)
     assert h1 != h2

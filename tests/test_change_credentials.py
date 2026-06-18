@@ -47,3 +47,14 @@ def test_wrong_current_password_rejected(client):
                   json={"new_username": "axo", "current_password": "wrong",
                         "new_password": "whatever-strong"})
     assert resp.status_code == 401
+
+
+def test_short_new_password_rejected(client):
+    c, state = client
+    csrf = _login(c, state.bootstrap_password).json()["csrf_token"]
+    resp = c.post("/account/change-credentials",
+                  headers={"X-CSRF-Token": csrf},
+                  json={"new_username": "axo", "current_password": state.bootstrap_password,
+                        "new_password": "tooshort"})
+    assert resp.status_code == 400
+    assert "too short" in resp.json()["detail"]

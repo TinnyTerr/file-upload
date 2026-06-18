@@ -52,7 +52,7 @@ class LockoutPolicy:
         row.updated_at = _utcnow()
         if row.failed_count >= self.max_attempts:
             row.locked_until = _utcnow() + timedelta(seconds=self.lockout_seconds)
-        session.commit()
+        session.flush()
 
     def reset(self, session: Session, identifier: str, identifier_type: str) -> None:
         row = self._get(session, identifier, identifier_type)
@@ -60,7 +60,7 @@ class LockoutPolicy:
             row.failed_count = 0
             row.locked_until = None
             row.updated_at = _utcnow()
-            session.commit()
+            session.flush()
 
     def check_login_allowed(self, session: Session, username: str, ip: str) -> bool:
         return not (self.is_locked(session, username, "user") or self.is_locked(session, ip, "ip"))

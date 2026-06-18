@@ -23,9 +23,10 @@ def ensure_master(session: Session, print_fn: Callable[[str], None] = print) -> 
         must_change_credentials=True,
     )
     session.add(master)
-    session.commit()
+    session.flush()
     record(session, actor="system", action="bootstrap.master_created",
            target=f"user:{master.id}")
+    session.commit()
     print_fn("=" * 60)
     print_fn(" FIRST-RUN ADMIN CREATED")
     print_fn(f"   username: {DEFAULT_USERNAME}")
