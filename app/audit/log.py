@@ -25,9 +25,19 @@ def install_append_only_triggers(engine: Engine) -> None:
             conn.execute(text(s))
 
 
+def _escape(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("|", "\\|")
+
+
 def _hash_row(prev_hash: str, actor: str, action: str,
               target: str | None, ip: str | None) -> str:
-    canonical = "|".join([prev_hash, actor, action, target or "", ip or ""])
+    canonical = "|".join([
+        prev_hash,
+        _escape(actor),
+        _escape(action),
+        _escape(target or ""),
+        _escape(ip or ""),
+    ])
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 

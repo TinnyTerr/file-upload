@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.db import make_engine, make_session_factory, init_db
-from app.audit.log import install_append_only_triggers, record, verify_chain
+from app.audit.log import install_append_only_triggers, record, verify_chain, _hash_row
 from app.models.audit import AuditEntry
 
 
@@ -53,3 +53,9 @@ def test_tampered_chain_fails_verification():
         s.commit()
         s.expire_all()
         assert verify_chain(s) is False
+
+
+def test_delimiter_injection_does_not_collide():
+    h1 = _hash_row("0" * 64, "a|b", "c", None, "ip")
+    h2 = _hash_row("0" * 64, "a", "b|c", None, "ip")
+    assert h1 != h2
