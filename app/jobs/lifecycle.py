@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -14,12 +13,10 @@ def _now() -> datetime:
 
 
 def archive_idle_job(session_factory, storage_root: Path) -> None:
-    from sqlalchemy.orm import Session
     from app.models.file import FileObject
     from app.storage.compress import compress_file, should_compress
 
     with session_factory() as db:
-        cutoff = _now() - timedelta(days=_DEFAULT_ARCHIVE_IDLE_DAYS)
         candidates = (
             db.query(FileObject)
             .filter(
@@ -67,7 +64,7 @@ def delete_idle_job(session_factory, storage_root: Path) -> None:
         files = db.query(FileObject).filter(FileObject.delete_if_idle_days.isnot(None)).all()
         for f in files:
             last = f.last_downloaded_at or f.created_at
-            if (_now() - last).days < f.delete_if_idle_days:
+            if (_now() - last) < timedelta(days=f.delete_if_idle_days):
                 continue
             _delete_file(db, f, storage_root)
         db.commit()
