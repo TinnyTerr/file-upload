@@ -77,10 +77,59 @@ def require_permission(name: str) -> Callable[..., User]:
         perm = ensure_permissions(db, user.id, master=(user.role == "master"))
         db.commit()
         if not has_permission(perm, name):
-            raise HTTPException(status_code=403, detail=f"permission denied: {name}")
+            raise HTTPException(status_code=403, detail="permission denied")
         return user
 
     return _dep
+
+
+def get_upload_user(request: Request, db: Session = Depends(get_db)) -> "User":
+    """Session+CSRF auth OR Bearer API key auth. Returns authenticated User."""
+    from datetime import timezone
+    from app.models.session import SessionRow
+    from app.permissions.policy import ensure_permissions, has_permission
+    from app.security.sessions import COOKIE_NAME
+
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        from app.models.api_key import ApiKey
+        from app.security.api_keys import hash_key, bind_or_reject
+        from app.audit.log import record
+
+        raw = auth_header[len("Bearer "):].strip()
+        api_key = db.query(ApiKey).filter_by(key_hash=hash_key(raw), active=True).one_or_none()
+        if api_key is None:
+            raise HTTPException(status_code=401, detail="invalid api key")
+        ip = client_ip(request)
+        if not bind_or_reject(api_key, ip, datetime.now(timezone.utc)):
+            record(db, actor=f"apikey:{api_key.id}", action="apikey.ip_rejected",
+                   target=f"apikey:{api_key.id}", ip=ip)
+            db.commit()
+            raise HTTPException(status_code=403, detail="api key ip mismatch")
+        db.commit()
+        user = db.get(User, api_key.owner_id)
+        if user is None or user.must_change_credentials:
+            raise HTTPException(status_code=401, detail="invalid api key owner")
+        perm = ensure_permissions(db, user.id, master=(user.role == "master"))
+        if not has_permission(perm, "can_upload"):
+            raise HTTPException(status_code=403, detail="permission denied")
+        return user
+    else:
+        state = get_state(request)
+        cookie = request.cookies.get(COOKIE_NAME)
+        row = state.session_manager.resolve(db, cookie)
+        if row is None:
+            raise HTTPException(status_code=401, detail="not authenticated")
+        csrf = request.headers.get("x-csrf-token", "")
+        if not csrf or csrf != row.csrf_token:
+            raise HTTPException(status_code=403, detail="invalid or missing CSRF token")
+        user = db.get(User, row.user_id)
+        if user is None or user.must_change_credentials:
+            raise HTTPException(status_code=401, detail="not authenticated")
+        perm = ensure_permissions(db, user.id, master=(user.role == "master"))
+        if not has_permission(perm, "can_upload"):
+            raise HTTPException(status_code=403, detail="permission denied")
+        return user
 
 
 def require_api_key(request: Request, db: Session = Depends(get_db)):
