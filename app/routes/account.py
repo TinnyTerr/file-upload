@@ -45,5 +45,19 @@ def change_credentials(body: ChangeCredsBody, request: Request,
 
 
 @router.get("/me")
-def me(user: User = Depends(require_active_user)) -> dict:
-    return {"id": user.id, "username": user.username, "role": user.role}
+def me(user: User = Depends(require_active_user), db: Session = Depends(get_db)) -> dict:
+    from app.permissions.policy import ensure_permissions
+    from app.models.file import FileObject
+    from sqlalchemy import func
+    perm = ensure_permissions(db, user.id, master=(user.role == "master"))
+    used = db.query(func.sum(FileObject.stored_size_bytes)).filter_by(owner_id=user.id).scalar() or 0
+    db.commit()
+    return {
+        "id": user.id,
+        "username": user.username,
+        "role": user.role,
+        "quota_bytes": perm.quota_bytes,
+        "used_bytes": used,
+        "can_use_api_keys": perm.can_use_api_keys,
+        "can_upload_client_encrypted": perm.can_upload_client_encrypted,
+    }

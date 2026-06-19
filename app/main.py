@@ -24,6 +24,7 @@ from app.routes.files import router as files_router
 from app.routes.public import router as public_router
 from app.routes.users import router as users_router
 from app.routes.audit_view import router as audit_router
+from app.routes.keys import router as keys_router
 from app.storage.paths import storage_root
 
 _STATIC = Path(__file__).parent / "static"
@@ -100,6 +101,7 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
     app.include_router(public_router)
     app.include_router(users_router)
     app.include_router(audit_router)
+    app.include_router(keys_router)
 
     app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
 
