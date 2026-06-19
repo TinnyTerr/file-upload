@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64 as _b64
 import re as _re
+import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -104,43 +105,29 @@ def download_raw(slug: str, request: Request, db: Session = Depends(get_db)):
     needs_decompress = f.compressed or f.archived
 
     if needs_decrypt:
-        ek_param = request.query_params.get("ek")
-        state = request.app.state.app_state
-        if ek_param:
-            try:
-                padding = 4 - len(ek_param) % 4
-                key = _b64.urlsafe_b64decode(ek_param + "=" * (padding % 4))
-            except Exception:
-                raise HTTPException(400, detail="invalid ek parameter")
-        elif f.enc_key_blob:
-            from app.security.secretbox import open_box
-            from app.config import get_master_key
-            from app.deps import require_master
-            try:
-                require_master(db=db)
-            except Exception:
-                raise HTTPException(403, detail="ek parameter required")
-            key = open_box(get_master_key(state.settings), f.enc_key_blob)
-        else:
-            raise HTTPException(400, detail="ek parameter required")
+        from app.crypto.aead import decrypt_stream as _decrypt_stream
 
-        from app.crypto.aead import decrypt_stream
-
-        def _encrypted_stream():
-            for chunk in decrypt_stream(key, full_path):
-                if needs_decompress:
-                    pass  # handled below
-                yield chunk
+        ek = request.query_params.get("ek")
+        if not ek:
+            raise HTTPException(status_code=403, detail="encryption key required")
+        try:
+            per_file_key = _b64.urlsafe_b64decode(ek + "==")
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid encryption key")
 
         if needs_decompress:
+            if f.archived and not f.auto_unarchive_on_download:
+                raise HTTPException(503, detail="file is archived; contact admin to unarchive")
             from app.storage.compress import decompress_stream as _dec
-            import tempfile, os
 
             def _decrypt_decompress_stream():
-                tmp = Path(tempfile.mktemp(suffix=".dec"))
+                fd, tmp_path = tempfile.mkstemp(suffix=".dec")
+                tmp = Path(tmp_path)
                 try:
+                    import os
+                    os.close(fd)
                     with open(tmp, "wb") as fh:
-                        for chunk in decrypt_stream(key, full_path):
+                        for chunk in _decrypt_stream(per_file_key, full_path):
                             fh.write(chunk)
                     yield from _dec(tmp, f.size_bytes)
                 finally:
@@ -148,13 +135,13 @@ def download_raw(slug: str, request: Request, db: Session = Depends(get_db)):
 
             return StreamingResponse(
                 _decrypt_decompress_stream(),
-                media_type=f.content_type,
+                media_type=f.content_type or "application/octet-stream",
                 headers={**base_headers, "Content-Length": str(f.size_bytes)},
             )
 
         return StreamingResponse(
-            decrypt_stream(key, full_path),
-            media_type=f.content_type,
+            _decrypt_stream(per_file_key, full_path),
+            media_type=f.content_type or "application/octet-stream",
             headers={**base_headers, "Content-Length": str(f.size_bytes)},
         )
 
@@ -175,7 +162,10 @@ def download_raw(slug: str, request: Request, db: Session = Depends(get_db)):
     if range_header:
         parsed = _parse_range(range_header, file_size)
         if parsed is None:
-            return Response(status_code=416, headers={"Content-Range": f"bytes */{file_size}"})
+            return Response(
+                status_code=416,
+                headers={**_SECURITY, "Accept-Ranges": "bytes", "Content-Range": f"bytes */{file_size}"},
+            )
         start, end = parsed
         length = end - start + 1
 
