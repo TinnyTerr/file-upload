@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin — fileupload</title>
+  <link rel="stylesheet" href="/static/css/theme.css">
+  <style>
+    .user-section { margin-bottom: 24px; }
+    .user-section-header {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 0; border-bottom: 1px solid var(--border); margin-bottom: 8px;
+    }
+    .user-section-name { font-weight: 600; font-size: 14px; }
+    .file-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 14px; cursor: pointer;
+      border-bottom: 1px solid var(--border);
+      transition: background 0.12s;
+    }
+    .file-row:last-of-type { border-bottom: none; }
+    .file-row:hover { background: var(--surface-2); }
+    .file-row-name { flex: 1; font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-row-size { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+    .hint { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+    .file-expand-btn {
+      background: none; border: none; color: var(--text-muted); cursor: pointer;
+      font-size: 12px; padding: 2px 6px; border-radius: 4px; transition: color 0.15s;
+    }
+    .file-expand-btn:hover { color: var(--text); }
+    .file-expand-body { display: none; }
+    .file-expand-body.open { display: block; }
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <a href="/files" class="nav-logo">fileupload</a>
+    <div class="nav-spacer"></div>
+    <span class="nav-user" id="nav-user"></span>
+    <a href="/files" class="nav-link" data-page="files">Files</a>
+    <button class="nav-link" id="nav-logout">Sign out</button>
+  </nav>
+
+  <div class="container">
+    <div class="flex items-center mb-16" style="gap:12px">
+      <h1 style="margin:0">Admin</h1>
+      <div id="chain-badge" class="badge hidden"></div>
+    </div>
+
+    <!-- Disk stats -->
+    <div class="stat-cards" id="disk-stats" style="display:none">
+      <div class="stat-card">
+        <div class="stat-card-lbl">Total files</div>
+        <div class="stat-card-val" id="stat-files">–</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card-lbl">Storage used</div>
+        <div class="stat-card-val" id="stat-storage">–</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card-lbl">Total users</div>
+        <div class="stat-card-val" id="stat-users">–</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-card-lbl">Active links</div>
+        <div class="stat-card-val" id="stat-links">–</div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" data-tab="users">Users</div>
+      <div class="tab" data-tab="files">Files</div>
+      <div class="tab" data-tab="audit">Audit log</div>
+      <div class="tab" data-tab="keys">API Keys</div>
+    </div>
+
+    <!-- Users tab -->
+    <div class="tab-panel active" id="tab-users">
+      <div class="flex items-center mb-16">
+        <div class="flex-1"></div>
+        <button class="btn btn-primary btn-sm" id="create-user-btn">+ New user</button>
+      </div>
+      <div class="card" style="padding:0;overflow:hidden">
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>Username</th><th>Role</th><th>Upload</th><th>Quota</th><th>Storage used</th><th>Created</th><th></th>
+            </tr></thead>
+            <tbody id="users-tbody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Files tab -->
+    <div class="tab-panel" id="tab-files">
+      <div id="files-by-user">
+        <div class="empty"><div class="empty-icon">⟳</div>Loading…</div>
+      </div>
+    </div>
+
+    <!-- Audit tab -->
+    <div class="tab-panel" id="tab-audit">
+      <div class="card" style="padding:0;overflow:hidden">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>#</th><th>Actor</th><th>Action</th><th>Target</th><th>IP</th><th>Time</th></tr></thead>
+            <tbody id="audit-tbody"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="flex mt-16 gap-8">
+        <button class="btn btn-ghost btn-sm" id="audit-prev" disabled>← Prev</button>
+        <button class="btn btn-ghost btn-sm" id="audit-next">Next →</button>
+        <span class="text-sm text-muted" id="audit-page" style="align-self:center"></span>
+      </div>
+    </div>
+
+    <!-- API Keys tab -->
+    <div class="tab-panel" id="tab-keys">
+      <div class="flex items-center mb-16" style="gap:12px">
+        <div class="section-label" style="margin:0;flex:1">API Keys</div>
+        <button class="btn btn-ghost btn-sm" id="create-key-btn">+ New key</button>
+      </div>
+      <div class="text-xs text-muted mb-12">
+        Keys bind to the first IP that uses them.
+        Use <code style="font-family:var(--font-mono)">Authorization: Bearer &lt;key&gt;</code>.
+        <a href="/api-docs" style="color:var(--accent);text-decoration:none">API docs →</a>
+      </div>
+      <div id="keys-list">
+        <div class="empty"><div class="empty-icon">⟳</div>Loading…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create user modal -->
+  <div class="modal-overlay hidden" id="create-modal">
+    <div class="modal">
+      <div class="modal-title">Create user</div>
+      <div id="create-alert" class="alert alert-error hidden"></div>
+      <div class="form-group">
+        <label for="cu-username">Username</label>
+        <input type="text" id="cu-username" autocapitalize="off" spellcheck="false">
+      </div>
+      <div class="form-group">
+        <label for="cu-password">Password <span class="text-muted">(min 12 chars)</span></label>
+        <input type="password" id="cu-password">
+      </div>
+      <div class="form-group">
+        <label for="cu-role">Role</label>
+        <select id="cu-role"><option value="user">User</option><option value="master">Master</option></select>
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="cu-can-upload" checked>
+        <label for="cu-can-upload">Can upload files</label>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" id="create-cancel">Cancel</button>
+        <button class="btn btn-primary" id="create-confirm">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit permissions modal -->
+  <div class="modal-overlay hidden" id="perm-modal">
+    <div class="modal">
+      <div class="modal-title">Permissions — <span id="perm-username"></span></div>
+      <div id="perm-alert" class="alert alert-error hidden"></div>
+
+      <div class="checkbox-group">
+        <input type="checkbox" id="perm-can-upload">
+        <label for="perm-can-upload">Can upload</label>
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="perm-can-delete">
+        <label for="perm-can-delete">Can delete own files</label>
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="perm-can-regen">
+        <label for="perm-can-regen">Can regenerate links</label>
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="perm-can-api">
+        <label for="perm-can-api">Can use API keys</label>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="form-group">
+        <label for="perm-quota">
+          Storage quota
+          <i class="help-icon" data-tip="Maximum total storage for this user. Accepts: 100 MB · 10 GB · 1 TB">?</i>
+        </label>
+        <input type="text" id="perm-quota" placeholder="e.g. 100 GB, 500 MB">
+        <div class="hint">Accepts: B · KB · MB · GB · TB</div>
+      </div>
+      <div class="form-group">
+        <label for="perm-max-file">
+          Max file size
+          <i class="help-icon" data-tip="Maximum size for a single upload. Accepts: 10 GB · 500 MB">?</i>
+        </label>
+        <input type="text" id="perm-max-file" placeholder="e.g. 10 GB">
+        <div class="hint">Accepts: B · KB · MB · GB · TB</div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-ghost" id="perm-cancel">Cancel</button>
+        <button class="btn btn-primary" id="perm-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit link modal -->
+  <div class="modal-overlay hidden" id="link-edit-modal">
+    <div class="modal">
+      <div class="modal-title">Edit link</div>
+      <div id="link-edit-alert" class="alert alert-error hidden"></div>
+      <div class="form-group">
+        <label>
+          Max downloads
+          <i class="help-icon" data-tip="Total allowed downloads. Clear to make unlimited.">?</i>
+        </label>
+        <input type="number" id="le-max-uses" min="1" placeholder="Unlimited">
+      </div>
+      <div class="form-group">
+        <label>
+          Expiry
+          <i class="help-icon" data-tip="Set a new expiry duration from now: 7d, 24h, 30m. Clear to remove expiry.">?</i>
+        </label>
+        <input type="text" id="le-expires" placeholder="e.g. 7d, 24h — blank = no expiry">
+      </div>
+      <div class="checkbox-group" style="margin-top:4px">
+        <input type="checkbox" id="le-active">
+        <label for="le-active">Active (uncheck to deactivate)</label>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" id="le-cancel">Cancel</button>
+        <button class="btn btn-primary" id="le-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- New API key modal -->
+  <div class="modal-overlay hidden" id="new-key-modal">
+    <div class="modal">
+      <div class="modal-title">New API Key</div>
+      <div id="new-key-body"></div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" id="new-key-close">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reset key IP modal -->
+  <div class="modal-overlay hidden" id="reset-ip-modal">
+    <div class="modal">
+      <div class="modal-title">Reset key IP binding</div>
+      <div class="form-group">
+        <label>Confirm your password</label>
+        <input type="password" id="reset-ip-pw" placeholder="Password">
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" id="reset-ip-cancel">Cancel</button>
+        <button class="btn btn-primary" id="reset-ip-confirm">Reset IP</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/static/js/admin.js"></script>
+</body>
+</html>
