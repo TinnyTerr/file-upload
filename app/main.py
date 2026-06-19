@@ -95,6 +95,10 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
     def admin_page():
         return FileResponse(str(_STATIC / "admin.html"))
 
+    @app.get("/api-docs")
+    def api_docs_page():
+        return FileResponse(str(_STATIC / "api-docs.html"))
+
     app.include_router(auth_router)
     app.include_router(account_router)
     app.include_router(files_router)

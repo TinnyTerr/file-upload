@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>API Docs — fileupload</title>
+  <link rel="stylesheet" href="/static/css/theme.css">
+  <style>
+    .api-block {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      color: var(--text-muted);
+      white-space: pre-wrap;
+      word-break: break-all;
+      margin: 10px 0 18px;
+    }
+    .method { font-weight: 700; color: var(--accent); }
+    .endpoint { color: var(--text); }
+    .note { font-size: 12px; color: var(--text-muted); margin-bottom: 6px; }
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <a href="/" class="nav-logo">fileupload</a>
+    <div class="nav-spacer"></div>
+    <a href="/files" class="nav-link">Files</a>
+  </nav>
+
+  <div class="container" style="max-width:800px">
+    <div class="section-label mt-24">API Reference</div>
+    <p class="text-sm text-muted mb-24">
+      The API accepts Bearer token authentication. Get a key from the Files page → API Keys section.
+      All security management (key creation, deletion, IP reset) must be done in-app.
+    </p>
+
+    <div class="card mb-16">
+      <div class="text-sm" style="font-weight:600;margin-bottom:8px">Authentication</div>
+      <div class="note">Include your API key on every request:</div>
+      <div class="api-block">curl -H "Authorization: Bearer &lt;your-api-key&gt;" ...</div>
+      <div class="note" style="margin-top:8px">
+        Keys bind to the first IP that uses them. Use <strong>Reset IP</strong> in-app if your IP changes.
+      </div>
+    </div>
+
+    <div class="card mb-16">
+      <div class="text-sm" style="font-weight:600;margin-bottom:8px">
+        <span class="method">POST</span> <span class="endpoint">/files/upload</span> — Upload a file
+      </div>
+      <div class="note">Upload a file and receive a download link. Returns JSON with the link URL.</div>
+      <div class="api-block">curl -X POST https://&lt;host&gt;/files/upload \
+  -H "Authorization: Bearer &lt;key&gt;" \
+  -F "file=@/path/to/file.txt" \
+  -F "original_filename=file.txt"</div>
+      <div class="note">Optional form fields:</div>
+      <div class="api-block">max_uses=10            # limit download count
+expires_in_seconds=86400  # link expires in 24h
+encryption_mode=server    # encrypt at rest (adds ?ek= to URL)
+compress=true             # zstd compress before storing
+is_permanent=false        # mark as temporary
+temp_days=7               # delete after 7 days
+delete_if_idle_days=30    # delete if no downloads in 30 days</div>
+      <div class="note">Response:</div>
+      <div class="api-block">{
+  "slug": "abc123",
+  "url": "https://&lt;host&gt;/file/abc123",
+  "raw_url": "https://&lt;host&gt;/file/abc123/raw",
+  "encryption_mode": "none",
+  "file_key": null
+}</div>
+    </div>
+
+    <div class="card mb-16">
+      <div class="text-sm" style="font-weight:600;margin-bottom:8px">
+        <span class="method">GET</span> <span class="endpoint">/file/{slug}/raw</span> — Download raw bytes
+      </div>
+      <div class="note">Download the file directly. No authentication required (link is the credential).</div>
+      <div class="api-block">curl -L -o output.txt "https://&lt;host&gt;/file/abc123/raw"</div>
+      <div class="note">Server-side encrypted files require the <code>?ek=</code> key from the upload response:</div>
+      <div class="api-block">curl -L -o output.txt "https://&lt;host&gt;/file/abc123/raw?ek=&lt;key&gt;"</div>
+      <div class="note">Range downloads:</div>
+      <div class="api-block">curl -L -r 0-1023 -o chunk.bin "https://&lt;host&gt;/file/abc123/raw"</div>
+    </div>
+
+    <div class="card mb-16">
+      <div class="text-sm" style="font-weight:600;margin-bottom:8px">
+        <span class="method">GET</span> <span class="endpoint">/file/{slug}/info</span> — File metadata
+      </div>
+      <div class="api-block">curl "https://&lt;host&gt;/file/abc123/info"</div>
+      <div class="note">Returns filename, size, content_type, encryption_mode, use_count, expires_at.</div>
+    </div>
+
+    <div class="card">
+      <div class="text-sm" style="font-weight:600;margin-bottom:8px">Client-side encrypted files</div>
+      <div class="note">
+        The key for client-side encrypted files is in the <strong>URL fragment</strong> (#ek=…) and is never sent to the server.
+        The server streams raw ciphertext. Decrypt locally with openssl:
+      </div>
+      <div class="api-block"># PowerShell
+$raw = Invoke-RestMethod "https://&lt;host&gt;/file/abc123/raw" -OutFile enc.bin
+# (extract KEY from #ek= fragment of the share URL)
+$key = [System.Convert]::FromBase64String($KEY.Replace('-','+').Replace('_','/') + "==")
+# Decrypt with openssl (after converting FUPL format — use the in-app download page)</div>
+      <div class="note mt-8">For client-side encrypted files, use the in-app download page for browser-based decryption.</div>
+    </div>
+  </div>
+</body>
+</html>
