@@ -11,6 +11,8 @@ dependencies = [
     "pydantic-settings>=2.4",
     "python-multipart>=0.0.9",
     "cryptography>=43",
+    "zstandard>=0.22",
+    "apscheduler>=3.10",
 ]
 
 [project.optional-dependencies]

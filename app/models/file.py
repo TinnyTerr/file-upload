@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, LargeBinary, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base, UTCDateTime
@@ -25,9 +25,11 @@ class FileObject(Base):
         String(255), nullable=False, default="application/octet-stream"
     )
     encryption_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="none")
+    enc_key_blob: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     compressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     archive_codec: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    archive_after_idle_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     lifecycle_state: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     is_permanent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
