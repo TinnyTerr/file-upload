@@ -365,8 +365,9 @@ def edit_link(
     if file_obj is None or (user.role != "master" and file_obj.owner_id != user.id):
         raise HTTPException(403, detail="not your file")
 
-    # max_uses: always update when field is present in request (None clears the limit)
-    link.max_uses = body.max_uses
+    # max_uses: only update when explicitly provided
+    if body.max_uses is not None:
+        link.max_uses = body.max_uses
     if body.expires_in_seconds is not None:
         link.expires_at = datetime.now(timezone.utc) + timedelta(seconds=body.expires_in_seconds)
     if body.active is not None:
