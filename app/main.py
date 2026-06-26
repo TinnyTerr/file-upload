@@ -4,16 +4,39 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+import rjsmin
+import rcssmin
 
 
 class _RevalidatingStatic(StaticFiles):
-    """Serve static assets with `Cache-Control: no-cache` so browsers always
-    revalidate (cheap 304s via ETag) instead of silently running a stale cached
-    download.js/aead-worker.js after we ship a fix."""
+    """Serve static assets minified and with `Cache-Control: no-cache` so
+    browsers always revalidate instead of running stale JS/CSS after a deploy."""
 
-    async def get_response(self, path, scope):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._minified: dict[str, bytes] = {}
+        for d in self.all_directories:
+            base = Path(d)
+            for f in base.rglob("*.js"):
+                if not f.name.endswith(".min.js"):
+                    key = f.relative_to(base).as_posix()
+                    self._minified[key] = rjsmin.jsmin(f.read_text("utf-8")).encode()
+            for f in base.rglob("*.css"):
+                if not f.name.endswith(".min.css"):
+                    key = f.relative_to(base).as_posix()
+                    self._minified[key] = rcssmin.cssmin(f.read_text("utf-8")).encode()
+
+    async def get_response(self, path: str, scope):
+        key = path.lstrip("/")
+        if key in self._minified:
+            ctype = "application/javascript" if key.endswith(".js") else "text/css"
+            return Response(
+                content=self._minified[key],
+                media_type=ctype,
+                headers={"Cache-Control": "no-cache"},
+            )
         response = await super().get_response(path, scope)
         response.headers["Cache-Control"] = "no-cache"
         return response

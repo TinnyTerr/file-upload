@@ -652,6 +652,14 @@ function showSuccessModal(data, encMode, clientKeyBytes) {
   };
 }
 
+// Files at/above this size are uploaded in pieces. Cloudflare rejects a single
+// request body over ~100 MB with a 413 before it ever reaches the origin, so we
+// slice large files into sub-cap chunks and reassemble them server-side.
+const CHUNK_THRESHOLD = 80 * 1024 * 1024;   // 80 MiB
+const CHUNK_CONCURRENCY = 4;                // chunks in flight at once (hides RTT)
+const CHUNK_RETRIES = 4;                    // per-chunk attempts before giving up
+const CHUNK_RESUME_KEY = "fu.chunked.v1";   // localStorage map of resumable sessions
+
 async function doUpload(item, { maxUsesRaw, expiresInSec, randomize, encMode = "none", compress = false, tempDays = "", archDays = "", delDays = "", directoryId = null, sharedClientKey = null }) {
   item.status = "uploading";
   item.progress = 0;
@@ -678,26 +686,64 @@ async function doUpload(item, { maxUsesRaw, expiresInSec, randomize, encMode = "
     }
   }
 
-  const fd = new FormData();
-  fd.append("file", uploadFile, filename);
-  fd.append("original_filename", filename);
-  fd.append("randomize_filename", directoryId == null && randomize ? "true" : "false");
-  fd.append("encryption_mode", encMode);
-  fd.append("compress", compress ? "true" : "false");
-  if (directoryId != null) fd.append("directory_id", String(directoryId));
-  if (maxUsesRaw)   fd.append("max_uses", maxUsesRaw);
-  if (expiresInSec) fd.append("expires_in_seconds", String(expiresInSec));
-  if (tempDays) {
-    fd.append("is_permanent", "false");
-    fd.append("temp_days", tempDays);
-  } else {
-    fd.append("is_permanent", "true");
+  // One field set shared by the single-shot and chunked paths.
+  const fields = {
+    original_filename: filename,
+    randomize_filename: directoryId == null && randomize,
+    encryption_mode: encMode,
+    compress: !!compress,
+    is_permanent: tempDays ? false : true,
+  };
+  if (directoryId != null) fields.directory_id = Number(directoryId);
+  if (maxUsesRaw)   fields.max_uses = Number(maxUsesRaw);
+  if (expiresInSec) fields.expires_in_seconds = Number(expiresInSec);
+  if (tempDays)     fields.temp_days = Number(tempDays);
+  if (archDays)     fields.archive_after_idle_days = Number(archDays);
+  if (delDays)      fields.delete_if_idle_days = Number(delDays);
+
+  let result = null;
+  try {
+    result = uploadFile.size > CHUNK_THRESHOLD
+      ? await chunkedUpload(uploadFile, fields, item)
+      : await singleUpload(uploadFile, fields, item);
+  } catch (err) {
+    item.status = "error";
+    item.error = (err && err.message) ? err.message : "Upload failed.";
+    refreshQueueItem(item);
+    return;
   }
-  if (archDays) fd.append("archive_after_idle_days", archDays);
-  if (delDays)  fd.append("delete_if_idle_days", delDays);
+
+  item.status = "done";
+  item.result = result;
+  if (result) {
+    // Persist the key-bearing share URL so the queue row copies the right link
+    // even after the success modal is dismissed (client keys live only here).
+    result._share_full = fullShareUrl(result, encMode, clientKeyBytes);
+    // Directory members are presented together via the folder modal, not one
+    // success popup each.
+    if (directoryId == null) showSuccessModal(result, encMode, clientKeyBytes);
+  }
+  refreshQueueItem(item);
+}
+
+// Whole-file upload in a single multipart POST (small files).
+function singleUpload(uploadFile, fields, item) {
+  const fd = new FormData();
+  fd.append("file", uploadFile, fields.original_filename);
+  fd.append("original_filename", fields.original_filename);
+  fd.append("randomize_filename", fields.randomize_filename ? "true" : "false");
+  fd.append("encryption_mode", fields.encryption_mode);
+  fd.append("compress", fields.compress ? "true" : "false");
+  fd.append("is_permanent", fields.is_permanent ? "true" : "false");
+  if (fields.directory_id != null)         fd.append("directory_id", String(fields.directory_id));
+  if (fields.max_uses)                     fd.append("max_uses", String(fields.max_uses));
+  if (fields.expires_in_seconds)           fd.append("expires_in_seconds", String(fields.expires_in_seconds));
+  if (fields.temp_days)                    fd.append("temp_days", String(fields.temp_days));
+  if (fields.archive_after_idle_days)      fd.append("archive_after_idle_days", String(fields.archive_after_idle_days));
+  if (fields.delete_if_idle_days)          fd.append("delete_if_idle_days", String(fields.delete_if_idle_days));
 
   const token = csrf.get();
-  const xhr   = await new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
     x.open("POST", "/files/upload");
     if (token) x.setRequestHeader("X-CSRF-Token", token);
@@ -707,29 +753,139 @@ async function doUpload(item, { maxUsesRaw, expiresInSec, randomize, encMode = "
         refreshQueueItem(item);
       }
     });
-    x.addEventListener("load",  () => resolve(x));
-    x.addEventListener("error", () => resolve(x));
+    x.addEventListener("load", () => {
+      if (x.status >= 400) {
+        let detail = "Upload failed.";
+        try { detail = JSON.parse(x.responseText).detail || detail; } catch {}
+        return reject(new Error(detail));
+      }
+      try { resolve(JSON.parse(x.responseText)); } catch { resolve(null); }
+    });
+    x.addEventListener("error", () => reject(new Error("Network error.")));
     x.send(fd);
   });
+}
 
-  if (xhr.status === 0) {
-    item.status = "error"; item.error = "Network error.";
-  } else if (xhr.status >= 400) {
-    item.status = "error";
-    try { item.error = JSON.parse(xhr.responseText).detail || "Upload failed."; } catch { item.error = "Upload failed."; }
-  } else {
-    item.status = "done";
-    try { item.result = JSON.parse(xhr.responseText); } catch {}
-    if (item.result) {
-      // Persist the key-bearing share URL so the queue row copies the right link
-      // even after the success modal is dismissed (client keys live only here).
-      item.result._share_full = fullShareUrl(item.result, encMode, clientKeyBytes);
-      // Directory members are presented together via the folder modal, not one
-      // success popup each.
-      if (directoryId == null) showSuccessModal(item.result, encMode, clientKeyBytes);
+async function _uploadErr(res) {
+  try { const j = await res.json(); return new Error(j.detail || ("Upload failed (" + res.status + ")")); }
+  catch { return new Error("Upload failed (" + res.status + ")"); }
+}
+
+// ── Resumable session bookkeeping (localStorage) ────────────────────────────
+// A file is keyed by name+size+lastModified so re-selecting the *same* file after
+// a drop or page reload resumes its server-side session instead of restarting.
+// NOTE: only safe for non-client-encrypted uploads — client mode mints a fresh
+// random key per attempt, so its ciphertext (and thus chunk bytes) differ each run.
+function _resumeKey(item, fields) {
+  const f = item.file || {};
+  return [fields.original_filename, f.size || 0, f.lastModified || 0, fields.encryption_mode, fields.directory_id ?? ""].join("|");
+}
+function _resumeStore() {
+  try { return JSON.parse(localStorage.getItem(CHUNK_RESUME_KEY)) || {}; } catch { return {}; }
+}
+function _resumeSave(key, session) {
+  try { const m = _resumeStore(); m[key] = session; localStorage.setItem(CHUNK_RESUME_KEY, JSON.stringify(m)); } catch {}
+}
+function _resumeDrop(key) {
+  try { const m = _resumeStore(); delete m[key]; localStorage.setItem(CHUNK_RESUME_KEY, JSON.stringify(m)); } catch {}
+}
+
+const _csrfHeader = () => { const t = csrf.get(); return t ? { "X-CSRF-Token": t } : {}; };
+
+// Run `worker(item)` over `items` with bounded concurrency; rejects on first failure.
+async function _runPool(items, concurrency, worker) {
+  let cursor = 0;
+  const runner = async () => {
+    while (cursor < items.length) {
+      const it = items[cursor++];
+      await worker(it);
     }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, runner));
+}
+
+// Chunked upload: init (or resume) → upload missing slices in parallel → finalize.
+async function chunkedUpload(blob, fields, item) {
+  const jsonHeaders = { "Content-Type": "application/json", ..._csrfHeader() };
+  const canResume = fields.encryption_mode !== "client";
+  const resumeKey = _resumeKey(item, fields);
+
+  let upload_id = null, chunk_size = 0, num_chunks = 0;
+  let received = new Set();
+
+  // Try to resume an existing session for this exact file.
+  const saved = canResume ? _resumeStore()[resumeKey] : null;
+  if (saved && saved.upload_id && saved.total === blob.size) {
+    try {
+      const st = await fetch("/files/upload/status?upload_id=" + encodeURIComponent(saved.upload_id), { headers: _csrfHeader() });
+      if (st.ok) {
+        const s = await st.json();
+        upload_id = saved.upload_id;
+        chunk_size = s.chunk_size;
+        num_chunks = s.num_chunks;
+        received = new Set(s.received);
+      }
+    } catch {}
+    if (!upload_id) _resumeDrop(resumeKey);  // expired/gone server-side
   }
-  refreshQueueItem(item);
+
+  // No resumable session → start fresh.
+  if (!upload_id) {
+    const initRes = await fetch("/files/upload/init", {
+      method: "POST", headers: jsonHeaders,
+      body: JSON.stringify({ ...fields, total_size: blob.size, content_type: blob.type || "application/octet-stream" }),
+    });
+    if (!initRes.ok) throw await _uploadErr(initRes);
+    const info = await initRes.json();
+    upload_id = info.upload_id;
+    chunk_size = info.chunk_size;
+    num_chunks = info.num_chunks;
+    received = new Set(info.received || []);
+    if (canResume) _resumeSave(resumeKey, { upload_id, total: blob.size, chunk_size });
+  }
+
+  // Progress is the sum of completed-chunk bytes (chunks finish out of order).
+  const chunkLen = (i) => Math.min(chunk_size, blob.size - i * chunk_size);
+  let doneBytes = 0;
+  received.forEach(i => { doneBytes += chunkLen(i); });
+  const bumpProgress = () => { item.progress = Math.min(100, Math.round((doneBytes / blob.size) * 100)); refreshQueueItem(item); };
+  bumpProgress();
+
+  const pending = [];
+  for (let i = 0; i < num_chunks; i++) if (!received.has(i)) pending.push(i);
+
+  // Upload each missing chunk, retrying transient failures with backoff. A 4xx
+  // other than 429 is treated as fatal (no point retrying a rejected chunk).
+  const sendChunk = async (i) => {
+    const slice = blob.slice(i * chunk_size, i * chunk_size + chunkLen(i));
+    let lastErr = null;
+    for (let attempt = 0; attempt < CHUNK_RETRIES; attempt++) {
+      try {
+        const res = await fetch(
+          "/files/upload/chunk?upload_id=" + encodeURIComponent(upload_id) + "&index=" + i,
+          { method: "POST", headers: { "Content-Type": "application/octet-stream", ..._csrfHeader() }, body: slice },
+        );
+        if (res.ok) { doneBytes += chunkLen(i); bumpProgress(); return; }
+        if (res.status >= 400 && res.status < 500 && res.status !== 429) throw await _uploadErr(res);
+        lastErr = await _uploadErr(res);
+      } catch (e) {
+        lastErr = e;  // network error → retry
+      }
+      await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
+    }
+    throw lastErr || new Error("Chunk " + i + " failed.");
+  };
+
+  // On failure we deliberately keep the server session + localStorage entry so the
+  // user can resume later; only a successful finalize (or explicit abort) clears it.
+  await _runPool(pending, CHUNK_CONCURRENCY, sendChunk);
+
+  const finRes = await fetch("/files/upload/finalize", {
+    method: "POST", headers: jsonHeaders, body: JSON.stringify({ upload_id }),
+  });
+  if (!finRes.ok) throw await _uploadErr(finRes);
+  if (canResume) _resumeDrop(resumeKey);
+  return await finRes.json();
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────

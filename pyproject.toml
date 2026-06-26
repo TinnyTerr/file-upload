@@ -13,6 +13,8 @@ dependencies = [
     "cryptography>=43",
     "zstandard>=0.22",
     "apscheduler>=3.10",
+    "rjsmin>=1.2",
+    "rcssmin>=1.1",
 ]
 
 [project.optional-dependencies]

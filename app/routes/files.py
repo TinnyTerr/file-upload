@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import base64
+import json
 import os
 import secrets as _secrets
+import shutil
+import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -33,6 +38,14 @@ router = APIRouter(tags=["files"])
 _CHUNK = 256 * 1024  # 256 KiB read buffer
 _REQUEST_OVERHEAD_ALLOWANCE = 1024 * 1024
 
+# Chunked uploads exist to dodge Cloudflare's ~100 MB edge body cap (it returns a
+# 413 before the request ever reaches us). The browser slices the file into pieces
+# well under that cap; we reassemble them on disk and run the normal pipeline.
+_CHUNK_UPLOAD_SIZE = 16 * 1024 * 1024  # 16 MiB per chunk — comfortably under CF's cap
+_CHUNK_SESSION_TTL = 12 * 3600  # seconds an in-progress chunked upload may live
+# Sealed-token AAD so a token minted for chunked upload can't be repurposed.
+_CHUNK_TOKEN_AAD = b"chunked-upload-v1"
+
 
 def _used_bytes(db: Session, user_id: int) -> int:
     result = db.query(func.sum(FileObject.stored_size_bytes)).filter_by(owner_id=user_id).scalar()
@@ -52,29 +65,20 @@ def _randomized_filename(original_filename: str) -> str:
     return f"{_secrets.token_hex(16)}{ext.lower()}"
 
 
-@router.post("/files/upload")
-async def upload_file(
-    request: Request,
-    file: UploadFile,
-    original_filename: str = Form(..., max_length=1024),
-    max_uses: Optional[int] = Form(None, ge=1),
-    expires_in_seconds: Optional[int] = Form(None, ge=1),
-    encryption_mode: str = Form("none"),
-    compress: bool = Form(False),
-    is_permanent: bool = Form(True),
-    temp_days: Optional[int] = Form(None, ge=1),
-    delete_if_idle_days: Optional[int] = Form(None, ge=1),
-    archive_after_idle_days: Optional[int] = Form(None, ge=1),
-    auto_unarchive_on_download: bool = Form(True),
-    randomize_filename: bool = Form(False),
-    directory_id: Optional[int] = Form(None, ge=1),
-    user: User = Depends(get_upload_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    from app.crypto.aead import encrypt_file as _encrypt_file
-    from app.storage.compress import compress_file as _compress_file, should_compress
-    from app.security.secretbox import seal, open_box
-    from app.config import get_master_key
+def _prepare_upload(
+    db: Session,
+    user: User,
+    *,
+    encryption_mode: str,
+    compress: bool,
+    is_permanent: bool,
+    temp_days: Optional[int],
+    randomize_filename: bool,
+    directory_id: Optional[int],
+):
+    """Validate upload metadata + resolve the target directory, applying bundle
+    overrides. Shared by the single-shot and chunked upload entry points. Returns
+    the (possibly overridden) params plus the resolved directory and permissions."""
     from app.models.directory import Directory
 
     if encryption_mode not in ("none", "server", "client"):
@@ -105,46 +109,62 @@ async def upload_file(
     if encryption_mode == "client" and not perm.can_upload_client_encrypted:
         raise HTTPException(403, detail="client-side encryption not permitted")
 
-    content_length = request.headers.get("content-length")
-    if content_length:
-        declared = int(content_length)
-        if declared > perm.max_file_bytes + _REQUEST_OVERHEAD_ALLOWANCE:
-            raise HTTPException(413, detail="file exceeds max file size")
-        if _used_bytes(db, user.id) + declared > perm.quota_bytes + _REQUEST_OVERHEAD_ALLOWANCE:
-            raise HTTPException(413, detail="upload would exceed your quota")
+    return encryption_mode, compress, is_permanent, temp_days, randomize_filename, directory, perm
 
-    rand = _secrets.token_hex(32)
-    rel_path = f"{rand[:2]}/{rand[2:4]}/{rand[4:]}"
+
+def _precheck_declared_size(db: Session, user: User, perm, declared: int) -> None:
+    """Reject obviously-too-big uploads up front, before any bytes are stored."""
+    if declared > perm.max_file_bytes + _REQUEST_OVERHEAD_ALLOWANCE:
+        raise HTTPException(413, detail="file exceeds max file size")
+    if _used_bytes(db, user.id) + declared > perm.quota_bytes + _REQUEST_OVERHEAD_ALLOWANCE:
+        raise HTTPException(413, detail="upload would exceed your quota")
+
+
+def _finalize_stored_file(
+    *,
+    request: Request,
+    db: Session,
+    user: User,
+    perm,
+    directory,
+    work_path: Path,
+    rel_path: str,
+    stored: int,
+    content_type: str | None,
+    encryption_mode: str,
+    compress: bool,
+    randomize_filename: bool,
+    original_filename: str,
+    is_permanent: bool,
+    temp_days: Optional[int],
+    delete_if_idle_days: Optional[int],
+    archive_after_idle_days: Optional[int],
+    auto_unarchive_on_download: bool,
+    max_uses: Optional[int],
+    expires_in_seconds: Optional[int],
+) -> dict:
+    """Take a fully-assembled upload sitting at `work_path` and run the rest of the
+    pipeline: quota check, optional compression, DB record, optional server-side
+    encryption, link minting. Identical for single-shot and chunked uploads."""
+    from app.crypto.aead import encrypt_file as _encrypt_file
+    from app.storage.compress import compress_file as _compress_file, should_compress
+    from app.security.secretbox import seal, open_box
+    from app.config import get_master_key
+
     base_path = storage_root() / rel_path
-    base_path.parent.mkdir(parents=True, exist_ok=True)
-    work = base_path.with_suffix(".work")
-
-    stored = 0
-    try:
-        with open(work, "wb") as fh:
-            while True:
-                chunk = await file.read(_CHUNK)
-                if not chunk:
-                    break
-                stored += len(chunk)
-                if stored > perm.max_file_bytes:
-                    raise HTTPException(413, detail="file exceeds max file size")
-                fh.write(chunk)
-    except HTTPException:
-        work.unlink(missing_ok=True)
-        raise
+    directory_id = directory.id if directory is not None else None
 
     if _used_bytes(db, user.id) + stored > perm.quota_bytes:
-        work.unlink(missing_ok=True)
+        work_path.unlink(missing_ok=True)
         raise HTTPException(413, detail="upload would exceed your quota")
 
     size_bytes = stored
     file_compressed = False
-    current = work
+    current = work_path
 
     try:
         # Compression (only for non-client-encrypted modes and eligible types)
-        ct = (file.content_type or "application/octet-stream").lower().split(";")[0].strip()
+        ct = (content_type or "application/octet-stream").lower().split(";")[0].strip()
         if ct in _UNSAFE_CT:
             ct = "application/octet-stream"
 
@@ -217,7 +237,7 @@ async def upload_file(
         file_obj.enc_access_blob = enc_access_blob_val
 
     except Exception:
-        for p in [work, base_path.with_suffix(".zst.work"), base_path.with_suffix(".fupl.work"), base_path]:
+        for p in [work_path, base_path.with_suffix(".zst.work"), base_path.with_suffix(".fupl.work"), base_path]:
             p.unlink(missing_ok=True)
         db.rollback()
         raise
@@ -256,6 +276,416 @@ async def upload_file(
         "expires_at": expires_link.isoformat() if expires_link else None,
         "compressed": file_compressed,
     }
+
+
+@router.post("/files/upload")
+async def upload_file(
+    request: Request,
+    file: UploadFile,
+    original_filename: str = Form(..., max_length=1024),
+    max_uses: Optional[int] = Form(None, ge=1),
+    expires_in_seconds: Optional[int] = Form(None, ge=1),
+    encryption_mode: str = Form("none"),
+    compress: bool = Form(False),
+    is_permanent: bool = Form(True),
+    temp_days: Optional[int] = Form(None, ge=1),
+    delete_if_idle_days: Optional[int] = Form(None, ge=1),
+    archive_after_idle_days: Optional[int] = Form(None, ge=1),
+    auto_unarchive_on_download: bool = Form(True),
+    randomize_filename: bool = Form(False),
+    directory_id: Optional[int] = Form(None, ge=1),
+    user: User = Depends(get_upload_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    (encryption_mode, compress, is_permanent, temp_days,
+     randomize_filename, directory, perm) = _prepare_upload(
+        db, user,
+        encryption_mode=encryption_mode, compress=compress, is_permanent=is_permanent,
+        temp_days=temp_days, randomize_filename=randomize_filename, directory_id=directory_id,
+    )
+
+    content_length = request.headers.get("content-length")
+    if content_length:
+        _precheck_declared_size(db, user, perm, int(content_length))
+
+    rand = _secrets.token_hex(32)
+    rel_path = f"{rand[:2]}/{rand[2:4]}/{rand[4:]}"
+    base_path = storage_root() / rel_path
+    base_path.parent.mkdir(parents=True, exist_ok=True)
+    work = base_path.with_suffix(".work")
+
+    stored = 0
+    try:
+        with open(work, "wb") as fh:
+            while True:
+                chunk = await file.read(_CHUNK)
+                if not chunk:
+                    break
+                stored += len(chunk)
+                if stored > perm.max_file_bytes:
+                    raise HTTPException(413, detail="file exceeds max file size")
+                fh.write(chunk)
+    except HTTPException:
+        work.unlink(missing_ok=True)
+        raise
+
+    return _finalize_stored_file(
+        request=request, db=db, user=user, perm=perm, directory=directory,
+        work_path=work, rel_path=rel_path, stored=stored,
+        content_type=file.content_type,
+        encryption_mode=encryption_mode, compress=compress,
+        randomize_filename=randomize_filename, original_filename=original_filename,
+        is_permanent=is_permanent, temp_days=temp_days,
+        delete_if_idle_days=delete_if_idle_days,
+        archive_after_idle_days=archive_after_idle_days,
+        auto_unarchive_on_download=auto_unarchive_on_download,
+        max_uses=max_uses, expires_in_seconds=expires_in_seconds,
+    )
+
+
+# ── Chunked uploads ─────────────────────────────────────────────────────────
+# A whole-file POST dies at Cloudflare's ~100 MB edge cap (413, never reaches us).
+# So the browser slices big files into <100 MB chunks and drives this 3-step flow:
+#   1. POST /files/upload/init      → validate, allocate a .part file, mint a token
+#   2. POST /files/upload/chunk     → append raw bytes (one request per slice)
+#   3. POST /files/upload/finalize  → assemble + run the normal upload pipeline
+# All session state lives inside the sealed token (no DB row, no in-memory map);
+# progress is just the .part file's size on disk.
+
+def _master_key(request: Request) -> bytes:
+    from app.config import get_master_key
+    return get_master_key(request.app.state.app_state.settings)
+
+
+def _seal_chunk_token(request: Request, meta: dict) -> str:
+    from app.security.secretbox import seal
+    raw = json.dumps(meta, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(seal(_master_key(request), raw, _CHUNK_TOKEN_AAD)).decode()
+
+
+def _open_chunk_token(request: Request, token: str, user: User) -> dict:
+    """Decrypt + authenticate a chunk-upload token. Raises 400/403/410 on bad,
+    foreign, or expired tokens."""
+    from app.security.secretbox import open_box
+    try:
+        blob = base64.urlsafe_b64decode(token.encode())
+        meta = json.loads(open_box(_master_key(request), blob, _CHUNK_TOKEN_AAD))
+    except Exception:
+        raise HTTPException(400, detail="invalid upload token")
+    if meta.get("uid") != user.id:
+        raise HTTPException(403, detail="not your upload")
+    if meta.get("exp", 0) < time.time():
+        # Best-effort cleanup of the abandoned partial before refusing.
+        try:
+            shutil.rmtree(_parts_dir(meta["rel"]), ignore_errors=True)
+            (storage_root() / meta["rel"]).with_suffix(".part").unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise HTTPException(410, detail="upload session expired")
+    return meta
+
+
+def _chunk_upload_size() -> int:
+    """Bytes per chunk the client should use. Tunable via FILEUPLOAD_CHUNK_SIZE so
+    ops can match it to the reverse proxy's body limit without a code change; must
+    stay under Cloudflare's edge cap. Read per-init so it can change without restart."""
+    raw = os.environ.get("FILEUPLOAD_CHUNK_SIZE")
+    if raw:
+        try:
+            v = int(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return _CHUNK_UPLOAD_SIZE
+
+
+def _parts_dir(rel_path: str) -> Path:
+    """Per-upload directory holding one file per received chunk (named by index).
+    Independent files let chunks land in parallel and out of order, and surviving
+    files double as the resume manifest."""
+    return (storage_root() / rel_path).with_suffix(".parts")
+
+
+def _num_chunks(total: int, chunk_size: int) -> int:
+    if total <= 0 or chunk_size <= 0:
+        return 0
+    return (total + chunk_size - 1) // chunk_size
+
+
+def _expected_chunk_len(index: int, total: int, chunk_size: int, n: int) -> int:
+    """Exact byte length chunk `index` must have (the last one is the remainder).
+    Returns -1 for an out-of-range index. Enforcing exact lengths keeps assembly
+    deterministic and stops a client from inflating the file past `total`."""
+    if index < 0 or index >= n:
+        return -1
+    if index < n - 1:
+        return chunk_size
+    return total - (n - 1) * chunk_size
+
+
+def _received_indices(parts: Path, n: int) -> list[int]:
+    out: list[int] = []
+    try:
+        for entry in parts.iterdir():
+            if entry.name.isdigit():
+                i = int(entry.name)
+                if 0 <= i < n:
+                    out.append(i)
+    except OSError:
+        pass
+    return sorted(out)
+
+
+def _sweep_stale_parts() -> None:
+    """Drop chunk dirs / assembly files left behind by abandoned uploads. A live
+    upload keeps touching its .parts dir, so its mtime stays fresh and it survives."""
+    cutoff = time.time() - _CHUNK_SESSION_TTL
+    root = storage_root()
+    try:
+        for p in root.rglob("*.parts"):
+            try:
+                if p.is_dir() and p.stat().st_mtime < cutoff:
+                    shutil.rmtree(p, ignore_errors=True)
+            except OSError:
+                pass
+        for p in root.rglob("*.part"):
+            try:
+                if p.is_file() and p.stat().st_mtime < cutoff:
+                    p.unlink(missing_ok=True)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+class ChunkedInitBody(BaseModel):
+    original_filename: str = Field(..., max_length=1024)
+    total_size: int = Field(..., ge=0)
+    content_type: Optional[str] = None
+    max_uses: Optional[int] = Field(None, ge=1)
+    expires_in_seconds: Optional[int] = Field(None, ge=1)
+    encryption_mode: str = "none"
+    compress: bool = False
+    is_permanent: bool = True
+    temp_days: Optional[int] = Field(None, ge=1)
+    delete_if_idle_days: Optional[int] = Field(None, ge=1)
+    archive_after_idle_days: Optional[int] = Field(None, ge=1)
+    auto_unarchive_on_download: bool = True
+    randomize_filename: bool = False
+    directory_id: Optional[int] = Field(None, ge=1)
+
+
+class ChunkedFinalizeBody(BaseModel):
+    upload_id: str
+
+
+@router.post("/files/upload/init")
+def upload_init(
+    body: ChunkedInitBody,
+    request: Request,
+    user: User = Depends(get_upload_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    _sweep_stale_parts()
+
+    (encryption_mode, compress, is_permanent, temp_days,
+     randomize_filename, directory, perm) = _prepare_upload(
+        db, user,
+        encryption_mode=body.encryption_mode, compress=body.compress,
+        is_permanent=body.is_permanent, temp_days=body.temp_days,
+        randomize_filename=body.randomize_filename, directory_id=body.directory_id,
+    )
+
+    _precheck_declared_size(db, user, perm, body.total_size)
+
+    chunk_size = _chunk_upload_size()
+    n = _num_chunks(body.total_size, chunk_size)
+
+    rand = _secrets.token_hex(32)
+    rel_path = f"{rand[:2]}/{rand[2:4]}/{rand[4:]}"
+    base_path = storage_root() / rel_path
+    base_path.parent.mkdir(parents=True, exist_ok=True)
+    _parts_dir(rel_path).mkdir(parents=True, exist_ok=True)
+
+    meta = {
+        "v": 1,
+        "uid": user.id,
+        "rel": rel_path,
+        "total": body.total_size,
+        "cs": chunk_size,
+        "n": n,
+        "fn": body.original_filename,
+        "ct": body.content_type,
+        "enc": encryption_mode,
+        "cmp": compress,
+        "perm": is_permanent,
+        "td": temp_days,
+        "did": body.delete_if_idle_days,
+        "aaid": body.archive_after_idle_days,
+        "auod": body.auto_unarchive_on_download,
+        "rnd": randomize_filename,
+        "dir": directory.id if directory is not None else None,
+        "mu": body.max_uses,
+        "eis": body.expires_in_seconds,
+        "exp": int(time.time()) + _CHUNK_SESSION_TTL,
+    }
+    return {
+        "upload_id": _seal_chunk_token(request, meta),
+        "chunk_size": chunk_size,
+        "num_chunks": n,
+        "total": body.total_size,
+        "received": [],
+    }
+
+
+@router.get("/files/upload/status")
+def upload_status(
+    request: Request,
+    upload_id: str,
+    user: User = Depends(get_upload_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Which chunks already landed — lets a client resume instead of restarting."""
+    meta = _open_chunk_token(request, upload_id, user)
+    parts = _parts_dir(meta["rel"])
+    if not parts.exists():
+        raise HTTPException(410, detail="upload session gone")
+    n = int(meta["n"])
+    return {
+        "upload_id": upload_id,
+        "total": int(meta["total"]),
+        "chunk_size": int(meta["cs"]),
+        "num_chunks": n,
+        "received": _received_indices(parts, n),
+    }
+
+
+@router.post("/files/upload/chunk")
+async def upload_chunk(
+    request: Request,
+    upload_id: str,
+    index: int,
+    user: User = Depends(get_upload_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    meta = _open_chunk_token(request, upload_id, user)
+
+    parts = _parts_dir(meta["rel"])
+    if not parts.exists():
+        raise HTTPException(410, detail="upload session gone")
+
+    total, cs, n = int(meta["total"]), int(meta["cs"]), int(meta["n"])
+    expected = _expected_chunk_len(index, total, cs, n)
+    if expected < 0:
+        raise HTTPException(400, detail="invalid chunk index")
+
+    # Stream into a unique temp name, then atomically swap into place. A chunk only
+    # "counts" once fully written, so a dropped connection mid-chunk just gets retried
+    # — never a half-written chunk masquerading as complete. Re-uploading is idempotent.
+    tmp = parts / f"{index}.{_secrets.token_hex(8)}.tmp"
+    written = 0
+    try:
+        with open(tmp, "wb") as fh:
+            async for data in request.stream():
+                if not data:
+                    continue
+                written += len(data)
+                if written > expected:
+                    raise HTTPException(413, detail="chunk exceeds expected size")
+                fh.write(data)
+        if written != expected:
+            raise HTTPException(400, detail="incomplete chunk")
+        os.replace(tmp, parts / str(index))
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+    return {"index": index, "num_chunks": n}
+
+
+@router.post("/files/upload/finalize")
+def upload_finalize(
+    body: ChunkedFinalizeBody,
+    request: Request,
+    user: User = Depends(get_upload_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    meta = _open_chunk_token(request, body.upload_id, user)
+
+    rel_path = meta["rel"]
+    parts = _parts_dir(rel_path)
+    if not parts.exists():
+        raise HTTPException(410, detail="upload session gone")
+
+    total, n = int(meta["total"]), int(meta["n"])
+    received = set(_received_indices(parts, n))
+    missing = [i for i in range(n) if i not in received]
+    if missing:
+        # Keep the parts so the client can resume the gaps; just report what's left.
+        raise HTTPException(409, detail={"error": "upload incomplete", "missing": missing[:512]})
+
+    # Assemble the chunks (in order) into the single work file the normal pipeline expects.
+    work = (storage_root() / rel_path).with_suffix(".part")
+    try:
+        with open(work, "wb") as out:
+            for i in range(n):
+                with open(parts / str(i), "rb") as pf:
+                    shutil.copyfileobj(pf, out, length=1024 * 1024)
+        stored = work.stat().st_size
+        if stored != total:
+            work.unlink(missing_ok=True)
+            raise HTTPException(400, detail="assembled size mismatch")
+    except HTTPException:
+        raise
+    except OSError:
+        work.unlink(missing_ok=True)
+        raise HTTPException(500, detail="assembly failed")
+
+    # The directory may have been deleted while the upload was in flight; re-resolve
+    # so the bundle branch (shared key / total_bytes) still operates on a live row.
+    directory = None
+    if meta.get("dir") is not None:
+        from app.models.directory import Directory
+        directory = db.get(Directory, meta["dir"])
+        if directory is None:
+            work.unlink(missing_ok=True)
+            raise HTTPException(404, detail="directory not found")
+        if user.role != "master" and directory.owner_id != user.id:
+            work.unlink(missing_ok=True)
+            raise HTTPException(403, detail="not your directory")
+
+    perm = ensure_permissions(db, user.id, master=(user.role == "master"))
+
+    result = _finalize_stored_file(
+        request=request, db=db, user=user, perm=perm, directory=directory,
+        work_path=work, rel_path=rel_path, stored=stored,
+        content_type=meta.get("ct"),
+        encryption_mode=meta["enc"], compress=meta["cmp"],
+        randomize_filename=meta["rnd"], original_filename=meta["fn"],
+        is_permanent=meta["perm"], temp_days=meta.get("td"),
+        delete_if_idle_days=meta.get("did"),
+        archive_after_idle_days=meta.get("aaid"),
+        auto_unarchive_on_download=meta.get("auod", True),
+        max_uses=meta.get("mu"), expires_in_seconds=meta.get("eis"),
+    )
+    # Pipeline committed — the raw chunks are now redundant.
+    shutil.rmtree(parts, ignore_errors=True)
+    return result
+
+
+@router.delete("/files/upload")
+def upload_abort(
+    request: Request,
+    upload_id: str,
+    user: User = Depends(get_upload_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Let the client discard a partial upload it gave up on."""
+    meta = _open_chunk_token(request, upload_id, user)
+    shutil.rmtree(_parts_dir(meta["rel"]), ignore_errors=True)
+    (storage_root() / meta["rel"]).with_suffix(".part").unlink(missing_ok=True)
+    return {"status": "aborted"}
 
 
 def _recover_access_key(request: Request, f: FileObject) -> str | None:
