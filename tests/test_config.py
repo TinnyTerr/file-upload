@@ -31,3 +31,18 @@ def test_corrupt_file_missing_key_raises(tmp_path):
     cfg.write_text("APP_ENV=dev\nMASTER_KEY_B64=abc\n", encoding="utf-8")  # no SECRET_KEY
     with pytest.raises(ValueError):
         load_settings(str(cfg))
+
+
+def test_trust_proxy_is_loaded_from_config_file(tmp_path):
+    cfg = tmp_path / "app.env"
+    cfg.write_text(
+        "APP_ENV=prod\n"
+        "SECRET_KEY=secret-key-for-tests\n"
+        f"MASTER_KEY_B64={base64.b64encode(b'k' * 32).decode()}\n"
+        "TRUST_PROXY=true\n",
+        encoding="utf-8",
+    )
+
+    settings = load_settings(str(cfg))
+
+    assert settings.trust_proxy is True

@@ -89,7 +89,27 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
             response.headers.setdefault("Referrer-Policy", "no-referrer")
             return response
 
+    class _HttpsRedirect(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            scheme = request.url.scheme
+            netloc = None
+            if settings.trust_proxy:
+                forwarded_proto = request.headers.get("x-forwarded-proto")
+                if forwarded_proto:
+                    scheme = forwarded_proto.split(",", 1)[0].strip().lower()
+                forwarded_host = request.headers.get("x-forwarded-host")
+                if forwarded_host:
+                    netloc = forwarded_host.split(",", 1)[0].strip()
+
+            if settings.app_env != "dev" and scheme == "http":
+                url = request.url.replace(scheme="https")
+                if netloc:
+                    url = url.replace(netloc=netloc)
+                return RedirectResponse(str(url), status_code=308)
+            return await call_next(request)
+
     app = FastAPI(title="Oxymoron (for files)", lifespan=lifespan)
+    app.add_middleware(_HttpsRedirect)
     app.add_middleware(_SecurityHeaders)
     app.state.app_state = state
 

@@ -19,6 +19,17 @@ class Settings(BaseSettings):
     trust_proxy: bool = False
 
 
+def _parse_bool(value: str | None, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean value: {value!r}")
+
+
 def _generate_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     secret_key = secrets.token_urlsafe(32)
@@ -70,6 +81,7 @@ def load_settings(config_path: str | None = None) -> Settings:
         secret_key=secret_key,
         master_key_b64=master_key_b64,
         config_path=str(path),
+        trust_proxy=_parse_bool(raw.get("TRUST_PROXY"), default=False),
     )
 
 
