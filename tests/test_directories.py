@@ -3,6 +3,9 @@ from __future__ import annotations
 import io
 import zipfile
 
+from app.models.user import User
+from app.permissions.policy import ensure_permissions
+
 A = b"first member payload " * 200
 B = b"second member, different bytes " * 200
 
@@ -113,3 +116,57 @@ def test_directory_member_inherits_directory_mode(master_session):
     # Even if the upload claims "none", the directory's mode wins.
     f = _upload_into(c, csrf, d["id"], "x.bin", A, "none")
     assert f["encryption_mode"] == "server"
+
+
+def test_directory_upload_uses_actual_file_size_for_limit(master_session):
+    c, csrf, _ = master_session
+    d = _create_dir(c, csrf, "none")
+    content = b"x" * 1024
+
+    state = c.app.state.app_state
+    with state.session_factory() as db:
+        user = db.query(User).filter_by(username="admin").one()
+        perm = ensure_permissions(db, user.id, master=True)
+        perm.max_file_bytes = len(content)
+        db.commit()
+
+    r = c.post(
+        "/files/upload",
+        files={"file": ("large.bin", content, "application/octet-stream")},
+        data={
+            "original_filename": "large.bin",
+            "encryption_mode": "none",
+            "directory_id": str(d["id"]),
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert r.status_code == 200, r.text
+    info = c.get(f"/d/{d['slug']}/info").json()
+    assert info["files"][0]["filename"] == "large.bin"
+    assert info["total_bytes"] == len(content)
+
+
+def test_directory_member_can_be_listed_and_removed_individually(master_session):
+    c, csrf, _ = master_session
+    d = _create_dir(c, csrf, "none")
+    kept = _upload_into(c, csrf, d["id"], "kept.txt", A, "none")
+    removed = _upload_into(c, csrf, d["id"], "removed.txt", B, "none")
+
+    listing = c.get(f"/directories/{d['id']}/files").json()["files"]
+    target = next(f for f in listing if f["filename"] == "removed.txt")
+
+    r = c.delete(
+        f"/directories/{d['id']}/files/{target['id']}",
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert r.status_code == 200, r.text
+    info = c.get(f"/d/{d['slug']}/info").json()
+    assert [f["filename"] for f in info["files"]] == ["kept.txt"]
+    assert c.get(f"/file/{removed['slug']}/raw").status_code == 404
+    assert c.get(f"/file/{kept['slug']}/raw").status_code == 200
+
+    directory = next(x for x in c.get("/directories/").json()["directories"] if x["id"] == d["id"])
+    assert directory["file_count"] == 1
+    assert directory["total_bytes"] == len(A)

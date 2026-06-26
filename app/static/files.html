@@ -86,7 +86,7 @@
             <div class="osr">
               <div class="osr-label">
                 Randomize filename
-                <i class="help-icon" data-tip="Download page shows a random name instead of the original. Internal storage is always randomized regardless.">?</i>
+                <i class="help-icon" data-tip="Loose file download pages show a random name instead of the original. Folder members keep their names so directory browsing and zip downloads work. Internal storage is always randomized regardless.">?</i>
               </div>
               <div class="osr-ctrl">
                 <label class="toggle">
@@ -179,6 +179,7 @@
     <div class="mt-24" data-reveal>
       <div class="flex items-center mb-16" style="gap:12px">
         <div class="section-label" style="margin:0;flex:1" id="files-heading">Your files</div>
+        <button class="btn btn-ghost btn-sm" id="create-dir-btn">New folder</button>
         <button class="btn btn-ghost btn-sm" id="refresh-btn">Refresh</button>
       </div>
       <div id="files-list">
@@ -186,6 +187,33 @@
       </div>
     </div>
 
+  </div>
+
+  <!-- Create folder modal -->
+  <div class="modal-overlay hidden" id="dir-modal">
+    <div class="modal">
+      <div class="modal-title">Create folder</div>
+      <div class="form-group">
+        <label>Folder name</label>
+        <input type="text" id="dir-title" placeholder="Shared folder">
+      </div>
+      <div class="form-group">
+        <label>Encryption</label>
+        <select id="dir-encrypt">
+          <option value="none">None</option>
+          <option value="server">Server-side</option>
+          <option value="client" id="dir-encrypt-client">Client-side</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Expires after</label>
+        <input type="text" id="dir-expires" placeholder="e.g. 7d, 24h — blank = no expiry">
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" id="dir-cancel">Cancel</button>
+        <button class="btn btn-primary" id="dir-confirm">Create folder</button>
+      </div>
+    </div>
   </div>
 
   <!-- Mint link modal -->

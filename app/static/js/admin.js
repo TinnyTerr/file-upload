@@ -45,7 +45,11 @@ function pBadge(label, on, tip) {
 
 async function loadUsers() {
   usersTbody.textContent = "";
-  const [usersResp, filesResp] = await Promise.all([apiFetch("/users/"), apiFetch("/files/")]);
+  const [usersResp, filesResp, dirsResp] = await Promise.all([
+    apiFetch("/users/"),
+    apiFetch("/admin/files"),
+    apiFetch("/admin/directories"),
+  ]);
   if (!usersResp.ok) { showToast("Failed to load users.", "error"); return; }
   const { users } = await usersResp.json();
   usersCache = users;
@@ -58,6 +62,14 @@ async function loadUsers() {
       const o = (byOwner[f.owner_id] ||= { count: 0, bytes: 0 });
       o.count++;
       o.bytes += f.stored_size_bytes ?? f.size_bytes ?? 0;
+    }
+  }
+  if (dirsResp.ok) {
+    const { directories } = await dirsResp.json();
+    for (const d of directories) {
+      const o = (byOwner[d.owner_id] ||= { count: 0, bytes: 0 });
+      o.count += d.file_count || 0;
+      o.bytes += d.total_bytes || 0;
     }
   }
 
@@ -332,34 +344,53 @@ function adminLinkUrl(slug, f) {
   return base;
 }
 
+function adminDirectoryUrl(d) {
+  let url = d.url || `${location.origin}/d/${d.slug}`;
+  if (d.encryption_mode === "server" && d.access_key) {
+    url += "?ek=" + encodeURIComponent(d.access_key);
+  }
+  return url;
+}
+
 async function loadAdminFiles() {
   filesByUserEl.textContent = "";
-  const [usersResp, filesResp] = await Promise.all([apiFetch("/users/"), apiFetch("/files/")]);
-  if (!usersResp.ok || !filesResp.ok) { filesByUserEl.textContent = "Failed to load."; return; }
+  const [usersResp, filesResp, dirsResp] = await Promise.all([
+    apiFetch("/users/"),
+    apiFetch("/admin/files"),
+    apiFetch("/admin/directories"),
+  ]);
+  if (!usersResp.ok || !filesResp.ok || !dirsResp.ok) { filesByUserEl.textContent = "Failed to load."; return; }
   const { users } = await usersResp.json();
   const { files } = await filesResp.json();
+  const { directories } = await dirsResp.json();
 
   const userMap = {};
   for (const u of users) userMap[u.id] = u;
 
-  if (!files.length) {
+  if (!files.length && !directories.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
     const ico = document.createElement("div");
     ico.className = "empty-icon";
     ico.textContent = "📂";
-    empty.append(ico, "No files yet.");
+    empty.append(ico, "No files or folders yet.");
     filesByUserEl.appendChild(empty);
     return;
   }
 
   const sections = {};
+  for (const d of directories) {
+    const section = (sections[d.owner_id] ||= { files: [], directories: [] });
+    section.directories.push(d);
+  }
   for (const f of files) {
-    if (!sections[f.owner_id]) sections[f.owner_id] = [];
-    sections[f.owner_id].push(f);
+    const section = (sections[f.owner_id] ||= { files: [], directories: [] });
+    section.files.push(f);
   }
 
-  for (const [ownerId, ownerFiles] of Object.entries(sections)) {
+  for (const [ownerId, ownerItems] of Object.entries(sections)) {
+    const ownerFiles = ownerItems.files;
+    const ownerDirs = ownerItems.directories;
     const owner   = userMap[ownerId];
     const section = document.createElement("div");
     section.className = "user-section";
@@ -372,15 +403,75 @@ async function loadAdminFiles() {
     const countBadge = document.createElement("span");
     countBadge.className = "badge badge-gray";
     countBadge.textContent = `${ownerFiles.length} file${ownerFiles.length !== 1 ? "s" : ""}`;
+    const folderBadge = document.createElement("span");
+    folderBadge.className = "badge badge-green";
+    folderBadge.textContent = `${ownerDirs.length} folder${ownerDirs.length !== 1 ? "s" : ""}`;
     const sizeBadge = document.createElement("span");
     sizeBadge.className = "text-xs text-muted";
-    sizeBadge.textContent = formatBytes(ownerFiles.reduce((a, f) => a + f.size_bytes, 0));
-    header.append(nameEl, countBadge, sizeBadge);
+    sizeBadge.textContent = formatBytes(
+      ownerFiles.reduce((a, f) => a + f.size_bytes, 0) +
+      ownerDirs.reduce((a, d) => a + (d.total_bytes || 0), 0)
+    );
+    header.append(nameEl, countBadge, folderBadge, sizeBadge);
     section.appendChild(header);
 
     const card = document.createElement("div");
     card.className = "card";
     card.style.padding = "0";
+
+    for (const d of ownerDirs) {
+      const row = document.createElement("div");
+      row.className = "file-row";
+
+      const nameDiv = document.createElement("div");
+      nameDiv.className = "file-row-name";
+      nameDiv.textContent = `📁 ${d.title}`;
+      nameDiv.title = d.title;
+
+      const sizeDiv = document.createElement("div");
+      sizeDiv.className = "file-row-size";
+      sizeDiv.textContent = formatBytes(d.total_bytes || 0);
+
+      const dateDiv = document.createElement("div");
+      dateDiv.className = "file-meta";
+      dateDiv.style.fontSize = "11px";
+      dateDiv.textContent = formatDate(d.created_at);
+
+      const typeDiv = document.createElement("div");
+      typeDiv.className = "text-xs text-muted";
+      typeDiv.textContent = "folder";
+
+      const fc = document.createElement("span");
+      fc.className = "badge badge-gray";
+      fc.textContent = `${d.file_count} file${d.file_count !== 1 ? "s" : ""}`;
+
+      const enc = encBadgeEl(d);
+
+      const openBtn = document.createElement("button");
+      openBtn.className = "btn btn-ghost btn-sm";
+      openBtn.textContent = "Open";
+      openBtn.addEventListener("click", () => window.open(adminDirectoryUrl(d), "_blank", "noopener"));
+
+      const copyBtn = document.createElement("button");
+      copyBtn.className = "btn btn-ghost btn-sm";
+      copyBtn.textContent = "Copy";
+      copyBtn.addEventListener("click", () => {
+        navigator.clipboard.writeText(adminDirectoryUrl(d)).then(() => {
+          copyBtn.textContent = "Copied!";
+          setTimeout(() => (copyBtn.textContent = "Copy"), 1500);
+        });
+      });
+
+      const delBtn = document.createElement("button");
+      delBtn.className = "btn btn-danger btn-sm";
+      delBtn.textContent = "Delete all";
+      delBtn.addEventListener("click", () => deleteAdminDirectory(d.id, d.title, d.file_count));
+
+      row.append(nameDiv, sizeDiv, dateDiv, typeDiv, fc);
+      if (enc) row.append(enc);
+      row.append(openBtn, copyBtn, delBtn);
+      card.appendChild(row);
+    }
 
     for (const f of ownerFiles) {
       // File row (clickable to expand links)
@@ -583,6 +674,19 @@ async function deleteAdminFile(id, name) {
   if (!ok) return;
   const resp = await apiFetch(`/files/${id}`, { method: "DELETE" });
   if (resp.ok) { showToast("File deleted."); loadAdminFiles(); loadDiskStats(); }
+  else { const d = await resp.json().catch(() => ({})); showToast(d.detail || "Delete failed.", "error"); }
+}
+
+async function deleteAdminDirectory(id, title, count) {
+  const ok = await showConfirm({
+    title: "Delete folder?",
+    message: `"${title}" and all ${count} file${count !== 1 ? "s" : ""} inside will be permanently removed. This cannot be undone.`,
+    confirmText: "Delete folder",
+    danger: true,
+  });
+  if (!ok) return;
+  const resp = await apiFetch(`/directories/${id}`, { method: "DELETE" });
+  if (resp.ok) { showToast("Folder deleted."); loadAdminFiles(); loadDiskStats(); }
   else { const d = await resp.json().catch(() => ({})); showToast(d.detail || "Delete failed.", "error"); }
 }
 

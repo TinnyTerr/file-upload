@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
 from app.audit.log import record
-from app.deps import client_ip, get_db, require_active_user
+from app.deps import client_ip, get_db, require_active_user, require_master
 from app.links.slugs import new_slug
 from app.security.csrf import require_csrf
 from app.models.directory import Directory
@@ -160,11 +160,26 @@ def list_directories(
     user: User = Depends(require_active_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    q = db.query(Directory)
-    if user.role != "master":
-        q = q.filter_by(owner_id=user.id)
-    dirs = q.order_by(Directory.created_at.desc()).all()
+    dirs = (
+        db.query(Directory)
+        .filter_by(owner_id=user.id)
+        .order_by(Directory.created_at.desc())
+        .all()
+    )
+    return {"directories": _serialize_directories(request, db, dirs)}
 
+
+@router.get("/admin/directories")
+def list_admin_directories(
+    request: Request,
+    _master: User = Depends(require_master),
+    db: Session = Depends(get_db),
+) -> dict:
+    dirs = db.query(Directory).order_by(Directory.created_at.desc()).all()
+    return {"directories": _serialize_directories(request, db, dirs)}
+
+
+def _serialize_directories(request: Request, db: Session, dirs: list[Directory]) -> list[dict]:
     result = []
     for d in dirs:
         file_count = db.query(func.count(FileObject.id)).filter_by(directory_id=d.id).scalar() or 0
@@ -181,7 +196,81 @@ def list_directories(
             "expires_at": d.expires_at.isoformat() if d.expires_at else None,
             "created_at": d.created_at.isoformat(),
         })
-    return {"directories": result}
+    return result
+
+
+def _get_owned_directory(db: Session, dir_id: int, user: User) -> Directory:
+    d = db.get(Directory, dir_id)
+    if d is None:
+        raise HTTPException(404, detail="not found")
+    if user.role != "master" and d.owner_id != user.id:
+        raise HTTPException(403, detail="not your directory")
+    return d
+
+
+@router.get("/directories/{dir_id}/files")
+def list_directory_files(
+    dir_id: int,
+    user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    d = _get_owned_directory(db, dir_id, user)
+    members = (
+        db.query(FileObject)
+        .filter_by(directory_id=d.id)
+        .order_by(FileObject.created_at.asc())
+        .all()
+    )
+
+    files = []
+    for f in members:
+        link = (
+            db.query(Link)
+            .filter_by(file_id=f.id, active=True)
+            .order_by(Link.created_at.desc())
+            .first()
+        )
+        files.append({
+            "id": f.id,
+            "slug": link.slug if link else None,
+            "filename": f.original_filename,
+            "size_bytes": f.size_bytes,
+            "stored_size_bytes": f.stored_size_bytes,
+            "content_type": f.content_type,
+            "encryption_mode": f.encryption_mode,
+            "created_at": f.created_at.isoformat(),
+        })
+    return {"files": files}
+
+
+@router.delete("/directories/{dir_id}/files/{file_id}")
+def delete_directory_file(
+    dir_id: int,
+    file_id: int,
+    request: Request,
+    _csrf: SessionRow = Depends(require_csrf),
+    user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    d = _get_owned_directory(db, dir_id, user)
+    file_obj = db.get(FileObject, file_id)
+    if file_obj is None or file_obj.directory_id != d.id:
+        raise HTTPException(404, detail="not found")
+
+    try:
+        full = safe_join(storage_root(), file_obj.storage_path)
+        if full.exists():
+            os.unlink(full)
+    except (OSError, ValueError):
+        pass
+
+    db.query(Link).filter_by(file_id=file_obj.id).delete()
+    d.total_bytes = max(0, (d.total_bytes or 0) - (file_obj.stored_size_bytes or 0))
+    db.delete(file_obj)
+    record(db, actor=user.username, action="directory.file_deleted",
+           target=f"file:{file_id}", ip=client_ip(request))
+    db.commit()
+    return {"status": "deleted"}
 
 
 @router.delete("/directories/{dir_id}")

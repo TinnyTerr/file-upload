@@ -31,6 +31,7 @@ _NO_ENCRYPT_COMPRESS = frozenset({"client"})  # ciphertext won't shrink
 router = APIRouter(tags=["files"])
 
 _CHUNK = 256 * 1024  # 256 KiB read buffer
+_REQUEST_OVERHEAD_ALLOWANCE = 1024 * 1024
 
 
 def _used_bytes(db: Session, user_id: int) -> int:
@@ -41,6 +42,14 @@ def _used_bytes(db: Session, user_id: int) -> int:
 def _file_url(request: Request, slug: str) -> str:
     base = str(request.base_url).rstrip("/")
     return f"{base}/file/{slug}"
+
+
+def _randomized_filename(original_filename: str) -> str:
+    basename = os.path.basename(original_filename.replace("\\", "/")).strip()
+    _, ext = os.path.splitext(basename)
+    if not ext[1:].isalnum() or len(ext) > 17:
+        ext = ""
+    return f"{_secrets.token_hex(16)}{ext.lower()}"
 
 
 @router.post("/files/upload")
@@ -86,6 +95,7 @@ async def upload_file(
         compress = False
         is_permanent = True
         temp_days = None
+        randomize_filename = False
 
     if not is_permanent and not temp_days:
         raise HTTPException(400, detail="temp_days is required when is_permanent is false")
@@ -98,9 +108,9 @@ async def upload_file(
     content_length = request.headers.get("content-length")
     if content_length:
         declared = int(content_length)
-        if declared > perm.max_file_bytes:
+        if declared > perm.max_file_bytes + _REQUEST_OVERHEAD_ALLOWANCE:
             raise HTTPException(413, detail="file exceeds max file size")
-        if _used_bytes(db, user.id) + declared > perm.quota_bytes:
+        if _used_bytes(db, user.id) + declared > perm.quota_bytes + _REQUEST_OVERHEAD_ALLOWANCE:
             raise HTTPException(413, detail="upload would exceed your quota")
 
     rand = _secrets.token_hex(32)
@@ -146,7 +156,7 @@ async def upload_file(
             file_compressed = True
 
         # Create DB record (need ID before server-side encryption)
-        display_name = _secrets.token_hex(8) + "_" + original_filename if randomize_filename else original_filename
+        display_name = _randomized_filename(original_filename) if randomize_filename else original_filename
         expires_at: datetime | None = None
         if not is_permanent and temp_days:
             expires_at = datetime.now(timezone.utc) + timedelta(days=temp_days)
@@ -268,11 +278,31 @@ def list_files(
     db: Session = Depends(get_db),
 ) -> dict:
     # Loose files only — directory members are listed under their directory.
-    q = db.query(FileObject).filter(FileObject.directory_id.is_(None))
-    if user.role != "master":
-        q = q.filter(FileObject.owner_id == user.id)
-    files = q.order_by(FileObject.created_at.desc()).all()
+    files = (
+        db.query(FileObject)
+        .filter(FileObject.directory_id.is_(None), FileObject.owner_id == user.id)
+        .order_by(FileObject.created_at.desc())
+        .all()
+    )
+    return {"files": _serialize_files(request, db, files)}
 
+
+@router.get("/admin/files")
+def list_admin_files(
+    request: Request,
+    _master: User = Depends(require_master),
+    db: Session = Depends(get_db),
+) -> dict:
+    files = (
+        db.query(FileObject)
+        .filter(FileObject.directory_id.is_(None))
+        .order_by(FileObject.created_at.desc())
+        .all()
+    )
+    return {"files": _serialize_files(request, db, files)}
+
+
+def _serialize_files(request: Request, db: Session, files: list[FileObject]) -> list[dict]:
     result = []
     for f in files:
         links = db.query(Link).filter_by(file_id=f.id).all()
@@ -306,7 +336,7 @@ def list_files(
                 for lk in links
             ],
         })
-    return {"files": result}
+    return result
 
 
 @router.delete("/files/{file_id}")
@@ -331,6 +361,11 @@ def delete_file(
         pass
 
     db.query(Link).filter_by(file_id=file_obj.id).delete()
+    if file_obj.directory_id is not None:
+        from app.models.directory import Directory
+        directory = db.get(Directory, file_obj.directory_id)
+        if directory is not None:
+            directory.total_bytes = max(0, (directory.total_bytes or 0) - (file_obj.stored_size_bytes or 0))
     db.delete(file_obj)
     record(db, actor=user.username, action="file.deleted",
            target=f"file:{file_id}", ip=client_ip(request))

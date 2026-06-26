@@ -1,4 +1,4 @@
-import { apiFetch, csrf, user, requireAuth, setupNav, formatBytes, formatDate, parseDuration, showToast, showConfirm, observeReveals } from "./api.js";
+import { apiFetch, csrf, user, requireAuth, setupNav, formatBytes, formatDate, parseDuration, showToast, showConfirm, showPrompt, observeReveals } from "./api.js";
 
 if (!requireAuth()) throw new Error("not authenticated");
 setupNav("files");
@@ -241,6 +241,52 @@ advToggle.addEventListener("click", () => {
   advBody.classList.toggle("open", !open);
 });
 
+// ── Explicit folder creation ──────────────────────────────────────────────
+const dirModal = document.getElementById("dir-modal");
+const dirTitle = document.getElementById("dir-title");
+const dirEncrypt = document.getElementById("dir-encrypt");
+const dirExpires = document.getElementById("dir-expires");
+const dirConfirm = document.getElementById("dir-confirm");
+
+document.getElementById("create-dir-btn").addEventListener("click", () => {
+  dirTitle.value = "";
+  dirEncrypt.value = "none";
+  dirExpires.value = "";
+  dirModal.classList.remove("hidden");
+  setTimeout(() => dirTitle.focus(), 50);
+});
+document.getElementById("dir-cancel").addEventListener("click", () => dirModal.classList.add("hidden"));
+dirModal.addEventListener("click", e => { if (e.target === dirModal) dirModal.classList.add("hidden"); });
+
+dirConfirm.addEventListener("click", async () => {
+  const title = dirTitle.value.trim() || "Shared folder";
+  const encMode = dirEncrypt.value;
+  const expiresRaw = dirExpires.value.trim();
+  const expiresInSec = expiresRaw ? parseDuration(expiresRaw) : null;
+  if (expiresRaw && expiresInSec === null) {
+    showToast('Invalid duration — use "7d", "24h", "30m"', "error");
+    return;
+  }
+
+  const body = { title, encryption_mode: encMode };
+  if (expiresInSec) body.expires_in_seconds = expiresInSec;
+  const clientKey = encMode === "client" ? crypto.getRandomValues(new Uint8Array(32)) : null;
+
+  dirConfirm.disabled = true;
+  const resp = await apiFetch("/directories", { method: "POST", json: body });
+  dirConfirm.disabled = false;
+  if (!resp.ok) {
+    const d = await resp.json().catch(() => ({}));
+    showToast(d.detail || "Folder creation failed.", "error");
+    return;
+  }
+
+  const dir = await resp.json();
+  dirModal.classList.add("hidden");
+  showDirectorySuccess(dir, encMode, clientKey);
+  loadFiles();
+});
+
 // ── Upload ────────────────────────────────────────────────────────────────
 uploadBtn.addEventListener("click", startUpload);
 
@@ -355,6 +401,65 @@ async function uploadAsDirectory(pending, opts) {
   loadUsage();
 }
 
+async function addFilesToDirectory(d) {
+  const sharedClientKey = await clientDirectoryKey(d);
+  if (sharedClientKey === undefined) return;
+
+  const input = document.createElement("input");
+  input.type = "file";
+  input.multiple = true;
+  input.style.display = "none";
+  input.addEventListener("change", async () => {
+    const files = Array.from(input.files || []);
+    input.remove();
+    if (!files.length) return;
+
+    const items = files.map(file => ({
+      id: qId(), file, status: "queued", progress: 0, result: null, error: null,
+    }));
+    fileQueue.push(...items);
+    renderQueue();
+
+    uploadBtn.disabled = true;
+    clearAllBtn.style.display = "none";
+    progressWrap.style.display = "";
+    progressBar.style.width = "0%";
+    progressLbl.textContent = `Adding 0 / ${items.length}…`;
+
+    let completed = 0;
+    for (const item of items) {
+      await doUpload(item, {
+        maxUsesRaw: "",
+        expiresInSec: null,
+        randomize: false,
+        encMode: d.encryption_mode,
+        compress: false,
+        tempDays: "",
+        archDays: "",
+        delDays: "",
+        directoryId: d.id,
+        sharedClientKey,
+      });
+      completed++;
+      progressBar.style.width = Math.round((completed / items.length) * 100) + "%";
+      progressLbl.textContent = `${completed} / ${items.length} added`;
+    }
+
+    progressWrap.style.display = "none";
+    clearAllBtn.style.display = fileQueue.length ? "" : "none";
+    uploadBtn.disabled = fileQueue.filter(i => i.status === "queued").length === 0;
+
+    const doneCount = items.filter(i => i.status === "done").length;
+    const errCount = items.filter(i => i.status === "error").length;
+    if (doneCount) showToast(`${doneCount} file${doneCount !== 1 ? "s" : ""} added.`);
+    if (errCount) showToast(`${errCount} file${errCount !== 1 ? "s" : ""} failed.`, "error");
+    loadFiles();
+    loadUsage();
+  }, { once: true });
+  document.body.appendChild(input);
+  input.click();
+}
+
 function directoryShareUrl(dir, encMode, sharedKeyBytes) {
   let url = dir.url;
   if (encMode === "client" && sharedKeyBytes) url += "#ek=" + b64urlEncode(sharedKeyBytes);
@@ -444,6 +549,42 @@ function b64urlEncode(bytes) {
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 
+function b64urlDecodeBytes(value) {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const raw = atob(padded);
+  return Uint8Array.from(raw, c => c.charCodeAt(0));
+}
+
+function extractEk(value) {
+  const text = (value || "").trim();
+  if (!text) return "";
+  try {
+    const url = new URL(text);
+    if (url.hash.startsWith("#ek=")) return decodeURIComponent(url.hash.slice(4));
+  } catch {}
+  const match = text.match(/(?:^|[#?&])ek=([^&#]+)/);
+  return match ? decodeURIComponent(match[1]) : text.replace(/^#?ek=/, "");
+}
+
+async function clientDirectoryKey(d) {
+  if (d.encryption_mode !== "client") return null;
+  const answer = await showPrompt({
+    title: "Folder key",
+    message: "Paste the original folder link or #ek value.",
+    placeholder: "#ek=...",
+    confirmText: "Use key",
+  });
+  if (answer === null) return undefined;
+  try {
+    const key = b64urlDecodeBytes(extractEk(answer));
+    if (key.length !== 32) throw new Error("bad key length");
+    return key;
+  } catch {
+    showToast("Invalid folder key.", "error");
+    return undefined;
+  }
+}
+
 // Build the complete shareable URL including the decryption/access key:
 //  · client mode → #ek= fragment (never reaches the server)
 //  · server mode → ?ek= query credential (the server's access gate)
@@ -531,7 +672,7 @@ async function doUpload(item, { maxUsesRaw, expiresInSec, randomize, encMode = "
   const fd = new FormData();
   fd.append("file", uploadFile, filename);
   fd.append("original_filename", filename);
-  fd.append("randomize_filename", randomize ? "true" : "false");
+  fd.append("randomize_filename", directoryId == null && randomize ? "true" : "false");
   fd.append("encryption_mode", encMode);
   fd.append("compress", compress ? "true" : "false");
   if (directoryId != null) fd.append("directory_id", String(directoryId));
@@ -741,24 +882,76 @@ function renderDirectoryCard(d, isMaster) {
     setTimeout(() => { copyBtn.textContent = "Copy"; copyBtn.classList.remove("copied"); }, 1500);
   });
 
+  const addBtn = document.createElement("button");
+  addBtn.className = "btn btn-ghost btn-sm";
+  addBtn.textContent = "Add files";
+  addBtn.addEventListener("click", e => { e.stopPropagation(); addFilesToDirectory(d); });
+
   const delBtn = document.createElement("button");
   delBtn.className = "btn btn-danger btn-sm";
   delBtn.textContent = "Delete all";
   delBtn.addEventListener("click", e => { e.stopPropagation(); deleteDirectory(d.id, d.title, d.file_count); });
 
-  acts.append(openBtn, copyBtn, delBtn);
+  acts.append(addBtn, openBtn, copyBtn, delBtn);
   header.append(ico, name, meta, acts);
   card.appendChild(header);
 
+  const body = document.createElement("div");
+  body.className = "file-body";
   if (d.encryption_mode === "client") {
-    const body = document.createElement("div");
-    body.className = "file-body";
-    body.style.cssText = "font-size:12px;color:var(--text-muted);line-height:1.5";
-    body.textContent = "End-to-end encrypted. The #ek= key is only in the link you saved at creation — append it to “Open”, or the files can't be decrypted.";
-    card.appendChild(body);
+    const hint = document.createElement("div");
+    hint.style.cssText = "font-size:12px;color:var(--text-muted);line-height:1.5;margin-bottom:8px";
+    hint.textContent = "End-to-end encrypted. Keep the #ek= key from the share link; adding files later needs it.";
+    body.appendChild(hint);
   }
+  loadDirectoryMembers(d, body);
+  card.appendChild(body);
 
   return card;
+}
+
+async function loadDirectoryMembers(d, body) {
+  const holder = document.createElement("div");
+  holder.style.cssText = "display:flex;flex-direction:column;gap:6px";
+  holder.textContent = "Loading files…";
+  body.appendChild(holder);
+
+  const resp = await apiFetch(`/directories/${d.id}/files`);
+  if (!resp.ok) {
+    holder.textContent = "Could not load folder files.";
+    return;
+  }
+  const { files } = await resp.json();
+  holder.textContent = "";
+  if (!files.length) {
+    const empty = document.createElement("div");
+    empty.className = "text-xs text-muted";
+    empty.textContent = "Empty folder.";
+    holder.appendChild(empty);
+    return;
+  }
+
+  for (const f of files) {
+    const row = document.createElement("div");
+    row.className = "link-row";
+
+    const name = document.createElement("span");
+    name.className = "link-url";
+    name.textContent = f.filename;
+    name.title = f.filename;
+
+    const size = document.createElement("span");
+    size.className = "file-meta";
+    size.textContent = formatBytes(f.size_bytes);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "btn btn-danger btn-sm";
+    removeBtn.textContent = "Remove";
+    removeBtn.addEventListener("click", () => deleteDirectoryMember(d.id, f.id, f.filename));
+
+    row.append(name, size, removeBtn);
+    holder.appendChild(row);
+  }
 }
 
 async function deleteDirectory(id, title, count) {
@@ -774,6 +967,25 @@ async function deleteDirectory(id, title, count) {
   else {
     const d = await resp.json().catch(() => ({}));
     showToast(d.detail || "Delete failed.", "error");
+  }
+}
+
+async function deleteDirectoryMember(dirId, fileId, name) {
+  const ok = await showConfirm({
+    title: "Remove file?",
+    message: `"${name}" will be removed from this folder and its links will be deleted.`,
+    confirmText: "Remove file",
+    danger: true,
+  });
+  if (!ok) return;
+  const resp = await apiFetch(`/directories/${dirId}/files/${fileId}`, { method: "DELETE" });
+  if (resp.ok) {
+    showToast("File removed.");
+    loadFiles();
+    loadUsage();
+  } else {
+    const d = await resp.json().catch(() => ({}));
+    showToast(d.detail || "Remove failed.", "error");
   }
 }
 
@@ -1038,6 +1250,8 @@ async function checkPermissions() {
     if (!me.can_upload_client_encrypted) {
       const opt = document.querySelector("#opt-encrypt option[value='client']");
       if (opt) opt.remove();
+      const dirOpt = document.getElementById("dir-encrypt-client");
+      if (dirOpt) dirOpt.remove();
     }
   } catch {}
 }
