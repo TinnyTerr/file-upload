@@ -290,8 +290,8 @@ def download_raw(slug: str, request: Request, ek: str | None = None, db: Session
 
 
 @router.get("/file/{slug}")
-def download_page(slug: str, db: Session = Depends(get_db)):
-    link = resolve_active_link(db, slug)
-    if link is None:
-        raise HTTPException(404, detail="link not found or expired")
+def download_page(slug: str):
+    # Always serve the page — the client JS checks /info and shows the same
+    # "not found" state for both inactive and nonexistent slugs, so callers
+    # cannot distinguish the two.
     return FileResponse(str(_STATIC / "download.html"), headers=_SECURITY)

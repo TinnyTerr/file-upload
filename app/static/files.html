@@ -187,6 +187,22 @@
       </div>
     </div>
 
+    <!-- API Keys section (shown only when can_use_api_keys) -->
+    <div class="mt-24" id="keys-section" style="display:none" data-reveal>
+      <div class="flex items-center mb-16" style="gap:12px">
+        <div class="section-label" style="margin:0;flex:1">API Keys</div>
+        <button class="btn btn-ghost btn-sm" id="user-create-key-btn">+ New key</button>
+      </div>
+      <div class="text-xs text-muted mb-12">
+        Keys bind to the first IP that uses them.
+        Use <code style="font-family:var(--font-mono)">Authorization: Bearer &lt;key&gt;</code>.
+        <a href="/api-docs" style="color:var(--accent);text-decoration:none">API docs →</a>
+      </div>
+      <div id="user-keys-list">
+        <div class="empty"><div class="empty-icon">⟳</div>Loading…</div>
+      </div>
+    </div>
+
   </div>
 
   <!-- Create folder modal -->
@@ -249,6 +265,32 @@
       <div id="qr-wrap" style="text-align:center;margin:16px 0"></div>
       <div class="modal-footer">
         <button class="btn btn-primary" id="success-close">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- New API key modal -->
+  <div class="modal-overlay hidden" id="user-new-key-modal">
+    <div class="modal">
+      <div class="modal-title">New API Key</div>
+      <div id="user-new-key-body"></div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" id="user-new-key-close">Done</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Reset key IP modal -->
+  <div class="modal-overlay hidden" id="user-reset-ip-modal">
+    <div class="modal">
+      <div class="modal-title">Reset key IP binding</div>
+      <div class="form-group">
+        <label>Confirm your password</label>
+        <input type="password" id="user-reset-ip-pw" placeholder="Password">
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" id="user-reset-ip-cancel">Cancel</button>
+        <button class="btn btn-primary" id="user-reset-ip-confirm">Reset IP</button>
       </div>
     </div>
   </div>

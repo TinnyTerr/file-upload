@@ -6,7 +6,6 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.base import BaseHTTPMiddleware
 
 
 class _RevalidatingStatic(StaticFiles):
@@ -81,32 +80,71 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
         finally:
             scheduler.shutdown(wait=False)
 
-    class _SecurityHeaders(BaseHTTPMiddleware):
-        async def dispatch(self, request: Request, call_next):
-            response = await call_next(request)
-            response.headers.setdefault("X-Content-Type-Options", "nosniff")
-            response.headers.setdefault("X-Frame-Options", "DENY")
-            response.headers.setdefault("Referrer-Policy", "no-referrer")
-            return response
+    # Pure ASGI middleware — never touches the receive callable so large streaming
+    # uploads flow through unimpeded. BaseHTTPMiddleware wraps receive in a task
+    # queue that can stall uploads in Firefox and pin Chrome at 0%.
 
-    class _HttpsRedirect(BaseHTTPMiddleware):
-        async def dispatch(self, request: Request, call_next):
-            scheme = request.url.scheme
-            netloc = None
+    class _SecurityHeaders:
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                await self.app(scope, receive, send)
+                return
+
+            async def _send(message):
+                if message["type"] == "http.response.start":
+                    hdrs = list(message.get("headers", []))
+                    existing = {h[0].lower() for h in hdrs}
+                    if b"x-content-type-options" not in existing:
+                        hdrs.append((b"x-content-type-options", b"nosniff"))
+                    if b"x-frame-options" not in existing:
+                        hdrs.append((b"x-frame-options", b"DENY"))
+                    if b"referrer-policy" not in existing:
+                        hdrs.append((b"referrer-policy", b"no-referrer"))
+                    message = {**message, "headers": hdrs}
+                await send(message)
+
+            await self.app(scope, receive, _send)
+
+    class _HttpsRedirect:
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                await self.app(scope, receive, send)
+                return
+
+            headers = dict(scope.get("headers", []))
+            scheme = scope.get("scheme", "http")
+
             if settings.trust_proxy:
-                forwarded_proto = request.headers.get("x-forwarded-proto")
-                if forwarded_proto:
-                    scheme = forwarded_proto.split(",", 1)[0].strip().lower()
-                forwarded_host = request.headers.get("x-forwarded-host")
-                if forwarded_host:
-                    netloc = forwarded_host.split(",", 1)[0].strip()
+                proto = headers.get(b"x-forwarded-proto", b"").decode()
+                if proto:
+                    scheme = proto.split(",", 1)[0].strip().lower()
 
             if settings.app_env != "dev" and scheme == "http":
-                url = request.url.replace(scheme="https")
-                if netloc:
-                    url = url.replace(netloc=netloc)
-                return RedirectResponse(str(url), status_code=308)
-            return await call_next(request)
+                host = headers.get(b"host", b"localhost").decode()
+                if settings.trust_proxy:
+                    fwd_host = headers.get(b"x-forwarded-host", b"").decode()
+                    if fwd_host:
+                        host = fwd_host.split(",", 1)[0].strip()
+                path = scope.get("path", "/")
+                qs = scope.get("query_string", b"").decode()
+                location = f"https://{host}{path}"
+                if qs:
+                    location += f"?{qs}"
+                await send({
+                    "type": "http.response.start",
+                    "status": 308,
+                    "headers": [(b"location", location.encode())],
+                })
+                await send({"type": "http.response.body", "body": b""})
+                return
+
+            await self.app(scope, receive, send)
 
     app = FastAPI(title="Oxymoron (for files)", lifespan=lifespan)
     app.add_middleware(_HttpsRedirect)

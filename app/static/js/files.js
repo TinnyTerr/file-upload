@@ -191,6 +191,15 @@ function buildQueueItem(item) {
     err.className = "fq-err";
     err.textContent = "✕ failed";
     row.appendChild(err);
+    const rm = document.createElement("button");
+    rm.className = "fq-rm";
+    rm.textContent = "✕";
+    rm.title = "Dismiss";
+    rm.addEventListener("click", () => {
+      fileQueue = fileQueue.filter(i => i.id !== item.id);
+      renderQueue();
+    });
+    row.appendChild(rm);
   } else {
     const rm = document.createElement("button");
     rm.className = "fq-rm";
@@ -1168,6 +1177,24 @@ function renderLinkRow(lk, f) {
     badge.className = "badge badge-gray";
     badge.textContent = !lk.active ? "inactive" : expired ? "expired" : "used up";
     row.appendChild(badge);
+
+    if (!lk.active && !expired && !usedUp && _canRegenerateLinks) {
+      const reactBtn = document.createElement("button");
+      reactBtn.className = "btn btn-ghost btn-sm";
+      reactBtn.textContent = "Reactivate";
+      reactBtn.addEventListener("click", async () => {
+        const resp = await apiFetch(`/links/${lk.id}`, { method: "PATCH", json: { active: true } });
+        if (resp.ok) { showToast("Link reactivated."); loadFiles(); }
+        else showToast("Failed to reactivate.", "error");
+      });
+      row.appendChild(reactBtn);
+    }
+
+    const hideBtn = document.createElement("button");
+    hideBtn.className = "btn btn-ghost btn-sm";
+    hideBtn.textContent = "Hide";
+    hideBtn.addEventListener("click", () => row.remove());
+    row.appendChild(hideBtn);
   }
 
   return row;
@@ -1242,6 +1269,9 @@ mintConfirm.addEventListener("click", async () => {
   loadFiles();
 });
 
+let _canRegenerateLinks = false;
+let _canUseApiKeys = false;
+
 async function checkPermissions() {
   try {
     const resp = await apiFetch("/account/me");
@@ -1253,8 +1283,149 @@ async function checkPermissions() {
       const dirOpt = document.getElementById("dir-encrypt-client");
       if (dirOpt) dirOpt.remove();
     }
+    _canRegenerateLinks = !!(me.can_regenerate_links || me.role === "master");
+    _canUseApiKeys = !!(me.can_use_api_keys || me.role === "master");
+    if (_canUseApiKeys) {
+      document.getElementById("keys-section").style.display = "";
+      loadUserKeys();
+    }
   } catch {}
 }
+
+// ── API Keys (shown only for users with can_use_api_keys) ────────────────
+async function loadUserKeys() {
+  const resp = await apiFetch('/keys/');
+  if (!resp.ok) { showToast('Failed to load API keys.', 'error'); return; }
+  const data = await resp.json();
+  const list = document.getElementById('user-keys-list');
+  list.textContent = '';
+
+  const activeKeys = data.keys.filter(k => k.active);
+  if (!activeKeys.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    const ico = document.createElement('div');
+    ico.className = 'empty-icon';
+    ico.textContent = '🔑';
+    empty.append(ico, 'No API keys yet.');
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const k of activeKeys) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.style.cssText = 'margin-bottom:8px;padding:0;overflow:hidden';
+
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--border)';
+
+    const idSpan = document.createElement('span');
+    idSpan.style.cssText = 'font-family:var(--font-mono);font-weight:500';
+    idSpan.textContent = `Key #${k.id}`;
+
+    const ipSpan = document.createElement('span');
+    ipSpan.className = 'text-xs text-muted';
+    ipSpan.textContent = k.bound_ip ? `📍 ${k.bound_ip}` : 'unbound';
+
+    const spacer = document.createElement('div');
+    spacer.style.flex = '1';
+
+    const resetBtn = document.createElement('button');
+    resetBtn.className = 'btn btn-ghost btn-sm';
+    resetBtn.textContent = 'Reset IP';
+    resetBtn.addEventListener('click', () => userResetKeyIP(k.id));
+
+    const revokeBtn = document.createElement('button');
+    revokeBtn.className = 'btn btn-ghost btn-sm';
+    revokeBtn.style.color = 'var(--danger)';
+    revokeBtn.textContent = 'Revoke';
+    revokeBtn.addEventListener('click', () => userDeactivateKey(k.id));
+
+    header.append(idSpan, ipSpan, spacer, resetBtn, revokeBtn);
+
+    const footer = document.createElement('div');
+    footer.style.cssText = 'padding:8px 14px;font-size:12px;color:var(--text-muted)';
+    let footerText = `Created: ${new Date(k.created_at).toLocaleString()}`;
+    if (k.last_used_at) footerText += ` · Last used: ${new Date(k.last_used_at).toLocaleString()}`;
+    footer.textContent = footerText;
+
+    card.append(header, footer);
+    list.appendChild(card);
+  }
+}
+
+async function userCreateKey() {
+  const resp = await apiFetch('/keys/', { method: 'POST', json: {} });
+  if (!resp.ok) {
+    const d = await resp.json().catch(() => ({}));
+    showToast(d.detail || 'Failed to create key.', 'error');
+    return;
+  }
+  const data = await resp.json();
+  const modal = document.getElementById('user-new-key-modal');
+  const rawKey = data.key;
+  const body = document.getElementById('user-new-key-body');
+  body.textContent = '';
+
+  const warning = document.createElement('div');
+  warning.className = 'text-sm mb-8';
+  warning.style.color = 'var(--warning)';
+  warning.textContent = '⚠ Copy this key now — it won\'t be shown again.';
+
+  const display = document.createElement('div');
+  display.style.cssText = 'background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;font-family:var(--font-mono);font-size:13px;word-break:break-all;margin-bottom:8px';
+  display.textContent = rawKey;
+
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'btn btn-ghost btn-sm';
+  copyBtn.textContent = 'Copy key';
+  copyBtn.addEventListener('click', () => {
+    navigator.clipboard.writeText(rawKey).then(() => showToast('Copied!'));
+  });
+
+  body.append(warning, display, copyBtn);
+  modal.classList.remove('hidden');
+  document.getElementById('user-new-key-close').onclick = () => {
+    modal.classList.add('hidden');
+    loadUserKeys();
+  };
+}
+
+async function userDeactivateKey(id) {
+  const ok = await showConfirm({
+    title: "Revoke API key?",
+    message: "Any integration using this key will immediately stop working. This cannot be undone.",
+    confirmText: "Revoke key",
+    danger: true,
+  });
+  if (!ok) return;
+  const resp = await apiFetch(`/keys/${id}`, { method: 'DELETE' });
+  if (resp.ok) { showToast('Key revoked.'); loadUserKeys(); }
+  else { const d = await resp.json().catch(() => ({})); showToast(d.detail || 'Failed to revoke key.', 'error'); }
+}
+
+let _userResetKeyId = null;
+function userResetKeyIP(id) {
+  _userResetKeyId = id;
+  document.getElementById('user-reset-ip-pw').value = '';
+  document.getElementById('user-reset-ip-modal').classList.remove('hidden');
+  setTimeout(() => document.getElementById('user-reset-ip-pw').focus(), 50);
+}
+
+document.getElementById('user-reset-ip-cancel').addEventListener('click', () => {
+  document.getElementById('user-reset-ip-modal').classList.add('hidden');
+});
+document.getElementById('user-reset-ip-confirm').addEventListener('click', async () => {
+  const pw = document.getElementById('user-reset-ip-pw').value;
+  if (!pw) return;
+  const resp = await apiFetch(`/keys/${_userResetKeyId}/reset-ip`, { method: 'POST', json: { password: pw } });
+  document.getElementById('user-reset-ip-modal').classList.add('hidden');
+  if (resp.ok) { showToast('IP binding cleared.'); loadUserKeys(); }
+  else { const d = await resp.json().catch(() => ({})); showToast(d.detail || 'Failed to reset IP.', 'error'); }
+});
+
+document.getElementById('user-create-key-btn').addEventListener('click', userCreateKey);
 
 checkPermissions();
 loadUsage();

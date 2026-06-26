@@ -60,4 +60,5 @@ def me(user: User = Depends(require_active_user), db: Session = Depends(get_db))
         "used_bytes": used,
         "can_use_api_keys": perm.can_use_api_keys,
         "can_upload_client_encrypted": perm.can_upload_client_encrypted,
+        "can_regenerate_links": perm.can_regenerate_links,
     }

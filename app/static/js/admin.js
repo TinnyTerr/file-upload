@@ -631,7 +631,27 @@ function buildLinkPanel(container, f) {
       const badge = document.createElement("span");
       badge.className = "badge badge-gray";
       badge.textContent = !lk.active ? "inactive" : expired ? "expired" : "used up";
+
+      const hideBtn = document.createElement("button");
+      hideBtn.className = "btn btn-ghost btn-sm";
+      hideBtn.textContent = "Hide";
+      hideBtn.addEventListener("click", () => lrow.remove());
+
       lrow.append(dot, slugSpan, ...(clientWarn ? [clientWarn] : []), uses, exp, badge);
+
+      if (!lk.active && !expired && !usedUp) {
+        const reactBtn = document.createElement("button");
+        reactBtn.className = "btn btn-ghost btn-sm";
+        reactBtn.textContent = "Reactivate";
+        reactBtn.addEventListener("click", async () => {
+          const resp = await apiFetch(`/links/${lk.id}`, { method: "PATCH", json: { active: true } });
+          if (resp.ok) { showToast("Link reactivated."); loadAdminFiles(); }
+          else showToast("Failed to reactivate.", "error");
+        });
+        lrow.append(reactBtn);
+      }
+
+      lrow.append(hideBtn);
     } else {
       const copyBtn = document.createElement("button");
       copyBtn.className = "btn btn-ghost btn-sm";
@@ -819,7 +839,7 @@ async function loadKeys() {
   const list = document.getElementById('keys-list');
   list.textContent = '';
 
-  if (!data.keys.length) {
+  if (!data.keys.filter(k => k.active).length) {
     const empty = document.createElement('div');
     empty.className = 'empty';
     const ico = document.createElement('div');
@@ -830,7 +850,7 @@ async function loadKeys() {
     return;
   }
 
-  for (const k of data.keys) {
+  for (const k of data.keys.filter(k => k.active)) {
     const card = document.createElement('div');
     card.className = 'card';
     card.style.cssText = 'margin-bottom:8px;padding:0;overflow:hidden';
