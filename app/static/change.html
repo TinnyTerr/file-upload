@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Change credentials — Oxymoron</title>
+  <link rel="stylesheet" href="/static/css/theme.css">
+</head>
+<body>
+  <div class="container-sm">
+    <div class="login-header" data-reveal>
+      <div class="login-logo">Oxymoron<span class="logo-sub">(for files)</span></div>
+      <div class="login-title">Set your credentials</div>
+      <div class="login-sub" id="change-sub">Your account requires a credential change before continuing.</div>
+    </div>
+
+    <div class="card" data-reveal>
+      <div id="alert" class="alert hidden"></div>
+
+      <form id="change-form">
+        <div class="form-group">
+          <label for="current-password">Current password</label>
+          <input type="password" id="current-password" autocomplete="current-password" autofocus>
+        </div>
+        <div class="divider"></div>
+        <div class="form-group">
+          <label for="new-username">New username</label>
+          <input type="text" id="new-username" autocomplete="username" autocapitalize="off" spellcheck="false">
+        </div>
+        <div class="form-group">
+          <label for="new-password">New password <span class="text-muted">(min 12 chars)</span></label>
+          <input type="password" id="new-password" autocomplete="new-password">
+        </div>
+        <div class="form-group">
+          <label for="confirm-password">Confirm new password</label>
+          <input type="password" id="confirm-password" autocomplete="new-password">
+        </div>
+        <div class="mt-24">
+          <button type="submit" class="btn btn-primary btn-full" id="submit-btn">Update credentials</button>
+        </div>
+      </form>
+    </div>
+  </div>
+  <script type="module" src="/static/js/change.js"></script>
+</body>
+</html>
