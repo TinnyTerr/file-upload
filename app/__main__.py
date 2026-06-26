@@ -11,7 +11,7 @@ PORT = 7474
 
 
 def main() -> None:
-    uvicorn.run(create_app(), host=HOST, port=PORT)
+    uvicorn.run("app.main:create_app", host=HOST, port=PORT, workers=4, factory=True)
 
 
 if __name__ == "__main__":

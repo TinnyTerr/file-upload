@@ -656,8 +656,9 @@ function showSuccessModal(data, encMode, clientKeyBytes) {
 // request body over ~100 MB with a 413 before it ever reaches the origin, so we
 // slice large files into sub-cap chunks and reassemble them server-side.
 const CHUNK_THRESHOLD = 80 * 1024 * 1024;   // 80 MiB
-const CHUNK_CONCURRENCY = 4;                // chunks in flight at once (hides RTT)
+const CHUNK_CONCURRENCY = 2;                // chunks in flight at once — 4 caused stalls on high-latency paths (EU→US via CF)
 const CHUNK_RETRIES = 4;                    // per-chunk attempts before giving up
+const CHUNK_TIMEOUT_MS = 5 * 60 * 1000;    // 5 min per attempt — fetch() has no built-in timeout
 const CHUNK_RESUME_KEY = "fu.chunked.v1";   // localStorage map of resumable sessions
 
 async function doUpload(item, { maxUsesRaw, expiresInSec, randomize, encMode = "none", compress = false, tempDays = "", archDays = "", delDays = "", directoryId = null, sharedClientKey = null }) {
@@ -863,7 +864,7 @@ async function chunkedUpload(blob, fields, item) {
       try {
         const res = await fetch(
           "/files/upload/chunk?upload_id=" + encodeURIComponent(upload_id) + "&index=" + i,
-          { method: "POST", headers: { "Content-Type": "application/octet-stream", ..._csrfHeader() }, body: slice },
+          { method: "POST", headers: { "Content-Type": "application/octet-stream", ..._csrfHeader() }, body: slice, signal: AbortSignal.timeout(CHUNK_TIMEOUT_MS) },
         );
         if (res.ok) { doneBytes += chunkLen(i); bumpProgress(); return; }
         if (res.status >= 400 && res.status < 500 && res.status !== 429) throw await _uploadErr(res);
