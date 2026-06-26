@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.deps import AppState
+
+# Generate dev-mode configs during tests so session cookies aren't Secure-only
+# (the TestClient speaks plain HTTP and would otherwise drop them → spurious 401s).
+os.environ.setdefault("FILEUPLOAD_DEFAULT_APP_ENV", "dev")
 
 
 @pytest.fixture

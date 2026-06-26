@@ -16,16 +16,22 @@ class Settings(BaseSettings):
     secret_key: str = ""
     master_key_b64: str = ""
     config_path: str = DEFAULT_CONFIG_PATH
+    trust_proxy: bool = False
 
 
 def _generate_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     secret_key = secrets.token_urlsafe(32)
     master_key_b64 = base64.b64encode(secrets.token_bytes(32)).decode()
+    # Defaults to prod (Secure cookies, etc.) for real deployments. Tests set
+    # FILEUPLOAD_DEFAULT_APP_ENV=dev so the HTTP test client can round-trip the
+    # session cookie that prod's Secure flag would otherwise withhold.
+    app_env = os.environ.get("FILEUPLOAD_DEFAULT_APP_ENV", "prod")
     body = (
-        f"APP_ENV=dev\n"
+        f"APP_ENV={app_env}\n"
         f"SECRET_KEY={secret_key}\n"
         f"MASTER_KEY_B64={master_key_b64}\n"
+        f"TRUST_PROXY=false\n"
     )
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:

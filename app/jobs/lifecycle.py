@@ -32,6 +32,8 @@ def archive_idle_job(session_factory, storage_root: Path) -> None:
             last = f.last_downloaded_at or f.created_at
             if last > threshold:
                 continue
+            if f.compressed:
+                continue
             if not should_compress(f.content_type):
                 continue
             src = storage_root / f.storage_path

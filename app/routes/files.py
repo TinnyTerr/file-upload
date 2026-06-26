@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64 as _b64
 import os
 import secrets as _secrets
 from datetime import datetime, timedelta, timezone
@@ -59,16 +58,37 @@ async def upload_file(
     archive_after_idle_days: Optional[int] = Form(None, ge=1),
     auto_unarchive_on_download: bool = Form(True),
     randomize_filename: bool = Form(False),
+    directory_id: Optional[int] = Form(None, ge=1),
     user: User = Depends(get_upload_user),
     db: Session = Depends(get_db),
 ) -> dict:
     from app.crypto.aead import encrypt_file as _encrypt_file
     from app.storage.compress import compress_file as _compress_file, should_compress
-    from app.security.secretbox import seal
+    from app.security.secretbox import seal, open_box
     from app.config import get_master_key
+    from app.models.directory import Directory
 
     if encryption_mode not in ("none", "server", "client"):
         raise HTTPException(400, detail="invalid encryption_mode")
+
+    # Uploading into a directory bundle: the directory dictates the encryption
+    # mode (one shared key for every member) and overrides per-file lifecycle —
+    # compression is skipped so the bundle-zip path stays simple, and members are
+    # permanent (the directory itself governs expiry).
+    directory: Directory | None = None
+    if directory_id is not None:
+        directory = db.get(Directory, directory_id)
+        if directory is None:
+            raise HTTPException(404, detail="directory not found")
+        if user.role != "master" and directory.owner_id != user.id:
+            raise HTTPException(403, detail="not your directory")
+        encryption_mode = directory.encryption_mode
+        compress = False
+        is_permanent = True
+        temp_days = None
+
+    if not is_permanent and not temp_days:
+        raise HTTPException(400, detail="temp_days is required when is_permanent is false")
 
     perm = ensure_permissions(db, user.id, master=(user.role == "master"))
 
@@ -133,6 +153,7 @@ async def upload_file(
 
         file_obj = FileObject(
             owner_id=user.id,
+            directory_id=directory_id,
             storage_path=rel_path,
             original_filename=display_name,
             size_bytes=size_bytes,
@@ -150,23 +171,40 @@ async def upload_file(
         db.flush()
 
         enc_key_blob_val: bytes | None = None
-        file_key_b64: str | None = None
+        enc_access_blob_val: bytes | None = None
+        access_key: str | None = None
 
         # Server-side encryption
         if encryption_mode == "server":
-            per_file_key = _secrets.token_bytes(32)
+            state = request.app.state.app_state
+            master_key = get_master_key(state.settings)
+            if directory is not None:
+                # Reuse the directory's single shared key + access credential so
+                # one ?ek= unlocks the whole bundle — no per-file key bloat.
+                if not directory.enc_key_blob:
+                    raise HTTPException(500, detail="directory key missing")
+                per_file_key = open_box(master_key, directory.enc_key_blob)
+                enc_key_blob_val = directory.enc_key_blob
+                enc_access_blob_val = directory.enc_access_blob
+            else:
+                per_file_key = _secrets.token_bytes(32)
+                # Access credential: the ?ek= value the downloader must present. The
+                # server holds the real decryption key above; this is the gate that
+                # requires the user to know the key. Sealed so owners/admins can
+                # recover the shareable URL later.
+                access_key = _secrets.token_urlsafe(18)
+                enc_key_blob_val = seal(master_key, per_file_key)
+                enc_access_blob_val = seal(master_key, access_key.encode())
             encrypted = base_path.with_suffix(".fupl.work")
             _encrypt_file(per_file_key, current, encrypted)
             current.unlink()
             current = encrypted
-            state = request.app.state.app_state
-            enc_key_blob_val = seal(get_master_key(state.settings), per_file_key)
-            file_key_b64 = _b64.urlsafe_b64encode(per_file_key).rstrip(b"=").decode()
 
         # Finalize: rename work file to storage path
         current.rename(base_path)
         file_obj.stored_size_bytes = base_path.stat().st_size
         file_obj.enc_key_blob = enc_key_blob_val
+        file_obj.enc_access_blob = enc_access_blob_val
 
     except Exception:
         for p in [work, base_path.with_suffix(".zst.work"), base_path.with_suffix(".fupl.work"), base_path]:
@@ -175,11 +213,17 @@ async def upload_file(
         raise
 
     expires_link: datetime | None = None
-    if expires_in_seconds is not None:
+    link_max_uses = max_uses
+    if directory is not None:
+        # Bundle members are reached through the directory page, not a capped
+        # per-file link, so they get an uncapped link and the directory tally grows.
+        link_max_uses = None
+        directory.total_bytes = (directory.total_bytes or 0) + file_obj.stored_size_bytes
+    elif expires_in_seconds is not None:
         expires_link = datetime.now(timezone.utc) + timedelta(seconds=expires_in_seconds)
 
     slug = new_slug()
-    link = Link(file_id=file_obj.id, slug=slug, max_uses=max_uses, expires_at=expires_link)
+    link = Link(file_id=file_obj.id, slug=slug, max_uses=link_max_uses, expires_at=expires_link)
     db.add(link)
 
     record(db, actor=user.username, action="file.uploaded",
@@ -187,37 +231,47 @@ async def upload_file(
     db.commit()
 
     base_url = _file_url(request, slug)
-    share_url = base_url + (f"?ek={file_key_b64}" if encryption_mode == "server" else "")
-    raw_base = _file_url(request, slug) + "/raw"
-    raw_url = raw_base + (f"?ek={file_key_b64}" if encryption_mode == "server" else "")
+    raw_url = base_url + "/raw"
 
     return {
         "file_id": file_obj.id,
         "slug": slug,
-        "url": share_url,
+        "url": base_url,
         "raw_url": raw_url,
+        # Server-mode access credential. The downloader appends ?ek=<access_key>;
+        # client-mode keys are generated in the browser and never returned here.
+        "access_key": access_key,
         "encryption_mode": encryption_mode,
-        "file_key": file_key_b64,
         "max_uses": max_uses,
         "expires_at": expires_link.isoformat() if expires_link else None,
         "compressed": file_compressed,
     }
 
 
+def _recover_access_key(request: Request, f: FileObject) -> str | None:
+    """Decrypt the sealed server-mode access credential, if any."""
+    if f.encryption_mode != "server" or not f.enc_access_blob:
+        return None
+    try:
+        from app.security.secretbox import open_box
+        from app.config import get_master_key
+        state = request.app.state.app_state
+        return open_box(get_master_key(state.settings), f.enc_access_blob).decode()
+    except Exception:
+        return None
+
+
 @router.get("/files/")
 def list_files(
+    request: Request,
     user: User = Depends(require_active_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    if user.role == "master":
-        files = db.query(FileObject).order_by(FileObject.created_at.desc()).all()
-    else:
-        files = (
-            db.query(FileObject)
-            .filter_by(owner_id=user.id)
-            .order_by(FileObject.created_at.desc())
-            .all()
-        )
+    # Loose files only — directory members are listed under their directory.
+    q = db.query(FileObject).filter(FileObject.directory_id.is_(None))
+    if user.role != "master":
+        q = q.filter(FileObject.owner_id == user.id)
+    files = q.order_by(FileObject.created_at.desc()).all()
 
     result = []
     for f in files:
@@ -227,8 +281,18 @@ def list_files(
             "owner_id": f.owner_id,
             "original_filename": f.original_filename,
             "size_bytes": f.size_bytes,
+            "stored_size_bytes": f.stored_size_bytes,
             "content_type": f.content_type,
             "encryption_mode": f.encryption_mode,
+            "compressed": f.compressed,
+            "archived": f.archived,
+            "lifecycle_state": f.lifecycle_state,
+            "is_permanent": f.is_permanent,
+            "expires_at": f.expires_at.isoformat() if f.expires_at else None,
+            "last_downloaded_at": f.last_downloaded_at.isoformat() if f.last_downloaded_at else None,
+            # Only set for server-mode files; lets the owner/admin rebuild the
+            # ?ek= share URL. Client-mode keys are unrecoverable by design.
+            "access_key": _recover_access_key(request, f),
             "created_at": f.created_at.isoformat(),
             "links": [
                 {
@@ -325,6 +389,10 @@ def mint_link(
         "slug": slug,
         "url": _file_url(request, slug),
         "raw_url": _file_url(request, slug) + "/raw",
+        # So the UI can build a complete, ready-to-share link. Server-mode keys
+        # are recoverable; client-mode keys never leave the uploader's browser.
+        "encryption_mode": file_obj.encryption_mode,
+        "access_key": _recover_access_key(request, file_obj),
     }
 
 

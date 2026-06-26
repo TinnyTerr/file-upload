@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Admin — fileupload</title>
+  <title>Admin — Oxymoron</title>
   <link rel="stylesheet" href="/static/css/theme.css">
   <style>
     .user-section { margin-bottom: 24px; }
@@ -34,15 +34,16 @@
 </head>
 <body>
   <nav class="nav">
-    <a href="/files" class="nav-logo">fileupload</a>
+    <a href="/files" class="nav-logo">Oxymoron<span class="logo-sub">(for files)</span></a>
     <div class="nav-spacer"></div>
     <span class="nav-user" id="nav-user"></span>
     <a href="/files" class="nav-link" data-page="files">Files</a>
+    <a href="/api-docs" class="nav-link" data-page="api">API</a>
     <button class="nav-link" id="nav-logout">Sign out</button>
   </nav>
 
   <div class="container">
-    <div class="flex items-center mb-16" style="gap:12px">
+    <div class="flex items-center mb-16" style="gap:12px" data-reveal>
       <h1 style="margin:0">Admin</h1>
       <div id="chain-badge" class="badge hidden"></div>
     </div>
@@ -67,7 +68,7 @@
       </div>
     </div>
 
-    <div class="tabs">
+    <div class="tabs" data-reveal>
       <div class="tab active" data-tab="users">Users</div>
       <div class="tab" data-tab="files">Files</div>
       <div class="tab" data-tab="audit">Audit log</div>
@@ -84,7 +85,7 @@
         <div class="table-wrap">
           <table>
             <thead><tr>
-              <th>Username</th><th>Role</th><th>Upload</th><th>Quota</th><th>Storage used</th><th>Created</th><th></th>
+              <th>Username</th><th>Role</th><th>Permissions</th><th>Files</th><th>Storage (used / quota)</th><th>Created</th><th></th>
             </tr></thead>
             <tbody id="users-tbody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
           </table>
@@ -101,6 +102,14 @@
 
     <!-- Audit tab -->
     <div class="tab-panel" id="tab-audit">
+      <div class="flex items-center mb-12" style="gap:8px;flex-wrap:wrap">
+        <input type="text" id="audit-filter" placeholder="Filter by actor, action, target or IP…"
+               autocapitalize="off" spellcheck="false" style="flex:1;min-width:220px">
+        <select id="audit-action-filter" style="max-width:200px">
+          <option value="">All actions</option>
+        </select>
+        <button class="btn btn-ghost btn-sm" id="audit-refresh">↻ Refresh</button>
+      </div>
       <div class="card" style="padding:0;overflow:hidden">
         <div class="table-wrap">
           <table>
@@ -170,6 +179,12 @@
       <div class="checkbox-group">
         <input type="checkbox" id="perm-can-upload">
         <label for="perm-can-upload">Can upload</label>
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="perm-can-client-enc">
+        <label for="perm-can-client-enc">Can upload end-to-end (client-side) encrypted
+          <i class="help-icon" data-tip="Lets this user encrypt in the browser so the server never sees the key. The key lives only in the share link (#ek=) and is unrecoverable if lost.">?</i>
+        </label>
       </div>
       <div class="checkbox-group">
         <input type="checkbox" id="perm-can-delete">

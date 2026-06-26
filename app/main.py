@@ -3,9 +3,21 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+
+
+class _RevalidatingStatic(StaticFiles):
+    """Serve static assets with `Cache-Control: no-cache` so browsers always
+    revalidate (cheap 304s via ETag) instead of silently running a stale cached
+    download.js/aead-worker.js after we ship a fix."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 from app.audit.log import install_append_only_triggers
 from app.bootstrap import ensure_master
@@ -21,6 +33,7 @@ from app.security.sessions import SessionManager
 from app.routes.auth import router as auth_router
 from app.routes.account import router as account_router
 from app.routes.files import router as files_router
+from app.routes.directories import router as directories_router
 from app.routes.public import router as public_router
 from app.routes.users import router as users_router
 from app.routes.audit_view import router as audit_router
@@ -68,7 +81,16 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
         finally:
             scheduler.shutdown(wait=False)
 
-    app = FastAPI(title="fileupload", lifespan=lifespan)
+    class _SecurityHeaders(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            response = await call_next(request)
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            response.headers.setdefault("X-Frame-Options", "DENY")
+            response.headers.setdefault("Referrer-Policy", "no-referrer")
+            return response
+
+    app = FastAPI(title="Oxymoron (for files)", lifespan=lifespan)
+    app.add_middleware(_SecurityHeaders)
     app.state.app_state = state
 
     @app.get("/health")
@@ -102,11 +124,12 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
     app.include_router(auth_router)
     app.include_router(account_router)
     app.include_router(files_router)
+    app.include_router(directories_router)
     app.include_router(public_router)
     app.include_router(users_router)
     app.include_router(audit_router)
     app.include_router(keys_router)
 
-    app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
+    app.mount("/static", _RevalidatingStatic(directory=str(_STATIC)), name="static")
 
     return app

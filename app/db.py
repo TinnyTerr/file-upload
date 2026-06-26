@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, TypeDecorator, create_engine, event
+from sqlalchemy import DateTime, TypeDecorator, create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -74,8 +74,31 @@ def init_db(engine: Engine) -> None:
     from app.models import session as _session  # noqa: F401
     from app.models import login_attempt as _la  # noqa: F401
     from app.models import permission as _permission  # noqa: F401
+    from app.models import directory as _directory  # noqa: F401
     from app.models import file as _file  # noqa: F401
     from app.models import link as _link  # noqa: F401
     from app.models import api_key as _api_key  # noqa: F401
     from app.models import credential as _credential  # noqa: F401
     Base.metadata.create_all(engine)
+    _migrate_add_columns(engine)
+
+
+# Minimal additive migrations for SQLite: create_all() never alters existing
+# tables, so columns added to models after a DB was first created must be patched
+# in by hand. Each entry is (table, column, column DDL). Idempotent.
+_ADDED_COLUMNS = [
+    ("files", "enc_access_blob", "BLOB"),
+    ("files", "directory_id", "INTEGER"),
+]
+
+
+def _migrate_add_columns(engine: Engine) -> None:
+    inspector = inspect(engine)
+    existing_tables = set(inspector.get_table_names())
+    with engine.begin() as conn:
+        for table, column, ddl in _ADDED_COLUMNS:
+            if table not in existing_tables:
+                continue
+            cols = {c["name"] for c in inspector.get_columns(table)}
+            if column not in cols:
+                conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN {column} {ddl}'))

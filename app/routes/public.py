@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import base64 as _b64
 import re as _re
+import secrets as _secrets
 import tempfile
+import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -17,12 +20,59 @@ from app.models.file import FileObject
 router = APIRouter(tags=["public"])
 
 _STATIC = Path(__file__).parent.parent / "static"
+
+# CSP for the download experience. The page decrypts in a Web Worker and renders
+# image/video/audio/pdf previews, so worker-src/media-src/img-src/frame-src must
+# be allowed. style-src includes 'unsafe-inline' because the page and its scripts
+# use inline styles — without it Firefox (which strictly enforces CSP on inline
+# styles) floods the console with violations and the page renders unstyled.
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
+    "img-src 'self' data: blob:; "
+    "media-src 'self' blob:; "
+    "frame-src 'self'; "
+    "worker-src 'self' blob:; "
+    "connect-src 'self'; "
+    "object-src 'none'"
+)
 _SECURITY = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
-    "Content-Security-Policy": "default-src 'self'; script-src 'self'; object-src 'none'",
+    "Content-Security-Policy": _CSP,
 }
 _CHUNK = 256 * 1024
+
+
+def _content_disposition(filename: str) -> str:
+    # Strip control characters then build RFC 6266 header with both
+    # an ASCII fallback (for old clients) and a UTF-8 encoded form.
+    cleaned = "".join(c for c in filename if ord(c) >= 0x20)
+    ascii_fallback = cleaned.encode("ascii", "replace").decode().replace('"', "_").replace("\\", "_")
+    encoded = urllib.parse.quote(cleaned, safe="")
+    return f'attachment; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded}'
+
+
+def _verify_access_key(request: Request, f: FileObject, ek: str | None) -> bool:
+    """Check the server-mode ?ek= access credential against the sealed value.
+
+    Files encrypted before access credentials existed have no sealed blob; those
+    remain downloadable without a key (the server still decrypts them).
+    """
+    if not f.enc_access_blob:
+        return True  # legacy server-encrypted file — no credential required
+    if not ek:
+        return False
+    try:
+        from app.security.secretbox import open_box
+        from app.config import get_master_key
+        state = request.app.state.app_state
+        expected = open_box(get_master_key(state.settings), f.enc_access_blob).decode()
+    except Exception:
+        return False
+    return _secrets.compare_digest(ek, expected)
 
 
 def _parse_range(header: str, file_size: int) -> tuple[int, int] | None:
@@ -67,7 +117,7 @@ def file_info(slug: str, db: Session = Depends(get_db)) -> dict:
 
 
 @router.get("/file/{slug}/raw")
-def download_raw(slug: str, request: Request, db: Session = Depends(get_db)):
+def download_raw(slug: str, request: Request, ek: str | None = None, db: Session = Depends(get_db)):
     from app.storage.paths import safe_join, storage_root
 
     link = resolve_active_link(db, slug)
@@ -77,10 +127,16 @@ def download_raw(slug: str, request: Request, db: Session = Depends(get_db)):
     if f is None:
         raise HTTPException(404, detail="not found")
 
+    # Server-side encryption gate: require the ?ek= access credential BEFORE we
+    # consume a use, so a wrong/missing key never burns a limited-use download.
+    if f.encryption_mode == "server" and not _verify_access_key(request, f, ek):
+        raise HTTPException(status_code=401, detail="missing or invalid access key (?ek=)")
+
     if not consume_use(db, slug):
         raise HTTPException(404, detail="not found")
 
     try:
+        f.last_downloaded_at = datetime.now(timezone.utc)
         record(db, actor="anonymous", action="file.downloaded",
                target=f"file:{f.id}", ip=client_ip(request))
         db.commit()
@@ -94,10 +150,9 @@ def download_raw(slug: str, request: Request, db: Session = Depends(get_db)):
     if not full_path.exists():
         raise HTTPException(500, detail="file missing from storage")
 
-    filename = f.original_filename.replace('"', '\\"')
     base_headers = {
         **_SECURITY,
-        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Content-Disposition": _content_disposition(f.original_filename),
         "Accept-Ranges": "bytes",
     }
 
@@ -105,44 +160,72 @@ def download_raw(slug: str, request: Request, db: Session = Depends(get_db)):
     needs_decompress = f.compressed or f.archived
 
     if needs_decrypt:
+        import os as _os
         from app.crypto.aead import decrypt_stream as _decrypt_stream
+        from app.security.secretbox import open_box
+        from app.config import get_master_key
+        from starlette.background import BackgroundTask
 
-        ek = request.query_params.get("ek")
-        if not ek:
-            raise HTTPException(status_code=403, detail="encryption key required")
+        if not f.enc_key_blob:
+            raise HTTPException(status_code=500, detail="encryption key not stored")
         try:
-            per_file_key = _b64.urlsafe_b64decode(ek + "==")
+            state = request.app.state.app_state
+            per_file_key = open_box(get_master_key(state.settings), f.enc_key_blob)
         except Exception:
-            raise HTTPException(status_code=400, detail="invalid encryption key")
+            raise HTTPException(status_code=500, detail="failed to recover encryption key")
 
         if needs_decompress:
             if f.archived and not f.auto_unarchive_on_download:
                 raise HTTPException(503, detail="file is archived; contact admin to unarchive")
             from app.storage.compress import decompress_stream as _dec
 
-            def _decrypt_decompress_stream():
-                fd, tmp_path = tempfile.mkstemp(suffix=".dec")
-                tmp = Path(tmp_path)
-                try:
-                    import os
-                    os.close(fd)
-                    with open(tmp, "wb") as fh:
-                        for chunk in _decrypt_stream(per_file_key, full_path):
-                            fh.write(chunk)
-                    yield from _dec(tmp, f.size_bytes)
-                finally:
-                    tmp.unlink(missing_ok=True)
+            fd1, tmp1_path = tempfile.mkstemp(suffix=".dec")
+            tmp1 = Path(tmp1_path)
+            _os.close(fd1)
+            try:
+                with open(tmp1, "wb") as fh:
+                    for chunk in _decrypt_stream(per_file_key, full_path):
+                        fh.write(chunk)
+            except Exception:
+                tmp1.unlink(missing_ok=True)
+                raise HTTPException(500, detail="decryption failed")
 
-            return StreamingResponse(
-                _decrypt_decompress_stream(),
+            fd2, tmp2_path = tempfile.mkstemp(suffix=".plain")
+            tmp2 = Path(tmp2_path)
+            _os.close(fd2)
+            try:
+                with open(tmp2, "wb") as fh:
+                    for chunk in _dec(tmp1, f.size_bytes):
+                        fh.write(chunk)
+            except Exception:
+                tmp1.unlink(missing_ok=True)
+                tmp2.unlink(missing_ok=True)
+                raise HTTPException(500, detail="decompression failed")
+            tmp1.unlink(missing_ok=True)
+
+            return FileResponse(
+                str(tmp2),
                 media_type=f.content_type or "application/octet-stream",
-                headers={**base_headers, "Content-Length": str(f.size_bytes)},
+                headers=base_headers,
+                background=BackgroundTask(lambda p=tmp2: p.unlink(missing_ok=True)),
             )
 
-        return StreamingResponse(
-            _decrypt_stream(per_file_key, full_path),
+        fd, tmp_path = tempfile.mkstemp(suffix=".dec")
+        tmp = Path(tmp_path)
+        _os.close(fd)
+        try:
+            with open(tmp, "wb") as fh:
+                for chunk in _decrypt_stream(per_file_key, full_path):
+                    fh.write(chunk)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise HTTPException(500, detail="decryption failed")
+
+        return FileResponse(
+            str(tmp),
             media_type=f.content_type or "application/octet-stream",
-            headers={**base_headers, "Content-Length": str(f.size_bytes)},
+            headers=base_headers,
+            background=BackgroundTask(lambda p=tmp: p.unlink(missing_ok=True)),
         )
 
     if needs_decompress:

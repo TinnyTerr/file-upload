@@ -37,10 +37,12 @@ def get_db(request: Request) -> Iterator[Session]:
 
 
 def client_ip(request: Request) -> str:
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        # Trust exactly one proxy hop: rightmost entry is the proxy's view of the client.
-        return xff.split(",")[-1].strip()
+    state = request.app.state.app_state
+    if getattr(state.settings, "trust_proxy", False):
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            # Leftmost entry is the original client when behind a trusted proxy.
+            return xff.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
 
 

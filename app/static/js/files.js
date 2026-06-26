@@ -1,4 +1,4 @@
-import { apiFetch, csrf, user, requireAuth, setupNav, formatBytes, formatDate, parseDuration, showToast } from "./api.js";
+import { apiFetch, csrf, user, requireAuth, setupNav, formatBytes, formatDate, parseDuration, showToast, showConfirm, observeReveals } from "./api.js";
 
 if (!requireAuth()) throw new Error("not authenticated");
 setupNav("files");
@@ -67,7 +67,7 @@ function setMode(mode) {
     fileInput.setAttribute("multiple", "");
     addMoreInput.setAttribute("webkitdirectory", "");
     addMoreInput.setAttribute("multiple", "");
-    dropSub.textContent = "Select an entire folder — all files inside will be queued";
+    dropSub.textContent = "Select a folder — it becomes one shared page with a download-all link";
     addMoreWrap.style.display = "";
   } else {
     dropSub.textContent = "Any file type · any size";
@@ -218,8 +218,7 @@ function buildQueueItem(item) {
   if (item.status === "done" && item.result) {
     const links = document.createElement("div");
     links.className = "fq-links";
-    links.appendChild(makeCopyRow(item.result.url, "Share"));
-    links.appendChild(makeCopyRow(item.result.raw_url, "Direct"));
+    links.appendChild(makeCopyRow(item.result._share_full || item.result.url, "Share"));
     el.appendChild(links);
   }
 
@@ -264,6 +263,14 @@ async function startUpload() {
   const pending = fileQueue.filter(i => i.status === "queued");
   if (!pending.length) return;
 
+  const opts = { maxUsesRaw, expiresInSec, randomize, encMode, compress, tempDays, archDays, delDays };
+
+  // Folder mode → bundle everything into one shareable directory.
+  if (uploadMode === "folder") {
+    await uploadAsDirectory(pending, opts);
+    return;
+  }
+
   uploadBtn.disabled = true;
   clearAllBtn.style.display = "none";
   progressWrap.style.display = "";
@@ -272,7 +279,7 @@ async function startUpload() {
 
   let completed = 0;
   for (const item of pending) {
-    await doUpload(item, { maxUsesRaw, expiresInSec, randomize, encMode, compress, tempDays, archDays, delDays });
+    await doUpload(item, opts);
     completed++;
     progressBar.style.width = Math.round((completed / pending.length) * 100) + "%";
     progressLbl.textContent = `${completed} / ${pending.length} uploaded`;
@@ -293,12 +300,132 @@ async function startUpload() {
     : errCount ? `${errCount} failed` : "";
 }
 
-async function encryptFileClientSide(file) {
+// Folder mode: create one directory, then upload every queued file into it with
+// the directory's single shared key. One link to share the whole bundle.
+async function uploadAsDirectory(pending, opts) {
+  let title = "Shared folder";
+  const rel = pending[0]?.file.webkitRelativePath;
+  if (rel && rel.includes("/")) title = rel.split("/")[0];
+
+  uploadBtn.disabled = true;
+  clearAllBtn.style.display = "none";
+  progressWrap.style.display = "";
+  progressBar.style.width = "0%";
+  progressLbl.textContent = "Creating folder…";
+
+  const body = { title, encryption_mode: opts.encMode };
+  if (opts.expiresInSec) body.expires_in_seconds = opts.expiresInSec;
+
+  let dir;
+  try {
+    const resp = await apiFetch("/directories", { method: "POST", json: body });
+    if (!resp.ok) { const d = await resp.json().catch(() => ({})); throw new Error(d.detail || "could not create folder"); }
+    dir = await resp.json();
+  } catch (err) {
+    progressWrap.style.display = "none";
+    uploadBtn.disabled = false;
+    clearAllBtn.style.display = fileQueue.length ? "" : "none";
+    showToast("Folder creation failed: " + err.message, "error");
+    return;
+  }
+
+  // One shared key encrypts every member end-to-end (client mode only).
+  const sharedKey = opts.encMode === "client" ? crypto.getRandomValues(new Uint8Array(32)) : null;
+
+  let completed = 0;
+  for (const item of pending) {
+    await doUpload(item, { ...opts, directoryId: dir.id, sharedClientKey: sharedKey });
+    completed++;
+    progressBar.style.width = Math.round((completed / pending.length) * 100) + "%";
+    progressLbl.textContent = `${completed} / ${pending.length} uploaded`;
+  }
+
+  progressWrap.style.display = "none";
+  clearAllBtn.style.display = fileQueue.length ? "" : "none";
+  uploadBtn.disabled = fileQueue.filter(i => i.status === "queued").length === 0;
+
+  const doneCount = pending.filter(i => i.status === "done").length;
+  const errCount  = pending.filter(i => i.status === "error").length;
+  if (doneCount) showToast(`Folder shared — ${doneCount} file${doneCount !== 1 ? "s" : ""}.`);
+  if (errCount)  showToast(`${errCount} file${errCount !== 1 ? "s" : ""} failed.`, "error");
+
+  countLabel.textContent = doneCount ? `Folder of ${doneCount} shared${errCount ? `, ${errCount} failed` : ""}` : "";
+  if (doneCount) showDirectorySuccess(dir, opts.encMode, sharedKey);
+  loadFiles();
+  loadUsage();
+}
+
+function directoryShareUrl(dir, encMode, sharedKeyBytes) {
+  let url = dir.url;
+  if (encMode === "client" && sharedKeyBytes) url += "#ek=" + b64urlEncode(sharedKeyBytes);
+  else if (encMode === "server" && dir.access_key) url += "?ek=" + encodeURIComponent(dir.access_key);
+  return url;
+}
+
+function showDirectorySuccess(dir, encMode, sharedKeyBytes) {
+  const body = document.getElementById("success-body");
+  body.textContent = "";
+  document.querySelector("#success-modal .modal-title").textContent = "Folder shared";
+
+  const shareUrl = directoryShareUrl(dir, encMode, sharedKeyBytes);
+
+  const lead = document.createElement("div");
+  lead.className = "dialog-msg";
+  lead.style.marginBottom = "12px";
+  lead.textContent = "Anyone with this link can browse the folder and download everything as a zip.";
+  body.appendChild(lead);
+
+  const row = document.createElement("div");
+  row.className = "copy-row";
+  const urlSpan = document.createElement("span");
+  urlSpan.className = "copy-row-text";
+  urlSpan.style.cssText = "font-size:12px;word-break:break-all";
+  urlSpan.textContent = shareUrl;
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "btn btn-ghost btn-sm";
+  copyBtn.textContent = "Copy";
+  copyBtn.addEventListener("click", () => {
+    navigator.clipboard.writeText(shareUrl);
+    copyBtn.textContent = "Copied!";
+    copyBtn.classList.add("copied");
+    setTimeout(() => { copyBtn.textContent = "Copy"; copyBtn.classList.remove("copied"); }, 1500);
+  });
+  row.append(urlSpan, copyBtn);
+  body.appendChild(row);
+
+  if (encMode === "client" && sharedKeyBytes) {
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.style.cssText = "color:var(--warning);margin-top:8px";
+    hint.textContent = "⚠ End-to-end encrypted. The key (#ek=) is in this URL only — save it. It cannot be recovered from the server.";
+    body.appendChild(hint);
+  } else if (encMode === "server") {
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.style.cssText = "color:var(--warning);margin-top:8px";
+    hint.textContent = "🔐 Server-encrypted. The access key (?ek=) is required — share the full URL. You can also recover it later from your folder list.";
+    body.appendChild(hint);
+  }
+
+  const qrWrap = document.getElementById("qr-wrap");
+  qrWrap.textContent = "";
+  if (typeof QRCode !== "undefined") {
+    new QRCode(qrWrap, { text: shareUrl, width: 120, height: 120, colorDark: "#e7efe9", colorLight: "#0a1416" });
+  }
+
+  const modal = document.getElementById("success-modal");
+  modal.classList.remove("hidden");
+  document.getElementById("success-close").onclick = () => modal.classList.add("hidden");
+}
+
+async function encryptFileClientSide(file, key = null) {
   return new Promise((resolve, reject) => {
     const worker = new Worker("/static/js/aead-worker.js");
     const reader = new FileReader();
     reader.onload = (e) => {
-      worker.postMessage({ type: "encrypt", plaintext: e.target.result, key: null }, [e.target.result]);
+      // A provided key (folder bundles) encrypts every member with one key; null
+      // makes the worker mint a fresh per-file key.
+      worker.postMessage({ type: "encrypt", plaintext: e.target.result, key }, [e.target.result]);
     };
     worker.onmessage = (e) => {
       if (e.data.type === "encrypted") {
@@ -317,14 +444,24 @@ function b64urlEncode(bytes) {
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 
+// Build the complete shareable URL including the decryption/access key:
+//  · client mode → #ek= fragment (never reaches the server)
+//  · server mode → ?ek= query credential (the server's access gate)
+function fullShareUrl(result, encMode, clientKeyBytes) {
+  let url = result.url || result.share_url || "";
+  if (encMode === "client" && clientKeyBytes) {
+    url += "#ek=" + b64urlEncode(clientKeyBytes);
+  } else if (encMode === "server" && result.access_key) {
+    url += "?ek=" + encodeURIComponent(result.access_key);
+  }
+  return url;
+}
+
 function showSuccessModal(data, encMode, clientKeyBytes) {
   const body = document.getElementById("success-body");
   body.textContent = "";
 
-  let shareUrl = data.url || data.share_url || "";
-  if (encMode === "client" && clientKeyBytes) {
-    shareUrl = shareUrl + "#ek=" + b64urlEncode(clientKeyBytes);
-  }
+  const shareUrl = fullShareUrl(data, encMode, clientKeyBytes);
 
   const row = document.createElement("div");
   row.className = "copy-row";
@@ -343,13 +480,13 @@ function showSuccessModal(data, encMode, clientKeyBytes) {
     const hint = document.createElement("div");
     hint.className = "hint";
     hint.style.cssText = "color:var(--warning);margin-top:8px";
-    hint.textContent = "⚠ The key is in the URL fragment — save it. It cannot be recovered from the server.";
+    hint.textContent = "⚠ End-to-end encrypted. The key (#ek=) is in this URL only — save it. It cannot be recovered from the server.";
     body.appendChild(hint);
   } else if (encMode === "server") {
     const hint = document.createElement("div");
     hint.className = "hint";
-    hint.style.marginTop = "8px";
-    hint.textContent = "The ?ek= key is embedded in the URL above.";
+    hint.style.cssText = "color:var(--warning);margin-top:8px";
+    hint.textContent = "🔐 Server-side encrypted. The access key (?ek=) is required to download — share the full URL. (You can also recover it later from your Files list.)";
     body.appendChild(hint);
   }
 
@@ -365,7 +502,7 @@ function showSuccessModal(data, encMode, clientKeyBytes) {
   };
 }
 
-async function doUpload(item, { maxUsesRaw, expiresInSec, randomize, encMode = "none", compress = false, tempDays = "", archDays = "", delDays = "" }) {
+async function doUpload(item, { maxUsesRaw, expiresInSec, randomize, encMode = "none", compress = false, tempDays = "", archDays = "", delDays = "", directoryId = null, sharedClientKey = null }) {
   item.status = "uploading";
   item.progress = 0;
   refreshQueueItem(item);
@@ -380,7 +517,7 @@ async function doUpload(item, { maxUsesRaw, expiresInSec, randomize, encMode = "
 
   if (encMode === "client") {
     try {
-      const { ciphertext, keyBytes } = await encryptFileClientSide(item.file);
+      const { ciphertext, keyBytes } = await encryptFileClientSide(item.file, sharedClientKey);
       uploadFile = new Blob([ciphertext], { type: "application/octet-stream" });
       clientKeyBytes = keyBytes;
     } catch (err) {
@@ -397,6 +534,7 @@ async function doUpload(item, { maxUsesRaw, expiresInSec, randomize, encMode = "
   fd.append("randomize_filename", randomize ? "true" : "false");
   fd.append("encryption_mode", encMode);
   fd.append("compress", compress ? "true" : "false");
+  if (directoryId != null) fd.append("directory_id", String(directoryId));
   if (maxUsesRaw)   fd.append("max_uses", maxUsesRaw);
   if (expiresInSec) fd.append("expires_in_seconds", String(expiresInSec));
   if (tempDays) {
@@ -432,7 +570,14 @@ async function doUpload(item, { maxUsesRaw, expiresInSec, randomize, encMode = "
   } else {
     item.status = "done";
     try { item.result = JSON.parse(xhr.responseText); } catch {}
-    if (item.result) showSuccessModal(item.result, encMode, clientKeyBytes);
+    if (item.result) {
+      // Persist the key-bearing share URL so the queue row copies the right link
+      // even after the success modal is dismissed (client keys live only here).
+      item.result._share_full = fullShareUrl(item.result, encMode, clientKeyBytes);
+      // Directory members are presented together via the folder modal, not one
+      // success popup each.
+      if (directoryId == null) showSuccessModal(item.result, encMode, clientKeyBytes);
+    }
   }
   refreshQueueItem(item);
 }
@@ -479,31 +624,157 @@ async function loadFiles() {
   filesListEl.appendChild(loader);
 
   try {
-    const resp = await apiFetch("/files/");
-    if (!resp.ok) { filesListEl.textContent = "Failed to load files."; return; }
-    renderFiles((await resp.json()).files);
+    const [fResp, dResp] = await Promise.all([apiFetch("/files/"), apiFetch("/directories/")]);
+    const files = fResp.ok ? (await fResp.json()).files : [];
+    const dirs  = dResp.ok ? (await dResp.json()).directories : [];
+    renderListing(dirs, files);
   } catch {
     filesListEl.textContent = "Network error.";
   }
 }
 
-function renderFiles(files) {
+function staggerIn(card, i) {
+  card.classList.add("card-enter");
+  card.style.animationDelay = Math.min(i, 10) * 45 + "ms";
+}
+
+function renderListing(dirs, files) {
   filesListEl.textContent = "";
-  if (!files.length) {
+  const u = user.get();
+  const isMaster = u?.role === "master";
+  if (isMaster) document.getElementById("files-heading").textContent = "All files & folders";
+
+  if (!dirs.length && !files.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
     const ico = document.createElement("div");
     ico.className = "empty-icon";
     ico.textContent = "📂";
     empty.appendChild(ico);
-    empty.appendChild(document.createTextNode("No files yet. Upload one above."));
+    empty.appendChild(document.createTextNode("Nothing here yet. Upload a file or share a folder above."));
     filesListEl.appendChild(empty);
     return;
   }
-  const u = user.get();
-  const isMaster = u?.role === "master";
-  if (isMaster) document.getElementById("files-heading").textContent = "All files";
-  for (const f of files) filesListEl.appendChild(renderFileCard(f, isMaster));
+
+  let i = 0;
+  for (const d of dirs)  { const c = renderDirectoryCard(d, isMaster); staggerIn(c, i++); filesListEl.appendChild(c); }
+  for (const f of files) { const c = renderFileCard(f, isMaster);      staggerIn(c, i++); filesListEl.appendChild(c); }
+}
+
+function renderDirectoryCard(d, isMaster) {
+  const card = document.createElement("div");
+  card.className = "file-card";
+
+  const header = document.createElement("div");
+  header.className = "file-card-header";
+  header.style.cursor = "default";
+
+  const ico = document.createElement("span");
+  ico.style.cssText = "font-size:18px;flex-shrink:0;opacity:0.7;";
+  ico.textContent = "📁";
+
+  const name = document.createElement("div");
+  name.className = "file-name";
+  name.textContent = d.title;
+  name.title = d.title;
+
+  const meta = document.createElement("div");
+  meta.style.cssText = "display:flex;gap:10px;align-items:center;flex-shrink:0";
+
+  if (isMaster) {
+    const ob = document.createElement("span");
+    ob.className = "badge badge-gray";
+    ob.textContent = `uid:${d.owner_id}`;
+    meta.appendChild(ob);
+  }
+
+  const fc = document.createElement("span");
+  fc.className = "file-meta";
+  fc.textContent = `${d.file_count} file${d.file_count !== 1 ? "s" : ""}`;
+  meta.appendChild(fc);
+
+  const sz = document.createElement("span");
+  sz.className = "file-meta";
+  sz.textContent = formatBytes(d.total_bytes);
+  meta.appendChild(sz);
+
+  if (d.encryption_mode === "client") {
+    const b = document.createElement("span");
+    b.className = "badge badge-orange";
+    b.setAttribute("data-tooltip", "End-to-end encrypted — key lives only in the share link (#ek=)");
+    b.textContent = "🔒 e2e";
+    meta.appendChild(b);
+  } else if (d.encryption_mode === "server") {
+    const b = document.createElement("span");
+    b.className = "badge badge-orange";
+    b.setAttribute("data-tooltip", "Server-encrypted — one ?ek= access key unlocks the whole folder");
+    b.textContent = "🔐 server";
+    meta.appendChild(b);
+  }
+
+  const fb = document.createElement("span");
+  fb.className = "badge badge-green";
+  fb.textContent = "folder";
+  meta.appendChild(fb);
+
+  const acts = document.createElement("div");
+  acts.style.cssText = "display:flex;gap:5px;flex-shrink:0";
+
+  const shareUrl = directoryShareUrl(d, d.encryption_mode, null);
+
+  const openBtn = document.createElement("a");
+  openBtn.className = "btn btn-ghost btn-sm";
+  openBtn.textContent = "Open";
+  openBtn.href = shareUrl;
+  openBtn.target = "_blank";
+  openBtn.rel = "noopener";
+  openBtn.setAttribute("data-tooltip", "Open the shared folder page");
+
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "btn btn-ghost btn-sm";
+  copyBtn.textContent = "Copy";
+  copyBtn.addEventListener("click", e => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(shareUrl);
+    copyBtn.textContent = "Copied!";
+    copyBtn.classList.add("copied");
+    setTimeout(() => { copyBtn.textContent = "Copy"; copyBtn.classList.remove("copied"); }, 1500);
+  });
+
+  const delBtn = document.createElement("button");
+  delBtn.className = "btn btn-danger btn-sm";
+  delBtn.textContent = "Delete all";
+  delBtn.addEventListener("click", e => { e.stopPropagation(); deleteDirectory(d.id, d.title, d.file_count); });
+
+  acts.append(openBtn, copyBtn, delBtn);
+  header.append(ico, name, meta, acts);
+  card.appendChild(header);
+
+  if (d.encryption_mode === "client") {
+    const body = document.createElement("div");
+    body.className = "file-body";
+    body.style.cssText = "font-size:12px;color:var(--text-muted);line-height:1.5";
+    body.textContent = "End-to-end encrypted. The #ek= key is only in the link you saved at creation — append it to “Open”, or the files can't be decrypted.";
+    card.appendChild(body);
+  }
+
+  return card;
+}
+
+async function deleteDirectory(id, title, count) {
+  const ok = await showConfirm({
+    title: "Delete folder?",
+    message: `"${title}" and all ${count} file${count !== 1 ? "s" : ""} inside will be permanently removed. This cannot be undone.`,
+    confirmText: "Delete folder",
+    danger: true,
+  });
+  if (!ok) return;
+  const resp = await apiFetch(`/directories/${id}`, { method: "DELETE" });
+  if (resp.ok) { showToast("Folder deleted."); loadFiles(); loadUsage(); }
+  else {
+    const d = await resp.json().catch(() => ({}));
+    showToast(d.detail || "Delete failed.", "error");
+  }
 }
 
 function renderFileCard(f, isMaster) {
@@ -542,6 +813,17 @@ function renderFileCard(f, isMaster) {
   dt.textContent = formatDate(f.created_at);
   meta.appendChild(dt);
 
+  const encB = encBadge(f);
+  if (encB) meta.appendChild(encB);
+
+  if (f.compressed) {
+    const cb = document.createElement("span");
+    cb.className = "badge badge-gray";
+    cb.title = "Stored compressed (zstd)";
+    cb.textContent = "zst";
+    meta.appendChild(cb);
+  }
+
   const activeLinks = f.links.filter(l => l.active).length;
   const lb = document.createElement("span");
   lb.className = activeLinks > 0 ? "badge badge-green" : "badge badge-gray";
@@ -569,14 +851,44 @@ function renderFileCard(f, isMaster) {
   if (f.links.length) {
     const body = document.createElement("div");
     body.className = "file-body";
-    for (const lk of f.links) body.appendChild(renderLinkRow(lk));
+    for (const lk of f.links) body.appendChild(renderLinkRow(lk, f));
     card.appendChild(body);
   }
 
   return card;
 }
 
-function renderLinkRow(lk) {
+// Encryption badge for a file row, or null for unencrypted files.
+function encBadge(f) {
+  if (f.encryption_mode === "client") {
+    const b = document.createElement("span");
+    b.className = "badge badge-orange";
+    b.title = "End-to-end encrypted — key lives only in the share link (#ek=)";
+    b.textContent = "🔒 e2e";
+    return b;
+  }
+  if (f.encryption_mode === "server") {
+    const b = document.createElement("span");
+    b.className = "badge badge-orange";
+    b.title = "Server-side encrypted — needs the ?ek= access key to download";
+    b.textContent = "🔐 server";
+    return b;
+  }
+  return null;
+}
+
+// Full share URL for a link row. Server-mode keys are recoverable and appended
+// as ?ek=; client-mode keys are not recoverable from the server, so the base URL
+// is returned (the uploader must use the link captured at upload time).
+function linkUrlWithKey(slug, f) {
+  const base = `${location.origin}/file/${slug}`;
+  if (f && f.encryption_mode === "server" && f.access_key) {
+    return base + "?ek=" + encodeURIComponent(f.access_key);
+  }
+  return base;
+}
+
+function renderLinkRow(lk, f) {
   const now     = Date.now();
   const expired = lk.expires_at && new Date(lk.expires_at).getTime() < now;
   const usedUp  = lk.max_uses != null && lk.use_count >= lk.max_uses;
@@ -589,11 +901,20 @@ function renderLinkRow(lk) {
   dot.style.cssText = `width:6px;height:6px;border-radius:50%;background:${inactive ? "var(--text-muted)" : "var(--success)"};flex-shrink:0;margin-top:2px`;
   row.appendChild(dot);
 
-  const url = `${location.origin}/file/${lk.slug}`;
+  const url = linkUrlWithKey(lk.slug, f);
   const urlSpan = document.createElement("span");
   urlSpan.className = "link-url";
   urlSpan.textContent = url;
+  urlSpan.title = url;
   row.appendChild(urlSpan);
+
+  if (f && f.encryption_mode === "client") {
+    const warn = document.createElement("span");
+    warn.className = "badge badge-orange";
+    warn.title = "The #ek= key is not stored server-side — append the key you saved at upload";
+    warn.textContent = "needs #ek=";
+    row.appendChild(warn);
+  }
 
   if (lk.max_uses != null) {
     const uses = document.createElement("span");
@@ -641,7 +962,13 @@ function renderLinkRow(lk) {
 }
 
 async function deleteFile(id, name) {
-  if (!confirm(`Delete "${name}"?\n\nThis cannot be undone.`)) return;
+  const ok = await showConfirm({
+    title: "Delete file?",
+    message: `"${name}" and all its links will be permanently removed. This cannot be undone.`,
+    confirmText: "Delete",
+    danger: true,
+  });
+  if (!ok) return;
   const resp = await apiFetch(`/files/${id}`, { method: "DELETE" });
   if (resp.ok) { showToast("File deleted."); loadFiles(); loadUsage(); }
   else {
@@ -690,8 +1017,16 @@ mintConfirm.addEventListener("click", async () => {
     return;
   }
   const data = await resp.json();
-  showToast("New link created!");
-  navigator.clipboard.writeText(data.url).catch(() => {});
+  let shareUrl = data.url;
+  if (data.encryption_mode === "server" && data.access_key) {
+    shareUrl += "?ek=" + encodeURIComponent(data.access_key);
+    showToast("New link created & copied (key included).");
+  } else if (data.encryption_mode === "client") {
+    showToast("New link created — append your #ek= key before sharing.");
+  } else {
+    showToast("New link created & copied.");
+  }
+  navigator.clipboard.writeText(shareUrl).catch(() => {});
   loadFiles();
 });
 

@@ -3,35 +3,17 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Files — fileupload</title>
+  <title>Files — Oxymoron</title>
   <link rel="stylesheet" href="/static/css/theme.css">
   <script src="/static/js/qrcode.min.js"></script>
-  <style>
-    .quota-bar { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 6px; }
-    .quota-bar-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.4s; }
-    .quota-bar-fill.warn   { background: var(--warning); }
-    .quota-bar-fill.danger { background: var(--danger); }
-
-    .file-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 10px; transition: border-color 0.15s; }
-    .file-card:hover { border-color: var(--border-focus); }
-    .file-card-header { display: flex; align-items: center; gap: 10px; padding: 13px 16px; }
-    .file-name { font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; transition: color 0.15s; }
-    .file-card-header:hover .file-name { color: var(--accent); }
-    .file-meta { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
-    .file-body { border-top: 1px solid var(--border); padding: 10px 16px; }
-    .link-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--border); }
-    .link-row:last-child { border-bottom: none; }
-    .link-url  { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .link-uses { font-size: 11px; color: var(--text-muted); white-space: nowrap; min-width: 68px; text-align: right; }
-    .link-inactive { opacity: 0.4; }
-    .hint { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
-  </style>
+  <!-- file-card, link-row, quota-bar &c. all live in theme.css -->
 </head>
 <body>
   <nav class="nav">
-    <a href="/files" class="nav-logo">fileupload</a>
+    <a href="/files" class="nav-logo">Oxymoron<span class="logo-sub">(for files)</span></a>
     <div class="nav-spacer"></div>
     <span class="nav-user" id="nav-user"></span>
+    <a href="/api-docs" class="nav-link" data-page="api">API</a>
     <a href="/admin" class="nav-link hidden" id="nav-admin" data-page="admin">Admin</a>
     <button class="nav-link" id="nav-logout">Sign out</button>
   </nav>
@@ -47,7 +29,7 @@
     </div>
 
     <!-- Upload card -->
-    <div class="card">
+    <div class="card" data-reveal>
       <div class="section-label">Upload</div>
 
       <!-- Mode selector -->
@@ -57,12 +39,12 @@
         <button class="mode-btn" data-mode="folder">Folder</button>
       </div>
 
-      <!-- Drop zone -->
+      <!-- Drop zone — the dispatch bay -->
       <div class="drop-zone" id="drop-zone">
         <input type="file" id="file-input">
         <div class="drop-icon">↑</div>
-        <div class="drop-label"><strong>Click to choose</strong> or drag &amp; drop</div>
-        <div class="drop-sub" id="drop-sub">Any file type</div>
+        <div class="drop-label"><strong>Drop a file to dispatch</strong> or click to browse</div>
+        <div class="drop-sub" id="drop-sub">Any file type · encrypt and set limits below</div>
       </div>
 
       <!-- File queue -->
@@ -194,7 +176,7 @@
     </div>
 
     <!-- Files list -->
-    <div class="mt-24">
+    <div class="mt-24" data-reveal>
       <div class="flex items-center mb-16" style="gap:12px">
         <div class="section-label" style="margin:0;flex:1" id="files-heading">Your files</div>
         <button class="btn btn-ghost btn-sm" id="refresh-btn">Refresh</button>
