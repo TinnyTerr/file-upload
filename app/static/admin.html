@@ -30,6 +30,65 @@
     .file-expand-btn:hover { color: var(--text); }
     .file-expand-body { display: none; }
     .file-expand-body.open { display: block; }
+    .admin-dashboard { display: grid; gap: 16px; }
+    .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
+    .dashboard-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+    .dashboard-card-title { display:flex; align-items:center; gap:8px; font-family:var(--font-mono); font-size:11px; letter-spacing:0.1em; text-transform:uppercase; color:var(--text-muted); margin-bottom:12px; }
+    .storage-cap-row { display:grid; grid-template-columns:minmax(220px, 1fr) auto; gap:12px; align-items:end; }
+    .storage-cap-row .form-group { margin-bottom:0; }
+    .storage-hero { display:grid; grid-template-columns:180px minmax(0, 1fr); gap:20px; align-items:center; }
+    .storage-ring { width:160px; height:160px; position:relative; display:grid; place-items:center; }
+    .storage-ring svg { width:160px; height:160px; transform:rotate(-90deg); }
+    .storage-ring-track { fill:none; stroke:var(--surface-3); stroke-width:14; }
+    .storage-ring-fill { fill:none; stroke:var(--accent); stroke-width:14; stroke-linecap:round; transition:stroke-dasharray .3s ease; }
+    .storage-ring-label { position:absolute; text-align:center; }
+    .storage-ring-main { font-family:var(--font-display); font-size:24px; font-weight:600; }
+    .storage-ring-sub { font-size:11px; color:var(--text-muted); margin-top:2px; }
+    .metric-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:10px; }
+    .metric-tile { border:1px solid var(--border); background:var(--surface-2); border-radius:var(--radius-sm); padding:12px; min-height:78px; }
+    .metric-tile-label { font-family:var(--font-mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--text-muted); margin-bottom:6px; }
+    .metric-tile-value { font-family:var(--font-display); font-size:22px; font-weight:600; letter-spacing:-.01em; }
+    .metric-tile-sub { color:var(--text-muted); font-size:11px; margin-top:4px; }
+    .chart-list { display:grid; gap:10px; }
+    .chart-row-head { display:flex; justify-content:space-between; gap:10px; font-size:12px; color:var(--text-dim); }
+    .chart-row-label { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .chart-row-value { font-family:var(--font-mono); color:var(--text-muted); white-space:nowrap; }
+    .status-stack { display:flex; flex-wrap:wrap; gap:8px; }
+    .status-pill { border:1px solid var(--border); background:var(--surface-2); border-radius:var(--radius-sm); padding:8px 10px; min-width:86px; }
+    .status-pill strong { display:block; font-family:var(--font-display); font-size:20px; line-height:1; margin-bottom:4px; }
+    .status-pill span { font-family:var(--font-mono); font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-muted); }
+    .quota-bar-fill.info { background:linear-gradient(90deg, #4f9cff, #7dd3fc); }
+    .quota-bar-fill.capacity { background:linear-gradient(90deg, var(--success), #6ee7c0); }
+    .lifecycle-grid, .danger-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); gap:12px; }
+    .action-card { text-align:left; border:1px solid var(--border); background:var(--surface-2); border-radius:var(--radius-sm); padding:13px; cursor:pointer; transition:border-color .15s ease, transform .15s ease; }
+    .action-card:hover { border-color:var(--border-strong); transform:translateY(-1px); }
+    .action-card:disabled { opacity:.5; cursor:not-allowed; transform:none; }
+    .tabs { flex-wrap:wrap; }
+    .action-card-title { font-weight:600; font-size:13px; margin-bottom:5px; color:var(--text); }
+    .action-card-sub { font-size:12px; line-height:1.45; color:var(--text-muted); }
+    .danger-card { border-color:rgba(255,108,88,.34); background:linear-gradient(180deg, rgba(255,108,88,.08), var(--surface)); }
+    .danger-card .action-card-title { color:#ffad9f; }
+    .audit-integrity { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+    .audit-integrity.hidden { display:none !important; }
+    .select-cell { flex:0 0 auto; display:flex; align-items:center; }
+    .backend-toolbar { display:grid; grid-template-columns:minmax(240px, 1fr) 140px auto auto auto; gap:8px; align-items:center; margin-bottom:12px; }
+    .backend-autorefresh { display:flex; align-items:center; gap:6px; color:var(--text-muted); font-size:12px; white-space:nowrap; }
+    .backend-log-list { border:1px solid var(--border); border-radius:var(--radius); background:#050609; overflow:auto; max-height:560px; }
+    .backend-log-row { display:grid; grid-template-columns:160px 78px minmax(160px, 260px) minmax(0, 1fr); gap:10px; padding:8px 12px; border-bottom:1px solid rgba(255,255,255,.06); font-family:var(--font-mono); font-size:12px; line-height:1.45; }
+    .backend-log-row:last-child { border-bottom:none; }
+    .backend-log-time, .backend-log-name { color:var(--text-muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .backend-log-message { white-space:pre-wrap; word-break:break-word; color:var(--text); }
+    .backend-level { text-transform:uppercase; font-size:10px; letter-spacing:.08em; align-self:start; width:max-content; }
+    .backend-level.debug { color:var(--text-muted); }
+    .backend-level.info { color:#7dd3fc; }
+    .backend-level.warning { color:var(--warning); }
+    .backend-level.error, .backend-level.critical { color:var(--danger); }
+    @media (max-width: 720px) {
+      .storage-cap-row, .storage-hero { grid-template-columns:1fr; }
+      .storage-ring { margin:auto; }
+      .backend-toolbar { grid-template-columns:1fr; }
+      .backend-log-row { grid-template-columns:1fr; gap:4px; }
+    }
   </style>
 </head>
 <body>
@@ -45,7 +104,6 @@
   <div class="container">
     <div class="flex items-center mb-16" style="gap:12px" data-reveal>
       <h1 style="margin:0">Admin</h1>
-      <div id="chain-badge" class="badge hidden"></div>
     </div>
 
     <!-- Disk stats -->
@@ -70,16 +128,21 @@
 
     <div class="tabs" data-reveal>
       <div class="tab active" data-tab="users">Users</div>
+      <div class="tab" data-tab="details">Details</div>
       <div class="tab" data-tab="files">Files</div>
       <div class="tab" data-tab="audit">Audit log</div>
+      <div class="tab" data-tab="backend">Backend</div>
       <div class="tab" data-tab="keys">API Keys</div>
+      <div class="tab" data-tab="danger">Danger Zone</div>
     </div>
 
     <!-- Users tab -->
     <div class="tab-panel active" id="tab-users">
-      <div class="flex items-center mb-16">
-        <div class="flex-1"></div>
-        <button class="btn btn-primary btn-sm" id="create-user-btn">+ New user</button>
+      <div class="flex items-center mb-16" style="gap:8px;flex-wrap:wrap">
+        <input type="text" id="user-filter" placeholder="Filter users…"
+               autocapitalize="off" spellcheck="false" style="flex:1;min-width:220px"
+               data-tooltip="Filter users by username or role.">
+        <button class="btn btn-primary btn-sm" id="create-user-btn" data-tooltip="Create a new user account.">+ New user</button>
       </div>
       <div class="card" style="padding:0;overflow:hidden">
         <div class="table-wrap">
@@ -93,8 +156,95 @@
       </div>
     </div>
 
+    <!-- Details tab -->
+    <div class="tab-panel" id="tab-details">
+      <div class="admin-dashboard">
+        <div class="dashboard-card">
+          <div class="dashboard-card-title">
+            Storage allocation
+            <i class="help-icon" data-tip="Global cap is the total storage the app may account for. It cannot be set below used storage or allocated user quotas.">?</i>
+          </div>
+          <div class="storage-cap-row">
+            <div class="form-group">
+              <label for="global-storage-cap">Global storage cap</label>
+              <input type="text" id="global-storage-cap" placeholder="500 GB">
+              <div class="hint">Must stay above current usage and assigned user quotas.</div>
+            </div>
+            <button class="btn btn-primary" id="save-storage-cap" data-tooltip="Save the global storage allocation limit after validating current usage and quotas.">Save cap</button>
+          </div>
+          <div class="storage-hero mt-16">
+            <div id="storage-ring" class="storage-ring"></div>
+            <div id="storage-breakdown" class="chart-list"></div>
+          </div>
+        </div>
+
+        <div id="details-kpis" class="metric-grid"></div>
+
+        <div class="dashboard-grid">
+          <div class="dashboard-card">
+            <div class="dashboard-card-title">Per-user storage <i class="help-icon" data-tip="Each bar compares the user's current stored bytes against their assigned quota.">?</i></div>
+            <div id="user-usage-chart" class="chart-list"></div>
+          </div>
+          <div class="dashboard-card">
+            <div class="dashboard-card-title">File types <i class="help-icon" data-tip="Stored bytes by content type, useful for spotting bulky media or archive-heavy users.">?</i></div>
+            <div id="file-type-chart" class="chart-list"></div>
+          </div>
+          <div class="dashboard-card">
+            <div class="dashboard-card-title">Lifecycle states <i class="help-icon" data-tip="Counts files by current lifecycle state such as active, archived, archiving, or cleanup states.">?</i></div>
+            <div id="lifecycle-chart" class="status-stack"></div>
+          </div>
+          <div class="dashboard-card">
+            <div class="dashboard-card-title">Links <i class="help-icon" data-tip="Active links are usable now. Inactive, expired, and used-up links are candidates for cleanup.">?</i></div>
+            <div id="link-status-chart" class="status-stack"></div>
+          </div>
+          <div class="dashboard-card">
+            <div class="dashboard-card-title">API keys <i class="help-icon" data-tip="Active keys can authenticate API uploads. Bound keys are pinned to their first client IP.">?</i></div>
+            <div id="api-key-chart" class="status-stack"></div>
+          </div>
+          <div class="dashboard-card">
+            <div class="dashboard-card-title">Recent audit activity <i class="help-icon" data-tip="Top audit actions currently in the log. Use the Audit tab for row-level detail.">?</i></div>
+            <div id="audit-activity-chart" class="chart-list"></div>
+          </div>
+        </div>
+
+        <div class="dashboard-card">
+          <div class="dashboard-card-title">Fun stats <i class="help-icon" data-tip="Operational rollups: top downloads, biggest files, dedup savings, source mix, and busy folders.">?</i></div>
+          <div id="fun-stats-grid" class="dashboard-grid"></div>
+        </div>
+
+        <div class="dashboard-card">
+          <div class="dashboard-card-title">Lifecycle controls <i class="help-icon" data-tip="Manual lifecycle jobs run immediately and report how many rows they processed.">?</i></div>
+          <div class="lifecycle-grid">
+            <button class="action-card" data-lifecycle="/admin/lifecycle/archive-idle" data-tooltip="Find idle files that meet their archive-after-idle rule and compress/archive them.">
+              <div class="action-card-title">Run archive scan</div>
+              <div class="action-card-sub">Archive eligible idle files and update savings.</div>
+            </button>
+            <button class="action-card" data-lifecycle="/admin/lifecycle/temp-expiry" data-tooltip="Delete temporary files whose file expiry time has passed.">
+              <div class="action-card-title">Run temp expiry</div>
+              <div class="action-card-sub">Remove expired temporary file records and bytes.</div>
+            </button>
+            <button class="action-card" data-lifecycle="/admin/lifecycle/link-expiry" data-tooltip="Deactivate links that passed their expiry or download limit.">
+              <div class="action-card-title">Run link expiry</div>
+              <div class="action-card-sub">Mark expired or used-up links inactive.</div>
+            </button>
+            <button class="action-card" data-lifecycle="/admin/lifecycle/reconcile" data-tooltip="Repair stale lifecycle states left by interrupted archive/unarchive jobs.">
+              <div class="action-card-title">Reconcile states</div>
+              <div class="action-card-sub">Move stale in-progress lifecycle states back to a stable state.</div>
+            </button>
+          </div>
+          <div id="lifecycle-last-result" class="hint mt-12"></div>
+        </div>
+      </div>
+    </div>
+
     <!-- Files tab -->
     <div class="tab-panel" id="tab-files">
+      <div class="flex items-center mb-16" style="gap:8px;flex-wrap:wrap">
+        <input type="text" id="admin-file-filter" placeholder="Filter files, folders, owners, or types…"
+               autocapitalize="off" spellcheck="false" style="flex:1;min-width:260px"
+               data-tooltip="Filter admin files by filename, folder title, owner, or content type.">
+        <button class="btn btn-ghost btn-sm" id="clear-file-selection" data-tooltip="Clear every checked file and folder selection used by Danger Zone.">Clear selection</button>
+      </div>
       <div id="files-by-user">
         <div class="empty"><div class="empty-icon">⟳</div>Loading…</div>
       </div>
@@ -102,13 +252,22 @@
 
     <!-- Audit tab -->
     <div class="tab-panel" id="tab-audit">
+      <div id="audit-integrity" class="dashboard-card audit-integrity hidden">
+        <div>
+          <div class="dashboard-card-title" style="margin-bottom:4px">Audit integrity <i class="help-icon" data-tip="The audit log is hash-chained. This check detects whether existing audit rows were edited or removed.">?</i></div>
+          <div class="text-sm text-muted" id="audit-integrity-text">Checking audit log integrity…</div>
+        </div>
+        <span id="audit-integrity-badge" class="badge badge-gray">checking</span>
+      </div>
       <div class="flex items-center mb-12" style="gap:8px;flex-wrap:wrap">
-        <input type="text" id="audit-filter" placeholder="Filter by actor, action, target or IP…"
-               autocapitalize="off" spellcheck="false" style="flex:1;min-width:220px">
-        <select id="audit-action-filter" style="max-width:200px">
+        <input type="text" id="audit-filter" placeholder="Search all audit entries by actor, action, target, IP, or #..."
+               autocapitalize="off" spellcheck="false" style="flex:1;min-width:220px"
+               data-tooltip="Server-side search across the whole audit log. Use multiple words to narrow results.">
+        <select id="audit-action-filter" style="max-width:220px" data-tooltip="Filter audit rows to one exact action.">
           <option value="">All actions</option>
         </select>
-        <button class="btn btn-ghost btn-sm" id="audit-refresh">↻ Refresh</button>
+        <button class="btn btn-ghost btn-sm" id="audit-clear" data-tooltip="Clear audit search and action filters.">Clear</button>
+        <button class="btn btn-ghost btn-sm" id="audit-refresh" data-tooltip="Reload audit rows and integrity status.">Refresh</button>
       </div>
       <div class="card" style="padding:0;overflow:hidden">
         <div class="table-wrap">
@@ -125,11 +284,53 @@
       </div>
     </div>
 
+    <!-- Backend tab -->
+    <div class="tab-panel" id="tab-backend">
+      <div class="dashboard-card">
+        <div class="dashboard-card-title">
+          Backend console
+          <i class="help-icon" data-tip="Operational runtime logs captured in this app process. These logs are for debugging jobs, uploads, storage checks, and failures; audit history remains in the Audit tab.">?</i>
+        </div>
+        <div class="backend-toolbar">
+          <input type="text" id="backend-log-filter" placeholder="Search backend logs..."
+                 autocapitalize="off" spellcheck="false"
+                 data-tooltip="Search log messages, logger names, levels, IDs, functions, and line numbers. Multiple words narrow results.">
+          <select id="backend-log-level" data-tooltip="Limit the backend log view to one severity level.">
+            <option value="">All levels</option>
+            <option value="DEBUG">Debug</option>
+            <option value="INFO">Info</option>
+            <option value="WARNING">Warning</option>
+            <option value="ERROR">Error</option>
+            <option value="CRITICAL">Critical</option>
+          </select>
+          <label class="backend-autorefresh" data-tooltip="Refresh the log list every few seconds while this tab is open.">
+            <input type="checkbox" id="backend-auto-refresh" checked>
+            Auto refresh
+          </label>
+          <button class="btn btn-ghost btn-sm" id="backend-refresh" data-tooltip="Reload the backend log buffer now.">Refresh</button>
+          <button class="btn btn-danger btn-sm" id="backend-restart-workers" data-tooltip="Restart the app background scheduler jobs: archive scan, idle delete, temp expiry, link expiry, and stale upload cleanup.">Restart workers</button>
+        </div>
+        <div id="backend-log-status" class="text-xs text-muted mb-12">Loading backend logs...</div>
+        <div id="backend-log-list" class="backend-log-list">
+          <div class="empty">Loading...</div>
+        </div>
+      </div>
+    </div>
+
     <!-- API Keys tab -->
     <div class="tab-panel" id="tab-keys">
-      <div class="flex items-center mb-16" style="gap:12px">
-        <div class="section-label" style="margin:0;flex:1">API Keys</div>
-        <button class="btn btn-ghost btn-sm" id="create-key-btn">+ New key</button>
+      <div class="flex items-center mb-16" style="gap:8px;flex-wrap:wrap">
+        <input type="text" id="key-filter" placeholder="Filter keys by owner or IP…"
+               autocapitalize="off" spellcheck="false" style="flex:1;min-width:220px"
+               data-tooltip="Filter API keys by owner username, owner id, key number, or bound IP.">
+        <select id="key-status-filter" style="max-width:180px" data-tooltip="Limit API key rows by active/revoked state.">
+          <option value="">All keys</option>
+          <option value="active">Active</option>
+          <option value="inactive">Revoked</option>
+          <option value="bound">IP bound</option>
+          <option value="unbound">Unbound</option>
+        </select>
+        <button class="btn btn-ghost btn-sm" id="create-key-btn" data-tooltip="Create a new API key for the current admin account.">+ New key</button>
       </div>
       <div class="text-xs text-muted mb-12">
         Keys bind to the first IP that uses them.
@@ -138,6 +339,72 @@
       </div>
       <div id="keys-list">
         <div class="empty"><div class="empty-icon">⟳</div>Loading…</div>
+      </div>
+    </div>
+
+    <!-- Danger Zone tab -->
+    <div class="tab-panel" id="tab-danger">
+      <div class="alert alert-error">
+        Bulk actions are intentionally noisy: each action previews its affected count and requires the exact confirmation phrase before it runs.
+      </div>
+      <div class="danger-grid">
+        <button class="action-card danger-card" data-bulk-action="delete_inactive_links" data-tooltip="Permanently delete every link that is inactive, expired, or used up. Files remain stored.">
+          <div class="action-card-title">Delete inactive links</div>
+          <div class="action-card-sub">Cleans inactive, expired, and used-up share links.</div>
+        </button>
+        <button class="action-card danger-card" data-bulk-action="revoke_api_keys" data-tooltip="Revoke active API keys. Integrations using those keys stop immediately.">
+          <div class="action-card-title">Revoke API keys</div>
+          <div class="action-card-sub">Uses selected keys when checked; otherwise previews all active keys.</div>
+        </button>
+        <button class="action-card danger-card" data-bulk-action="reset_api_key_ips" data-tooltip="Clear API key IP bindings so keys bind again on next use.">
+          <div class="action-card-title">Reset key IP bindings</div>
+          <div class="action-card-sub">Uses selected keys when checked; otherwise previews all bound keys.</div>
+        </button>
+        <button class="action-card danger-card" data-bulk-action="archive_files" data-selected-kind="files" data-tooltip="Archive selected files using the server-side archive path. Client-side encrypted files are skipped by the backend.">
+          <div class="action-card-title">Archive selected files</div>
+          <div class="action-card-sub">Requires checked files in the Files tab.</div>
+        </button>
+        <button class="action-card danger-card" data-bulk-action="unarchive_files" data-selected-kind="files" data-tooltip="Unarchive selected archived files after quota and disk-space checks.">
+          <div class="action-card-title">Unarchive selected files</div>
+          <div class="action-card-sub">Requires checked files in the Files tab.</div>
+        </button>
+        <button class="action-card danger-card" data-bulk-action="delete_files" data-selected-kind="files" data-tooltip="Permanently delete selected files and their links.">
+          <div class="action-card-title">Delete selected files</div>
+          <div class="action-card-sub">Requires checked files in the Files tab.</div>
+        </button>
+        <button class="action-card danger-card" data-bulk-action="delete_directories" data-selected-kind="directories" data-tooltip="Permanently delete selected folders and every file inside them.">
+          <div class="action-card-title">Delete selected folders</div>
+          <div class="action-card-sub">Requires checked folders in the Files tab.</div>
+        </button>
+        <button class="action-card danger-card" data-bulk-action="run_cleanup_jobs" data-tooltip="Run temp expiry, idle deletion, link expiry, and lifecycle reconciliation together.">
+          <div class="action-card-title">Run cleanup jobs</div>
+          <div class="action-card-sub">Runs all cleanup scanners immediately.</div>
+        </button>
+      </div>
+      <div id="danger-result" class="dashboard-card mt-16 hidden"></div>
+    </div>
+  </div>
+
+  <!-- Edit user modal -->
+  <div class="modal-overlay hidden" id="edit-user-modal">
+    <div class="modal">
+      <div class="modal-title">Edit user — <span id="edit-user-current"></span></div>
+      <div id="edit-user-alert" class="alert alert-error hidden"></div>
+      <div class="form-group">
+        <label for="eu-username">Username</label>
+        <input type="text" id="eu-username" autocapitalize="off" spellcheck="false">
+      </div>
+      <div class="form-group">
+        <label for="eu-password">New password <span class="text-muted">(leave blank to keep)</span></label>
+        <input type="password" id="eu-password">
+      </div>
+      <div class="form-group">
+        <label for="eu-role">Role</label>
+        <select id="eu-role"><option value="user">User</option><option value="master">Master</option></select>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" id="edit-user-cancel">Cancel</button>
+        <button class="btn btn-primary" id="edit-user-save">Save</button>
       </div>
     </div>
   </div>
@@ -176,6 +443,7 @@
       <div class="modal-title">Permissions — <span id="perm-username"></span></div>
       <div id="perm-alert" class="alert alert-error hidden"></div>
 
+      <div class="section-label">Upload</div>
       <div class="checkbox-group">
         <input type="checkbox" id="perm-can-upload">
         <label for="perm-can-upload">Can upload</label>
@@ -186,6 +454,8 @@
           <i class="help-icon" data-tip="Lets this user encrypt in the browser so the server never sees the key. The key lives only in the share link (#ek=) and is unrecoverable if lost.">?</i>
         </label>
       </div>
+
+      <div class="section-label">Links and folders</div>
       <div class="checkbox-group">
         <input type="checkbox" id="perm-can-delete">
         <label for="perm-can-delete">Can delete own files</label>
@@ -195,8 +465,44 @@
         <label for="perm-can-regen">Can regenerate links</label>
       </div>
       <div class="checkbox-group">
+        <input type="checkbox" id="perm-can-delete-links">
+        <label for="perm-can-delete-links">Can permanently delete links</label>
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="perm-can-folders">
+        <label for="perm-can-folders">Can create folders</label>
+      </div>
+
+      <div class="section-label">Lifecycle and API</div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="perm-can-lifecycle">
+        <label for="perm-can-lifecycle">Can set retention and archiving options</label>
+      </div>
+      <div class="checkbox-group">
         <input type="checkbox" id="perm-can-api">
         <label for="perm-can-api">Can use API keys</label>
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="perm-can-p2p">
+        <label for="perm-can-p2p">Can use P2P tools</label>
+      </div>
+
+      <div class="section-label">Admin delegation</div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="perm-can-view-admin">
+        <label for="perm-can-view-admin">Can view admin surfaces</label>
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="perm-can-manage-users">
+        <label for="perm-can-manage-users">Can manage users</label>
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="perm-can-manage-storage">
+        <label for="perm-can-manage-storage">Can manage storage settings</label>
+      </div>
+      <div class="checkbox-group">
+        <input type="checkbox" id="perm-can-manage-api">
+        <label for="perm-can-manage-api">Can manage API keys globally</label>
       </div>
 
       <div class="divider"></div>

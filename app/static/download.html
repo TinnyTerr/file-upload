@@ -72,13 +72,24 @@
       <!-- Share / copy card -->
       <div class="card">
         <div class="section-label">Share &amp; copy</div>
+        <div class="mb-12 hidden" id="save-wrap">
+          <button class="btn btn-ghost btn-sm" id="save-file">Save to my files</button>
+          <button class="btn btn-ghost btn-sm" id="open-link">Open</button>
+        </div>
         <div class="copy-row">
           <span class="copy-row-text" id="share-url"></span>
           <button class="btn btn-ghost btn-sm" id="copy-share">Copy link</button>
+          <button class="btn btn-ghost btn-sm" id="copy-share-md">MD</button>
+          <button class="btn btn-ghost btn-sm" id="copy-share-html">HTML</button>
         </div>
         <div class="copy-row">
           <span class="copy-row-text" id="raw-url"></span>
           <button class="btn btn-ghost btn-sm" id="copy-raw">Copy direct</button>
+        </div>
+        <div class="mt-12" id="hash-wrap" style="display:none">
+          <div class="text-xs text-muted mb-4">hashes</div>
+          <select id="hash-select"></select>
+          <code class="curl-block text-mono" id="hash-value"></code>
         </div>
         <div class="mt-12">
           <div class="text-xs text-muted mb-4">curl download</div>

@@ -1,4 +1,4 @@
-import { formatBytes, showAlert, showPrompt } from "./api.js";
+import { apiFetch, formatBytes, isLoggedIn, showAlert, showPrompt, showToast } from "./api.js";
 
 const slug = location.pathname.split("/file/")[1]?.replace(/\/$/, "");
 
@@ -15,6 +15,12 @@ const rawUrlEl   = document.getElementById("raw-url");
 const shareUrlEl = document.getElementById("share-url");
 const curlEl     = document.getElementById("curl-cmd");
 const previewSec = document.getElementById("preview-section");
+const saveWrap   = document.getElementById("save-wrap");
+const saveBtn    = document.getElementById("save-file");
+const openBtn    = document.getElementById("open-link");
+const hashWrap   = document.getElementById("hash-wrap");
+const hashSelect = document.getElementById("hash-select");
+const hashValue  = document.getElementById("hash-value");
 
 // Client-side key lives in the URL fragment (#ek=) — never sent to the server.
 function getFragmentKey() {
@@ -147,15 +153,20 @@ function showFile(data) {
   sizeEl.textContent      = formatBytes(data.size_bytes);
   typeEl.textContent      = ct || "unknown type";
 
-  const rawUrl   = `${location.origin}/file/${slug}/raw`;
-  const shareUrl = `${location.origin}/file/${slug}`;
+  const rawUrl = `${location.origin}/file/${slug}/raw`;
+  const baseShareUrl = `${location.origin}/file/${slug}`;
 
   const encMode = data.encryption_mode || 'none';
   const fragmentKey = getFragmentKey();
   const queryKey = getQueryKey();
+  let shareUrl = baseShareUrl;
+  if (encMode === 'server' && queryKey) shareUrl += `?ek=${encodeURIComponent(queryKey)}`;
+  if (encMode === 'client' && fragmentKey) shareUrl += `#ek=${encodeURIComponent(fragmentKey)}`;
+  let displayRawUrl = rawUrl;
+  if (encMode === 'server' && queryKey) displayRawUrl += `?ek=${encodeURIComponent(queryKey)}`;
   // Raw bytes URL used for previews/streaming. Server-encrypted files need the
   // ?ek= credential appended; plain/none files are fetched directly.
-  let rawSrc = rawUrl;
+  let rawSrc = `${location.origin}/file/${slug}/preview`;
   if (encMode === 'server' && queryKey) rawSrc = `${rawUrl}?ek=${encodeURIComponent(queryKey)}`;
 
   // Encrypted file whose key is NOT in the URL → we have to ask for it.
@@ -236,9 +247,9 @@ function showFile(data) {
     setTimeout(requestKeyAndDownload, 250);
   }
 
-  rawUrlEl.textContent   = rawUrl;
+  rawUrlEl.textContent   = displayRawUrl;
   shareUrlEl.textContent = shareUrl;
-  curlEl.textContent     = `curl -L -O "${rawUrl}"`;
+  curlEl.textContent     = `curl -L -O "${displayRawUrl}"`;
 
   function wireCopy(btnId, text) {
     document.getElementById(btnId).addEventListener("click", () => {
@@ -250,13 +261,35 @@ function showFile(data) {
       }).catch(() => {});
     });
   }
-  wireCopy("copy-raw",   rawUrl);
+  wireCopy("copy-raw",   displayRawUrl);
   wireCopy("copy-share", shareUrl);
+  wireCopy("copy-share-md", `[${data.filename}](${shareUrl})`);
+  wireCopy("copy-share-html", `<a href="${shareUrl}">${data.filename}</a>`);
+
+  saveWrap.classList.remove("hidden");
+  openBtn.addEventListener("click", () => window.open(shareUrl, "_blank", "noopener"));
+  if (isLoggedIn()) {
+    saveBtn.addEventListener("click", async () => {
+      saveBtn.disabled = true;
+      const resp = await apiFetch(`/files/${slug}/save`, { method: "POST" });
+      saveBtn.disabled = false;
+      if (resp.ok) {
+        showToast("Saved to your files.");
+      } else {
+        const d = await resp.json().catch(() => ({}));
+        showToast(d.detail || "Save failed.", "error");
+      }
+    });
+  } else {
+    saveBtn.style.display = "none";
+  }
+
+  renderHashes(data.hashes || {});
 
   // Previews fetch /raw directly, so they only work on un-encrypted bytes the
   // browser can render. Client-encrypted files would render ciphertext; server-
   // encrypted files need the ?ek= credential. Skip preview when we can't render.
-  const previewable = encMode === 'none' || (encMode === 'server' && !!queryKey);
+  const previewable = encMode === 'none';
 
   // Skip preview for limited-use links — fetching /raw would consume a use
   if (!limitedUse && previewable) {
@@ -270,6 +303,25 @@ function showFile(data) {
     note.textContent = "Preview unavailable for limited-use links — download to view.";
     previewSec.appendChild(note);
   }
+}
+
+function renderHashes(hashes) {
+  const entries = Object.entries(hashes).filter(([, value]) => value);
+  if (!entries.length) return;
+  hashWrap.style.display = "";
+  hashSelect.textContent = "";
+  for (const [name, value] of entries) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name.toUpperCase();
+    opt.dataset.value = value;
+    hashSelect.appendChild(opt);
+  }
+  function update() {
+    hashValue.textContent = hashes[hashSelect.value] || "";
+  }
+  hashSelect.addEventListener("change", update);
+  update();
 }
 
 function buildPreview(ct, rawSrc, filename) {

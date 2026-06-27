@@ -32,29 +32,29 @@
     <div class="card" data-reveal>
       <div class="section-label">Upload</div>
 
+      <div class="mode-group" style="margin-bottom:14px">
+        <button class="source-btn mode-btn active" data-source="local" type="button">Local</button>
+        <button class="source-btn mode-btn" data-source="remote" type="button">Remote URL</button>
+        <button class="source-btn mode-btn" data-source="dropbox" type="button">Dropbox</button>
+      </div>
+
+      <div id="local-upload-panel">
       <!-- Mode selector -->
       <div class="mode-group">
-        <button class="mode-btn active" data-mode="single">Single file</button>
-        <button class="mode-btn" data-mode="multi">Multiple files</button>
+        <button class="mode-btn active" data-mode="files">Files</button>
         <button class="mode-btn" data-mode="folder">Folder</button>
       </div>
 
       <!-- Drop zone — the dispatch bay -->
       <div class="drop-zone" id="drop-zone">
-        <input type="file" id="file-input">
+        <input type="file" id="file-input" multiple>
         <div class="drop-icon">↑</div>
-        <div class="drop-label"><strong>Drop a file to dispatch</strong> or click to browse</div>
+        <div class="drop-label"><strong>Drop files to dispatch</strong> or click to browse</div>
         <div class="drop-sub" id="drop-sub">Any file type · encrypt and set limits below</div>
       </div>
 
       <!-- File queue -->
       <div id="file-queue" class="file-queue" style="display:none"></div>
-
-      <!-- Add more (multi/folder) -->
-      <div id="add-more-wrap" style="display:none;margin-top:8px">
-        <button class="btn btn-ghost btn-sm" id="add-more-btn">+ Add more files</button>
-        <input type="file" id="add-more-input" style="display:none">
-      </div>
 
       <!-- Options -->
       <div class="mt-16">
@@ -172,6 +172,43 @@
       <div id="progress-wrap" style="display:none;margin-top:12px">
         <div class="progress"><div class="progress-bar" id="progress-bar" style="width:0%"></div></div>
         <div class="text-xs text-muted mt-4" id="progress-label">Uploading…</div>
+      </div>
+      </div>
+
+      <div id="remote-upload-panel" class="hidden">
+        <div class="form-row">
+          <div class="form-group" style="flex:2">
+            <label>
+              Remote file URL
+              <i class="help-icon" data-tip="Server-side fetch. Only public http/https URLs are allowed; local/private network addresses and private redirects are rejected.">?</i>
+            </label>
+            <input type="url" id="remote-url" placeholder="https://example.com/file.zip">
+          </div>
+          <div class="form-group">
+            <label>Save as</label>
+            <input type="text" id="remote-name" placeholder="Optional filename">
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-primary" id="remote-upload-btn" type="button">Start remote upload</button>
+          <span class="text-sm text-muted" id="remote-status"></span>
+        </div>
+      </div>
+
+      <div id="dropbox-upload-panel" class="hidden">
+        <div class="form-row">
+          <div class="form-group">
+            <label>
+              Link expires after
+              <i class="help-icon" data-tip="Creates a one-file, one-use upload page into your account. The token is disabled after the first successful upload.">?</i>
+            </label>
+            <input type="text" id="dropbox-expires" placeholder="1h">
+          </div>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-primary" id="dropbox-create-btn" type="button">Create dropbox link</button>
+          <span class="text-sm text-muted" id="dropbox-status"></span>
+        </div>
       </div>
     </div>
 

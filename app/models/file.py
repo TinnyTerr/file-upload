@@ -17,6 +17,9 @@ class FileObject(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    blob_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("content_blobs.id"), nullable=True, index=True
+    )
     # When set, this file belongs to a shareable directory bundle and inherits
     # that directory's single shared encryption key. NULL = standalone file.
     directory_id: Mapped[int | None] = mapped_column(
@@ -24,6 +27,10 @@ class FileObject(Base):
     )
     storage_path: Mapped[str] = mapped_column(String(512), nullable=False)
     original_filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(24), nullable=False, default="upload")
+    saved_from_file_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("files.id"), nullable=True
+    )
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     stored_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     content_type: Mapped[str] = mapped_column(
@@ -38,6 +45,10 @@ class FileObject(Base):
     compressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     archive_codec: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    archive_original_stored_size_bytes: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0
+    )
+    archive_saved_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     archive_after_idle_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     lifecycle_state: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     is_permanent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

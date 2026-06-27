@@ -9,8 +9,15 @@ _BOOL_FLAGS = (
     "can_upload_client_encrypted",
     "can_delete",
     "can_regenerate_links",
+    "can_delete_links",
+    "can_create_directories",
+    "can_manage_lifecycle",
     "can_use_api_keys",
     "can_use_p2p",
+    "can_view_admin",
+    "can_manage_users",
+    "can_manage_storage",
+    "can_manage_api_keys",
 )
 
 

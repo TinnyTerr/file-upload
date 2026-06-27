@@ -4,25 +4,30 @@ import os
 import secrets as _secrets
 import tempfile
 import zipfile
+import html
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
 from app.audit.log import record
-from app.deps import client_ip, get_db, require_active_user, require_master
+from app.deps import client_ip, get_db, require_active_user, require_master, require_permission
 from app.links.slugs import new_slug
 from app.security.csrf import require_csrf
 from app.models.directory import Directory
+from app.models.content_blob import ContentBlob
+from app.models.directory_collaborator import DirectoryCollaborator
 from app.models.file import FileObject
 from app.models.link import Link
 from app.models.session import SessionRow
 from app.models.user import User
+from app.storage.blobs import release_blob, unlink_queued
+from app.storage.accounting import used_storage_bytes_for_user
 from app.storage.paths import safe_join, storage_root
 
 router = APIRouter(tags=["directories"])
@@ -89,6 +94,28 @@ def _resolve(db: Session, slug: str) -> Directory:
     return d
 
 
+def _is_editor(db: Session, d: Directory, user: User) -> bool:
+    if user.role == "master" or d.owner_id == user.id:
+        return True
+    return (
+        db.query(DirectoryCollaborator.id)
+        .filter_by(directory_id=d.id, user_id=user.id, role="editor")
+        .first()
+        is not None
+    )
+
+
+def _directory_role(db: Session, d: Directory, user: User) -> str | None:
+    if user.role == "master" or d.owner_id == user.id:
+        return "owner"
+    collaborator = (
+        db.query(DirectoryCollaborator)
+        .filter_by(directory_id=d.id, user_id=user.id)
+        .first()
+    )
+    return collaborator.role if collaborator else None
+
+
 class CreateDirBody(BaseModel):
     title: str = "Untitled folder"
     encryption_mode: str = "none"
@@ -106,9 +133,12 @@ def create_directory(
     if body.encryption_mode not in ("none", "server", "client"):
         raise HTTPException(400, detail="invalid encryption_mode")
 
+    from app.permissions.policy import ensure_permissions
+    perm = ensure_permissions(db, user.id, master=(user.role == "master"))
+    if not perm.can_create_directories:
+        raise HTTPException(403, detail="directory creation not permitted")
+
     if body.encryption_mode == "client":
-        from app.permissions.policy import ensure_permissions
-        perm = ensure_permissions(db, user.id, master=(user.role == "master"))
         if not perm.can_upload_client_encrypted:
             raise HTTPException(403, detail="client-side encryption not permitted")
 
@@ -163,13 +193,22 @@ def list_directories(
     user: User = Depends(require_active_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    dirs = (
+    owned = (
         db.query(Directory)
         .filter_by(owner_id=user.id)
-        .order_by(Directory.created_at.desc())
         .all()
     )
-    return {"directories": _serialize_directories(request, db, dirs)}
+    collaborated = (
+        db.query(Directory)
+        .join(DirectoryCollaborator, DirectoryCollaborator.directory_id == Directory.id)
+        .filter(DirectoryCollaborator.user_id == user.id)
+        .all()
+    )
+    by_id = {d.id: d for d in owned}
+    for d in collaborated:
+        by_id.setdefault(d.id, d)
+    dirs = sorted(by_id.values(), key=lambda d: d.created_at, reverse=True)
+    return {"directories": _serialize_directories(request, db, dirs, user=user)}
 
 
 @router.get("/admin/directories")
@@ -182,7 +221,13 @@ def list_admin_directories(
     return {"directories": _serialize_directories(request, db, dirs)}
 
 
-def _serialize_directories(request: Request, db: Session, dirs: list[Directory]) -> list[dict]:
+def _serialize_directories(
+    request: Request,
+    db: Session,
+    dirs: list[Directory],
+    *,
+    user: User | None = None,
+) -> list[dict]:
     result = []
     for d in dirs:
         file_count = db.query(func.count(FileObject.id)).filter_by(directory_id=d.id).scalar() or 0
@@ -198,6 +243,7 @@ def _serialize_directories(request: Request, db: Session, dirs: list[Directory])
             "total_bytes": d.total_bytes,
             "expires_at": d.expires_at.isoformat() if d.expires_at else None,
             "created_at": d.created_at.isoformat(),
+            "role": _directory_role(db, d, user) if user is not None else None,
         })
     return result
 
@@ -211,13 +257,22 @@ def _get_owned_directory(db: Session, dir_id: int, user: User) -> Directory:
     return d
 
 
+def _get_editable_directory(db: Session, dir_id: int, user: User) -> Directory:
+    d = db.get(Directory, dir_id)
+    if d is None:
+        raise HTTPException(404, detail="not found")
+    if not _is_editor(db, d, user):
+        raise HTTPException(403, detail="not your directory")
+    return d
+
+
 @router.get("/directories/{dir_id}/files")
 def list_directory_files(
     dir_id: int,
     user: User = Depends(require_active_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    d = _get_owned_directory(db, dir_id, user)
+    d = _get_editable_directory(db, dir_id, user)
     members = (
         db.query(FileObject)
         .filter_by(directory_id=d.id)
@@ -255,25 +310,89 @@ def delete_directory_file(
     user: User = Depends(require_active_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    d = _get_owned_directory(db, dir_id, user)
+    d = _get_editable_directory(db, dir_id, user)
     file_obj = db.get(FileObject, file_id)
     if file_obj is None or file_obj.directory_id != d.id:
         raise HTTPException(404, detail="not found")
 
-    try:
-        full = safe_join(storage_root(), file_obj.storage_path)
-        if full.exists():
-            os.unlink(full)
-    except (OSError, ValueError):
-        pass
-
     db.query(Link).filter_by(file_id=file_obj.id).delete()
-    d.total_bytes = max(0, (d.total_bytes or 0) - (file_obj.stored_size_bytes or 0))
+    d.total_bytes = max(0, (d.total_bytes or 0) - (file_obj.size_bytes or 0))
+    unlink_after_commit = [release_blob(db, file_obj)]
     db.delete(file_obj)
     record(db, actor=user.username, action="directory.file_deleted",
            target=f"file:{file_id}", ip=client_ip(request))
     db.commit()
+    unlink_queued(unlink_after_commit)
     return {"status": "deleted"}
+
+
+class CollaboratorBody(BaseModel):
+    username: str
+
+
+@router.post("/directories/{dir_id}/collaborators")
+def add_collaborator(
+    dir_id: int,
+    body: CollaboratorBody,
+    request: Request,
+    _csrf: SessionRow = Depends(require_csrf),
+    user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    d = _get_owned_directory(db, dir_id, user)
+    target = db.query(User).filter_by(username=body.username.strip()).first()
+    if target is None:
+        raise HTTPException(404, detail="user not found")
+    if target.id == d.owner_id:
+        raise HTTPException(400, detail="owner is already a collaborator")
+    existing = (
+        db.query(DirectoryCollaborator)
+        .filter_by(directory_id=d.id, user_id=target.id)
+        .first()
+    )
+    if existing is None:
+        existing = DirectoryCollaborator(
+            directory_id=d.id,
+            user_id=target.id,
+            invited_by_id=user.id,
+            role="editor",
+        )
+        db.add(existing)
+        db.flush()
+    record(db, actor=user.username, action="directory.collaborator_added",
+           target=f"directory:{d.id}:user:{target.id}", ip=client_ip(request))
+    db.commit()
+    return {
+        "id": existing.id,
+        "directory_id": d.id,
+        "user_id": target.id,
+        "username": target.username,
+        "role": existing.role,
+    }
+
+
+@router.delete("/directories/{dir_id}/collaborators/{user_id}")
+def remove_collaborator(
+    dir_id: int,
+    user_id: int,
+    request: Request,
+    _csrf: SessionRow = Depends(require_csrf),
+    user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    d = _get_owned_directory(db, dir_id, user)
+    row = (
+        db.query(DirectoryCollaborator)
+        .filter_by(directory_id=d.id, user_id=user_id)
+        .first()
+    )
+    if row is None:
+        raise HTTPException(404, detail="not found")
+    db.delete(row)
+    record(db, actor=user.username, action="directory.collaborator_removed",
+           target=f"directory:{d.id}:user:{user_id}", ip=client_ip(request))
+    db.commit()
+    return {"status": "removed"}
 
 
 @router.delete("/directories/{dir_id}")
@@ -291,24 +410,22 @@ def delete_directory(
         raise HTTPException(403, detail="not your directory")
 
     members = db.query(FileObject).filter_by(directory_id=d.id).all()
+    unlink_after_commit: list[str | None] = []
     for f in members:
-        try:
-            full = safe_join(storage_root(), f.storage_path)
-            if full.exists():
-                os.unlink(full)
-        except (OSError, ValueError):
-            pass
         db.query(Link).filter_by(file_id=f.id).delete()
+        unlink_after_commit.append(release_blob(db, f))
         db.delete(f)
 
     # Without an ORM relationship, the unit of work won't order child deletes
     # before the parent — flush the member removals first so the directory's
     # foreign keys are clear before we drop it.
     db.flush()
+    db.query(DirectoryCollaborator).filter_by(directory_id=d.id).delete()
     db.delete(d)
     record(db, actor=user.username, action="directory.deleted",
            target=f"directory:{dir_id}", ip=client_ip(request))
     db.commit()
+    unlink_queued(unlink_after_commit)
     return {"status": "deleted", "files_removed": len(members)}
 
 
@@ -351,6 +468,154 @@ def directory_info(slug: str, db: Session = Depends(get_db)) -> dict:
             }
             for f, lk in pairs
         ],
+    }
+
+
+def _preview_group(content_type: str, filename: str) -> str:
+    ct = (content_type or "application/octet-stream").lower()
+    name = filename.lower()
+    if ct.startswith("image/"):
+        return "images"
+    if ct.startswith("video/"):
+        return "videos"
+    if ct.startswith("audio/"):
+        return "audio"
+    if ct.startswith("text/") or name.endswith((".txt", ".md", ".json", ".csv", ".log")):
+        return "text"
+    if ct == "application/pdf" or name.endswith(".pdf"):
+        return "pdfs"
+    if ct in {"application/zip", "application/x-zip-compressed"} or name.endswith(".zip"):
+        return "archives"
+    return "other"
+
+
+def _archive_preview(f: FileObject) -> dict:
+    if f.encryption_mode != "none" or f.compressed or f.archived:
+        return {"status": "unreadable", "reason": "encrypted or transformed archive"}
+    try:
+        path = safe_join(storage_root(), f.storage_path)
+        with zipfile.ZipFile(path) as zf:
+            encrypted = any(info.flag_bits & 0x1 for info in zf.infolist())
+            if encrypted:
+                return {"status": "unreadable", "reason": "encrypted archive"}
+            return {
+                "status": "readable",
+                "entries": zf.namelist()[:100],
+                "entry_count": len(zf.infolist()),
+            }
+    except Exception:
+        return {"status": "unreadable", "reason": "corrupt or unsupported archive"}
+
+
+@router.get("/d/{slug}/preview-manifest")
+def directory_preview_manifest(slug: str, db: Session = Depends(get_db)) -> dict:
+    d = _resolve(db, slug)
+    groups = {
+        "images": [],
+        "videos": [],
+        "audio": [],
+        "text": [],
+        "pdfs": [],
+        "archives": [],
+        "other": [],
+    }
+    for f, link in _public_files(db, d):
+        row = {
+            "id": f.id,
+            "slug": link.slug,
+            "filename": f.original_filename,
+            "size_bytes": f.size_bytes,
+            "content_type": f.content_type,
+            "encryption_mode": f.encryption_mode,
+            "preview_url": f"/file/{link.slug}/preview",
+            "download_url": f"/file/{link.slug}/raw",
+        }
+        group = _preview_group(f.content_type, f.original_filename)
+        if group == "archives":
+            row["preview"] = _archive_preview(f)
+        groups[group].append(row)
+    return {
+        "id": d.id,
+        "title": d.title,
+        "slug": d.slug,
+        "encryption_mode": d.encryption_mode,
+        "file_count": sum(len(v) for v in groups.values()),
+        "groups": groups,
+    }
+
+
+@router.post("/d/{slug}/save")
+def save_directory(
+    slug: str,
+    request: Request,
+    _csrf: SessionRow = Depends(require_csrf),
+    user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.permissions.policy import ensure_permissions
+
+    source_dir = _resolve(db, slug)
+    pairs = _public_files(db, source_dir)
+    logical_bytes = sum(f.size_bytes for f, _ in pairs)
+    perm = ensure_permissions(db, user.id, master=(user.role == "master"))
+    if used_storage_bytes_for_user(db, user.id) + logical_bytes > perm.quota_bytes:
+        raise HTTPException(413, detail="save would exceed your quota")
+
+    new_dir = Directory(
+        owner_id=user.id,
+        slug=new_slug(),
+        title=source_dir.title,
+        encryption_mode=source_dir.encryption_mode,
+        enc_key_blob=source_dir.enc_key_blob,
+        enc_access_blob=source_dir.enc_access_blob,
+        total_bytes=logical_bytes,
+    )
+    db.add(new_dir)
+    db.flush()
+    saved_files = 0
+    for source, _link in pairs:
+        blob = db.get(ContentBlob, source.blob_id) if source.blob_id else None
+        if blob is not None:
+            blob.ref_count = (blob.ref_count or 0) + 1
+        copied = FileObject(
+            owner_id=user.id,
+            directory_id=new_dir.id,
+            blob_id=source.blob_id,
+            storage_path=source.storage_path,
+            original_filename=source.original_filename,
+            source_type="saved",
+            saved_from_file_id=source.id,
+            size_bytes=source.size_bytes,
+            stored_size_bytes=source.stored_size_bytes,
+            content_type=source.content_type,
+            encryption_mode=source.encryption_mode,
+            enc_key_blob=source.enc_key_blob,
+            enc_access_blob=source.enc_access_blob,
+            compressed=source.compressed,
+            archived=source.archived,
+            archive_codec=source.archive_codec,
+            archive_original_stored_size_bytes=source.archive_original_stored_size_bytes,
+            archive_saved_bytes=source.archive_saved_bytes,
+            archive_after_idle_days=source.archive_after_idle_days,
+            lifecycle_state=source.lifecycle_state,
+            is_permanent=True,
+            delete_if_idle_days=source.delete_if_idle_days,
+            auto_unarchive_on_download=source.auto_unarchive_on_download,
+        )
+        db.add(copied)
+        db.flush()
+        db.add(Link(file_id=copied.id, slug=new_slug()))
+        saved_files += 1
+    record(db, actor=user.username, action="directory.saved",
+           target=f"directory:{source_dir.id}->directory:{new_dir.id}", ip=client_ip(request))
+    db.commit()
+    return {
+        "id": new_dir.id,
+        "slug": new_dir.slug,
+        "url": _dir_url(request, new_dir.slug),
+        "saved_files": saved_files,
+        "source_type": "saved",
+        "access_key": _recover_access_key(request, new_dir),
     }
 
 
@@ -486,7 +751,29 @@ def _safe_arcname(name: str, seen: set[str]) -> str:
     return candidate
 
 
+def _directory_page_meta(request: Request, d: Directory, db: Session) -> str:
+    pairs = _public_files(db, d)
+    title = html.escape(d.title or "Shared folder", quote=True)
+    desc = html.escape(
+        f"{len(pairs)} files, {sum(f.size_bytes for f, _ in pairs)} bytes",
+        quote=True,
+    )
+    url = html.escape(str(request.url), quote=True)
+    return "\n".join(
+        [
+            f'<meta property="og:title" content="{title}">',
+            f'<meta property="og:description" content="{desc}">',
+            f'<meta property="og:url" content="{url}">',
+            '<meta property="og:type" content="website">',
+            f'<meta name="twitter:title" content="{title}">',
+            f'<meta name="twitter:description" content="{desc}">',
+        ]
+    )
+
+
 @router.get("/d/{slug}")
-def directory_page(slug: str, db: Session = Depends(get_db)):
-    _resolve(db, slug)
-    return FileResponse(str(_STATIC / "directory.html"), headers=_SECURITY)
+def directory_page(slug: str, request: Request, db: Session = Depends(get_db)):
+    d = _resolve(db, slug)
+    content = (_STATIC / "directory.html").read_text("utf-8")
+    content = content.replace("</head>", _directory_page_meta(request, d, db) + "\n</head>")
+    return HTMLResponse(content, headers=_SECURITY)
