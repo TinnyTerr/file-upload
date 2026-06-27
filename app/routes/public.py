@@ -17,11 +17,10 @@ from app.audit.log import record
 from app.deps import client_ip, get_db
 from app.links.consume import consume_use, resolve_active_link
 from app.models.file import FileObject
+from app.spa import render_spa
 from app.storage.blobs import file_hashes
 
 router = APIRouter(tags=["public"])
-
-_STATIC = Path(__file__).parent.parent / "static"
 
 # CSP for the download experience. The page decrypts in a Web Worker and renders
 # image/video/audio/pdf previews, so worker-src/media-src/img-src/frame-src must
@@ -435,9 +434,7 @@ def _file_meta_tags(request: Request, slug: str, db: Session) -> str:
 def download_page(slug: str, request: Request, db: Session = Depends(get_db)):
     # Always serve the page — the client JS checks /info and shows the same
     # "not found" state for both inactive and nonexistent slugs, so callers
-    # cannot distinguish the two.
-    content = (_STATIC / "download.html").read_text("utf-8")
-    meta = _file_meta_tags(request, slug, db)
-    if meta:
-        content = content.replace("</head>", meta + "\n</head>")
+    # cannot distinguish the two. We serve the React SPA shell; the OG meta tags
+    # are injected server-side so link unfurlers (which don't run JS) see them.
+    content = render_spa(_file_meta_tags(request, slug, db))
     return HTMLResponse(content, headers=_SECURITY)

@@ -26,13 +26,12 @@ from app.models.file import FileObject
 from app.models.link import Link
 from app.models.session import SessionRow
 from app.models.user import User
+from app.spa import render_spa
 from app.storage.blobs import release_blob, unlink_queued
 from app.storage.accounting import used_storage_bytes_for_user
 from app.storage.paths import safe_join, storage_root
 
 router = APIRouter(tags=["directories"])
-
-_STATIC = Path(__file__).parent.parent / "static"
 
 # Same hardened headers as the single-file download page: the directory page
 # decrypts end-to-end bundles in a Web Worker and zips them in the browser.
@@ -774,6 +773,7 @@ def _directory_page_meta(request: Request, d: Directory, db: Session) -> str:
 @router.get("/d/{slug}")
 def directory_page(slug: str, request: Request, db: Session = Depends(get_db)):
     d = _resolve(db, slug)
-    content = (_STATIC / "directory.html").read_text("utf-8")
-    content = content.replace("</head>", _directory_page_meta(request, d, db) + "\n</head>")
+    # Serve the React SPA shell with server-rendered OG meta tags injected (link
+    # unfurlers don't run JS); the client renders the directory view.
+    content = render_spa(_directory_page_meta(request, d, db))
     return HTMLResponse(content, headers=_SECURITY)

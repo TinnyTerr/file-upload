@@ -1,14 +1,14 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { isLoggedIn } from "./lib/api";
-import { RequireAuth, RequireMaster } from "./auth/auth";
-import { Nav } from "./components/Nav";
-import { LoginPage } from "./pages/LoginPage";
-import { ChangePage } from "./pages/ChangePage";
-import { FilesPage } from "./pages/FilesPage";
-import { AdminPage } from "./pages/AdminPage";
-import { ApiDocsPage } from "./pages/ApiDocsPage";
-import { DirectoryPage } from "./pages/DirectoryPage";
-import { DownloadPage } from "./pages/DownloadPage";
+import { RequireAuth, RequireMaster } from "./features/auth/hooks/auth";
+import { Nav } from "./components/layout/Nav";
+import { LoginPage } from "./features/auth/components/LoginPage";
+import { ChangePage } from "./features/auth/components/ChangePage";
+import { FilesPage } from "./features/files/components/FilesPage";
+import { AdminPage } from "./features/admin/components/AdminPage";
+import { ApiDocsPage } from "./features/api-docs/components/ApiDocsPage";
+import { DirectoryPage } from "./features/directory/components/DirectoryPage";
+import { DownloadPage } from "./features/download/components/DownloadPage";
 
 /** Shell with the top nav, for authenticated app pages. */
 function AppShell({ children }: { children: React.ReactNode }) {

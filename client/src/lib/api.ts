@@ -16,12 +16,12 @@ export interface User {
   can_delete?: boolean;
   can_delete_links?: boolean;
   can_create_directories?: boolean;
-  can_run_lifecycle?: boolean;
-  can_peer_to_peer?: boolean;
+  can_manage_lifecycle?: boolean;
+  can_use_p2p?: boolean;
   can_view_admin?: boolean;
   can_manage_users?: boolean;
   can_manage_storage?: boolean;
-  can_manage_api?: boolean;
+  can_manage_api_keys?: boolean;
   quota_bytes?: number | null;
   max_file_bytes?: number | null;
   [k: string]: unknown;
@@ -52,6 +52,32 @@ export function isLoggedIn(): boolean {
 export interface ApiOpts extends Omit<RequestInit, "body"> {
   json?: unknown;
   body?: BodyInit | null;
+}
+
+/** Error carrying the HTTP status so callers can branch on 401/409/429 etc. */
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+/** Pull a FastAPI `{detail}` message off a failed response, falling back. */
+export async function readDetail(resp: Response, fallback = "Request failed."): Promise<string> {
+  try {
+    const d = await resp.json();
+    return (d && (d.detail as string)) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Throw an {@link ApiError} when a response is not ok. */
+export async function ensureOk(resp: Response, fallback?: string): Promise<Response> {
+  if (!resp.ok) throw new ApiError(resp.status, await readDetail(resp, fallback));
+  return resp;
 }
 
 export async function apiFetch(url: string, opts: ApiOpts = {}): Promise<Response> {

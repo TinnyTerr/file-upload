@@ -6,8 +6,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Modal } from "../components/Modal";
-import { Button } from "../components/Button";
+import { Modal } from "../components/ui/Modal";
+import { Button } from "../components/ui/Button";
 
 export interface AlertOpts {
   title?: string;

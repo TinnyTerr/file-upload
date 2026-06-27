@@ -2,9 +2,8 @@
 /**
  * Build orchestration for the Oxymoron SPA.
  *
- * Phase 1 (now): build the React client with Vite → ../public.
- * Phase 2 (later): once the FastAPI server is wired to serve ./public as the SPA,
- *   uncomment the launch step below to build-then-serve in one command:
+ * Builds the React client with Vite → ../public, which the FastAPI server serves
+ * as the SPA shell (see app/spa.py). Optionally hand off to the Python server:
  *       bun run build.ts            # build only
  *       bun run build.ts --serve    # build, then start the Python server
  *
@@ -32,17 +31,8 @@ async function run(cmd: string[], cwd?: string): Promise<void> {
 await run(["bunx", "vite", "build"]);
 console.log("\n✓ SPA built → ../public");
 
-// 2. (Deferred) Hand off to the Python server. Left as a stub until the FastAPI
-//    app is taught to serve ./public. Fill in the real launch command here, e.g.:
-//
-//        await run(["uv", "run", "uvicorn", "app.main:create_app",
-//                   "--factory", "--host", "0.0.0.0", "--port", "8000"], "..");
-//
-//    or `python -m app`. Do NOT enable until the server-side route exists.
+// 2. (Optional) Hand off to the Python server, which now serves ./public.
 if (serve) {
-  console.warn(
-    "\n--serve requested, but the Python hand-off is not wired yet.\n" +
-      "Edit client/build.ts step 2 once FastAPI serves ./public.",
-  );
-  // await run(["python", "-m", "app"], "..");
+  console.log("\n→ starting Python server (serving ./public)…");
+  await run(["./.venv/bin/python3", "app"], "..");
 }
