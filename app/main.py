@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
+import time
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
@@ -50,22 +52,30 @@ from app.jobs.lifecycle import (
     archive_idle_job, delete_idle_job, temp_expiry_job, link_expiry_job,
     reconcile_stale_states,
 )
+from app.observability.log_buffer import install_backend_log_handler
 from app.security.lockout import LockoutPolicy
 from app.security.sessions import SessionManager
 from app.routes.auth import router as auth_router
 from app.routes.account import router as account_router
+from app.routes.admin import router as admin_router
 from app.routes.files import router as files_router
 from app.routes.directories import router as directories_router
+from app.routes.remote_upload import router as remote_upload_router
+from app.routes.dropbox import router as dropbox_router
 from app.routes.public import router as public_router
 from app.routes.users import router as users_router
 from app.routes.audit_view import router as audit_router
+from app.routes.keys import admin_router as admin_keys_router
 from app.routes.keys import router as keys_router
 from app.storage.paths import storage_root
 
 _STATIC = Path(__file__).parent / "static"
+_log = logging.getLogger(__name__)
+_request_log = logging.getLogger("app.request")
 
 
 def create_app(config_path: str | None = None, database_url: str | None = None) -> FastAPI:
+    install_backend_log_handler(reset=True)
     settings = load_settings(config_path)
     db_url = database_url or settings.database_url
     engine = make_engine(db_url)
@@ -84,8 +94,43 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
         lockout=LockoutPolicy(max_attempts=5, lockout_seconds=900),
     )
 
+    def _start_backend_workers(app: FastAPI):
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from app.routes.files import _sweep_stale_parts
+
+        scheduler = BackgroundScheduler()
+        _sf = session_factory
+        _sr = storage_root()
+        scheduler.add_job(archive_idle_job, "interval", hours=1, args=[_sf, _sr], id="archive_idle")
+        scheduler.add_job(delete_idle_job, "interval", hours=1, args=[_sf, _sr], id="delete_idle")
+        scheduler.add_job(temp_expiry_job, "interval", hours=1, args=[_sf, _sr], id="temp_expiry")
+        scheduler.add_job(link_expiry_job, "interval", minutes=10, args=[_sf], id="link_expiry")
+        scheduler.add_job(_sweep_stale_parts, "interval", hours=1, id="sweep_stale_parts")
+        scheduler.start()
+        app.state.backend_scheduler = scheduler
+        jobs = [job.id for job in scheduler.get_jobs()]
+        _log.info("backend worker scheduler started jobs=%s", jobs)
+        return scheduler
+
+    def _shutdown_backend_workers(app: FastAPI) -> None:
+        scheduler = getattr(app.state, "backend_scheduler", None)
+        if scheduler is None:
+            return
+        try:
+            scheduler.shutdown(wait=False)
+            _log.info("backend worker scheduler stopped")
+        except Exception as exc:
+            _log.warning("backend worker scheduler stop skipped: %s", exc)
+
+    def _restart_backend_workers() -> dict:
+        _shutdown_backend_workers(app)
+        scheduler = _start_backend_workers(app)
+        jobs = [job.id for job in scheduler.get_jobs()]
+        return {"status": "restarted", "jobs": jobs}
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        _log.info("application startup begin database_url=%s", db_url)
         storage_root().mkdir(parents=True, exist_ok=True)
         # Serialize first-run admin creation across worker processes: without
         # this, every worker's lifespan passes the "no user yet" check and races
@@ -95,23 +140,13 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
                 state.bootstrap_password = ensure_master(s)
 
         reconcile_stale_states(session_factory, storage_root())
-
-        from apscheduler.schedulers.background import BackgroundScheduler
-        from app.routes.files import _sweep_stale_parts
-        scheduler = BackgroundScheduler()
-        _sf = session_factory
-        _sr = storage_root()
-        scheduler.add_job(archive_idle_job, "interval", hours=1, args=[_sf, _sr], id="archive_idle")
-        scheduler.add_job(delete_idle_job, "interval", hours=1, args=[_sf, _sr], id="delete_idle")
-        scheduler.add_job(temp_expiry_job, "interval", hours=1, args=[_sf, _sr], id="temp_expiry")
-        scheduler.add_job(link_expiry_job, "interval", minutes=10, args=[_sf], id="link_expiry")
-        # Stale-upload cleanup moved off the upload_init hot path onto the scheduler.
-        scheduler.add_job(_sweep_stale_parts, "interval", hours=1, id="sweep_stale_parts")
-        scheduler.start()
+        _start_backend_workers(app)
+        _log.info("application startup complete")
         try:
             yield
         finally:
-            scheduler.shutdown(wait=False)
+            _shutdown_backend_workers(app)
+            _log.info("application shutdown complete")
 
     # Pure ASGI middleware — never touches the receive callable so large streaming
     # uploads flow through unimpeded. BaseHTTPMiddleware wraps receive in a task
@@ -189,9 +224,47 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
 
             await self.app(scope, receive, send)
 
+    class _RequestLogging:
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope["type"] != "http":
+                await self.app(scope, receive, send)
+                return
+
+            started = time.perf_counter()
+            status = 500
+
+            async def _send(message):
+                nonlocal status
+                if message["type"] == "http.response.start":
+                    status = int(message.get("status", 500))
+                await send(message)
+
+            try:
+                await self.app(scope, receive, _send)
+            finally:
+                path = scope.get("path", "")
+                method = scope.get("method", "")
+                client = scope.get("client") or ("unknown", 0)
+                duration_ms = (time.perf_counter() - started) * 1000
+                level = logging.DEBUG if path.startswith("/static") else logging.INFO
+                _request_log.log(
+                    level,
+                    "http request method=%s path=%s status=%s duration_ms=%.1f client=%s",
+                    method,
+                    path,
+                    status,
+                    duration_ms,
+                    client[0],
+                )
+
     app = FastAPI(title="Oxymoron (for files)", lifespan=lifespan)
+    app.state.restart_backend_workers = _restart_backend_workers
     app.add_middleware(_HttpsRedirect)
     app.add_middleware(_SecurityHeaders)
+    app.add_middleware(_RequestLogging)
     app.state.app_state = state
 
     @app.get("/health")
@@ -224,12 +297,16 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
 
     app.include_router(auth_router)
     app.include_router(account_router)
+    app.include_router(admin_router)
     app.include_router(files_router)
     app.include_router(directories_router)
+    app.include_router(remote_upload_router)
+    app.include_router(dropbox_router)
     app.include_router(public_router)
     app.include_router(users_router)
     app.include_router(audit_router)
     app.include_router(keys_router)
+    app.include_router(admin_keys_router)
 
     app.mount("/static", _RevalidatingStatic(directory=str(_STATIC)), name="static")
 

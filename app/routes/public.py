@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64 as _b64
+import html
 import re as _re
 import secrets as _secrets
 import tempfile
@@ -9,13 +10,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.audit.log import record
 from app.deps import client_ip, get_db
 from app.links.consume import consume_use, resolve_active_link
 from app.models.file import FileObject
+from app.storage.blobs import file_hashes
 
 router = APIRouter(tags=["public"])
 
@@ -116,6 +118,7 @@ def file_info(slug: str, db: Session = Depends(get_db)) -> dict:
         "max_uses": link.max_uses,
         "use_count": link.use_count,
         "expires_at": link.expires_at.isoformat() if link.expires_at else None,
+        "hashes": file_hashes(db, f),
     }
 
 
@@ -305,9 +308,136 @@ def download_raw(slug: str, request: Request, ek: str | None = None, db: Session
     )
 
 
+def _plain_file_response(request: Request, f: FileObject, *, disposition: str | None = None):
+    from app.storage.paths import safe_join, storage_root
+
+    if f.encryption_mode != "none" or f.compressed or f.archived:
+        raise HTTPException(403, detail="preview unavailable")
+    try:
+        full_path = safe_join(storage_root(), f.storage_path)
+    except ValueError:
+        raise HTTPException(500, detail="invalid storage path")
+    if not full_path.exists():
+        raise HTTPException(500, detail="file missing from storage")
+
+    file_size = f.stored_size_bytes
+    headers = {**_SECURITY, "Accept-Ranges": "bytes"}
+    if disposition:
+        headers["Content-Disposition"] = disposition
+    range_header = request.headers.get("range")
+    if range_header:
+        parsed = _parse_range(range_header, file_size)
+        if parsed is None:
+            return Response(
+                status_code=416,
+                headers={**_SECURITY, "Accept-Ranges": "bytes", "Content-Range": f"bytes */{file_size}"},
+            )
+        start, end = parsed
+        length = end - start + 1
+
+        def _range_stream():
+            with open(full_path, "rb") as fh:
+                fh.seek(start)
+                remaining = length
+                while remaining > 0:
+                    chunk = fh.read(min(_CHUNK, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                    yield chunk
+
+        return StreamingResponse(
+            _range_stream(),
+            status_code=206,
+            media_type=f.content_type,
+            headers={
+                **headers,
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Content-Length": str(length),
+            },
+        )
+
+    def _stream():
+        with open(full_path, "rb") as fh:
+            while True:
+                chunk = fh.read(_CHUNK)
+                if not chunk:
+                    break
+                yield chunk
+
+    return StreamingResponse(
+        _stream(),
+        media_type=f.content_type,
+        headers={**headers, "Content-Length": str(file_size)},
+    )
+
+
+@router.get("/file/{slug}/preview")
+def preview_file(slug: str, request: Request, db: Session = Depends(get_db)):
+    link = resolve_active_link(db, slug)
+    if link is None:
+        raise HTTPException(404, detail="not found")
+    if link.max_uses is not None:
+        raise HTTPException(403, detail="limited-use links do not expose previews")
+    f = db.get(FileObject, link.file_id)
+    if f is None:
+        raise HTTPException(404, detail="not found")
+    if not (
+        f.content_type.startswith("image/")
+        or f.content_type.startswith("video/")
+        or f.content_type.startswith("audio/")
+        or f.content_type == "application/pdf"
+        or f.content_type.startswith("text/")
+    ):
+        raise HTTPException(403, detail="preview unavailable")
+    return _plain_file_response(request, f)
+
+
+def _file_meta_tags(request: Request, slug: str, db: Session) -> str:
+    link = resolve_active_link(db, slug)
+    if link is None:
+        return ""
+    f = db.get(FileObject, link.file_id)
+    if f is None:
+        return ""
+    title = html.escape(f.original_filename or "Shared file", quote=True)
+    desc = html.escape(f"{f.size_bytes} bytes", quote=True)
+    url = html.escape(str(request.url), quote=True)
+    tags = [
+        f'<meta property="og:title" content="{title}">',
+        f'<meta property="og:description" content="{desc}">',
+        f'<meta property="og:url" content="{url}">',
+        '<meta property="og:type" content="website">',
+        f'<meta name="twitter:title" content="{title}">',
+        f'<meta name="twitter:description" content="{desc}">',
+    ]
+    eligible = (
+        link.max_uses is None
+        and f.encryption_mode == "none"
+        and not f.compressed
+        and not f.archived
+    )
+    preview_url = str(request.base_url).rstrip("/") + f"/file/{slug}/preview"
+    escaped_preview = html.escape(preview_url, quote=True)
+    if eligible and f.content_type.startswith("image/"):
+        tags.append(f'<meta property="og:image" content="{escaped_preview}">')
+        tags.append('<meta name="twitter:card" content="summary_large_image">')
+    elif eligible and f.content_type.startswith("video/"):
+        tags.append(f'<meta property="og:video" content="{escaped_preview}">')
+        tags.append(f'<meta property="og:video:type" content="{html.escape(f.content_type, quote=True)}">')
+    elif eligible and f.content_type.startswith("audio/"):
+        tags.append(f'<meta property="og:audio" content="{escaped_preview}">')
+        tags.append(f'<meta property="og:audio:type" content="{html.escape(f.content_type, quote=True)}">')
+    return "\n".join(tags)
+
+
 @router.get("/file/{slug}")
-def download_page(slug: str):
+def download_page(slug: str, request: Request, db: Session = Depends(get_db)):
     # Always serve the page — the client JS checks /info and shows the same
     # "not found" state for both inactive and nonexistent slugs, so callers
     # cannot distinguish the two.
-    return FileResponse(str(_STATIC / "download.html"), headers=_SECURITY)
+    content = (_STATIC / "download.html").read_text("utf-8")
+    meta = _file_meta_tags(request, slug, db)
+    if meta:
+        content = content.replace("</head>", meta + "\n</head>")
+    return HTMLResponse(content, headers=_SECURITY)

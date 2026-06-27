@@ -17,6 +17,7 @@ class ApiKey(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    user_key_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     key_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     bound_ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

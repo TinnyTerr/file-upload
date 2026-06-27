@@ -21,7 +21,7 @@ async function loadUsage() {
 
 // ── File queue state ──────────────────────────────────────────────────────
 let fileQueue  = [];
-let uploadMode = "single";
+let uploadMode = "files";
 
 function qId() { return Math.random().toString(36).slice(2, 10); }
 
@@ -38,40 +38,35 @@ function fileIcon(ct) {
 
 // ── Mode selector ─────────────────────────────────────────────────────────
 const fileInput    = document.getElementById("file-input");
-const addMoreInput = document.getElementById("add-more-input");
-const addMoreWrap  = document.getElementById("add-more-wrap");
 const dropZone     = document.getElementById("drop-zone");
 const dropSub      = document.getElementById("drop-sub");
 
-document.querySelectorAll(".mode-btn").forEach(btn => {
+document.querySelectorAll(".mode-btn[data-mode]").forEach(btn => {
   btn.addEventListener("click", () => setMode(btn.dataset.mode));
 });
 
 function setMode(mode) {
   uploadMode = mode;
-  document.querySelectorAll(".mode-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === mode));
-  fileQueue = fileQueue.filter(i => i.status === "uploading");
-  renderQueue();
-  fileInput.removeAttribute("multiple");
-  fileInput.removeAttribute("webkitdirectory");
-  addMoreInput.removeAttribute("multiple");
-  addMoreInput.removeAttribute("webkitdirectory");
+  document.querySelectorAll(".mode-btn[data-mode]").forEach(b => b.classList.toggle("active", b.dataset.mode === mode));
 
-  if (mode === "multi") {
-    fileInput.setAttribute("multiple", "");
-    addMoreInput.setAttribute("multiple", "");
-    dropSub.textContent = "Hold Ctrl/Cmd to select multiple · or drag & drop a batch";
-    addMoreWrap.style.display = "";
-  } else if (mode === "folder") {
-    fileInput.setAttribute("webkitdirectory", "");
-    fileInput.setAttribute("multiple", "");
-    addMoreInput.setAttribute("webkitdirectory", "");
-    addMoreInput.setAttribute("multiple", "");
-    dropSub.textContent = "Select a folder — it becomes one shared page with a download-all link";
-    addMoreWrap.style.display = "";
-  } else {
-    dropSub.textContent = "Any file type · any size";
-    addMoreWrap.style.display = "none";
+  const isLocal = mode === "files" || mode === "folder";
+  document.getElementById("local-upload-panel").classList.toggle("hidden", !isLocal);
+  document.getElementById("remote-upload-panel").classList.toggle("hidden", mode !== "remote");
+  document.getElementById("receive-upload-panel").classList.toggle("hidden", mode !== "receive");
+
+  if (isLocal) {
+    fileQueue = fileQueue.filter(i => i.status === "uploading");
+    renderQueue();
+    fileInput.removeAttribute("multiple");
+    fileInput.removeAttribute("webkitdirectory");
+    if (mode === "files") {
+      fileInput.setAttribute("multiple", "");
+      dropSub.textContent = "Select one or many files · encrypt and set limits below";
+    } else {
+      fileInput.setAttribute("webkitdirectory", "");
+      fileInput.setAttribute("multiple", "");
+      dropSub.textContent = "Select a folder — it becomes one shared page with a download-all link";
+    }
   }
 }
 
@@ -80,12 +75,6 @@ fileInput.addEventListener("change", () => {
   if (!fileInput.files.length) return;
   addToQueue(Array.from(fileInput.files));
   fileInput.value = "";
-});
-document.getElementById("add-more-btn").addEventListener("click", () => addMoreInput.click());
-addMoreInput.addEventListener("change", () => {
-  if (!addMoreInput.files.length) return;
-  addToQueue(Array.from(addMoreInput.files));
-  addMoreInput.value = "";
 });
 
 dropZone.addEventListener("dragover",  e => { e.preventDefault(); dropZone.classList.add("drag-over"); });
@@ -98,7 +87,6 @@ dropZone.addEventListener("drop", e => {
 });
 
 function addToQueue(files) {
-  if (uploadMode === "single") fileQueue = fileQueue.filter(i => i.status === "uploading");
   for (const f of files) {
     fileQueue.push({ id: qId(), file: f, status: "queued", progress: 0, result: null, error: null });
   }
@@ -302,6 +290,67 @@ dirConfirm.addEventListener("click", async () => {
 
 // ── Upload ────────────────────────────────────────────────────────────────
 uploadBtn.addEventListener("click", startUpload);
+
+document.getElementById("remote-upload-btn")?.addEventListener("click", async () => {
+  const urlEl = document.getElementById("remote-url");
+  const nameEl = document.getElementById("remote-name");
+  const status = document.getElementById("remote-status");
+  const btn = document.getElementById("remote-upload-btn");
+  const url = urlEl.value.trim();
+  if (!url) {
+    showToast("Paste a remote URL first.", "error");
+    return;
+  }
+  btn.disabled = true;
+  status.textContent = "Fetching from server...";
+  const body = { url };
+  if (nameEl.value.trim()) body.original_filename = nameEl.value.trim();
+  const resp = await apiFetch("/files/remote-upload", { method: "POST", json: body });
+  btn.disabled = false;
+  if (!resp.ok) {
+    const d = await resp.json().catch(() => ({}));
+    status.textContent = "";
+    showToast(d.detail || "Remote upload failed.", "error");
+    return;
+  }
+  const result = await resp.json();
+  status.textContent = "";
+  showSuccessModal(result, "none", null);
+  urlEl.value = "";
+  nameEl.value = "";
+  loadFiles();
+  loadUsage();
+});
+
+document.getElementById("receive-create-btn")?.addEventListener("click", async () => {
+  const expiresRaw = document.getElementById("receive-expires").value.trim() || "1h";
+  const expires = parseDuration(expiresRaw);
+  if (expires === null) {
+    showToast('Invalid duration — use "1h", "7d", "30m"', "error");
+    return;
+  }
+  const btn = document.getElementById("receive-create-btn");
+  btn.disabled = true;
+  const resp = await apiFetch("/dropbox-links", {
+    method: "POST",
+    json: { expires_in_seconds: expires },
+  });
+  btn.disabled = false;
+  if (!resp.ok) {
+    const d = await resp.json().catch(() => ({}));
+    showToast(d.detail || "Failed to create upload link.", "error");
+    return;
+  }
+  const link = await resp.json();
+  const resultEl = document.getElementById("receive-result");
+  resultEl.textContent = "";
+  const hint = document.createElement("div");
+  hint.className = "text-xs text-muted";
+  hint.style.marginBottom = "8px";
+  hint.textContent = "Share this link. One upload only — it disables after the first file is received.";
+  resultEl.appendChild(hint);
+  resultEl.appendChild(makeCopyRow(link.url, "Upload link"));
+});
 
 async function startUpload() {
   const maxUsesRaw   = document.getElementById("max-uses").value.trim();
@@ -627,24 +676,94 @@ function fullShareUrl(result, encMode, clientKeyBytes) {
   return url;
 }
 
+function copyValue(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    if (!btn) return;
+    const orig = btn.textContent;
+    btn.textContent = "Copied";
+    setTimeout(() => (btn.textContent = orig), 1400);
+  }).catch(() => {});
+}
+
+function addActionRow(parent, label, text, { filename = "file", open = false } = {}) {
+  const row = document.createElement("div");
+  row.className = "copy-row";
+  const span = document.createElement("span");
+  span.className = "copy-row-text";
+  span.style.cssText = "font-size:12px;word-break:break-all";
+  span.textContent = text;
+
+  const copy = document.createElement("button");
+  copy.className = "btn btn-ghost btn-sm";
+  copy.textContent = label;
+  copy.title = `Copy ${label.toLowerCase()}`;
+  copy.addEventListener("click", () => copyValue(text, copy));
+  row.append(span, copy);
+
+  const md = document.createElement("button");
+  md.className = "btn btn-ghost btn-sm";
+  md.textContent = "MD";
+  md.title = "Copy as Markdown link";
+  md.addEventListener("click", () => copyValue(`[${filename}](${text})`, md));
+  row.appendChild(md);
+
+  const htmlBtn = document.createElement("button");
+  htmlBtn.className = "btn btn-ghost btn-sm";
+  htmlBtn.textContent = "HTML";
+  htmlBtn.title = "Copy as HTML anchor";
+  htmlBtn.addEventListener("click", () => copyValue(`<a href="${text}">${filename}</a>`, htmlBtn));
+  row.appendChild(htmlBtn);
+
+  if (open) {
+    const openBtn = document.createElement("button");
+    openBtn.className = "btn btn-ghost btn-sm";
+    openBtn.textContent = "Open";
+    openBtn.title = "Open in a new tab";
+    openBtn.addEventListener("click", () => window.open(text, "_blank", "noopener"));
+    row.appendChild(openBtn);
+  }
+  parent.appendChild(row);
+}
+
+function showGeneratedLinkModal(title, url, { subtitle = "", filename = "link" } = {}) {
+  const body = document.getElementById("success-body");
+  body.textContent = "";
+  document.querySelector("#success-modal .modal-title").textContent = title;
+  if (subtitle) {
+    const lead = document.createElement("div");
+    lead.className = "dialog-msg";
+    lead.style.marginBottom = "12px";
+    lead.textContent = subtitle;
+    body.appendChild(lead);
+  }
+  addActionRow(body, "Copy", url, { filename, open: true });
+  const qrWrap = document.getElementById("qr-wrap");
+  qrWrap.textContent = "";
+  if (typeof QRCode !== "undefined") {
+    new QRCode(qrWrap, { text: url, width: 120, height: 120, colorDark: "#e2e8f0", colorLight: "#1a1f2e" });
+  }
+  document.getElementById("success-modal").classList.remove("hidden");
+  document.getElementById("success-close").onclick = () => {
+    document.getElementById("success-modal").classList.add("hidden");
+  };
+}
+
 function showSuccessModal(data, encMode, clientKeyBytes) {
   const body = document.getElementById("success-body");
   body.textContent = "";
+  document.querySelector("#success-modal .modal-title").textContent = "Upload complete";
 
   const shareUrl = fullShareUrl(data, encMode, clientKeyBytes);
+  const noKeyUrl = data.url || shareUrl.split(/[?#]ek=/)[0];
+  const keyOnly = encMode === "client" && clientKeyBytes
+    ? b64urlEncode(clientKeyBytes)
+    : encMode === "server" && data.access_key ? data.access_key : "";
 
-  const row = document.createElement("div");
-  row.className = "copy-row";
-  const urlSpan = document.createElement("span");
-  urlSpan.className = "copy-row-text";
-  urlSpan.style.cssText = "font-size:12px;word-break:break-all";
-  urlSpan.textContent = shareUrl;
-  const copyBtn = document.createElement("button");
-  copyBtn.className = "btn btn-ghost btn-sm";
-  copyBtn.textContent = "Copy";
-  copyBtn.addEventListener("click", () => navigator.clipboard.writeText(shareUrl).catch(() => {}));
-  row.append(urlSpan, copyBtn);
-  body.appendChild(row);
+  addActionRow(body, "Full", shareUrl, { filename: data.original_filename || "file", open: true });
+  if (keyOnly) {
+    addActionRow(body, "No key", noKeyUrl, { filename: data.original_filename || "file", open: true });
+    addActionRow(body, "Key", keyOnly, { filename: "key" });
+  }
 
   if (encMode === "client" && clientKeyBytes) {
     const hint = document.createElement("div");
@@ -925,14 +1044,13 @@ function makeCopyRow(text, label) {
   const btn = document.createElement("button");
   btn.className = "btn btn-ghost btn-sm";
   btn.textContent = "Copy";
-  btn.addEventListener("click", () => {
-    navigator.clipboard.writeText(text).then(() => {
-      const orig = btn.textContent;
-      btn.textContent = "Copied!";
-      setTimeout(() => (btn.textContent = orig), 1500);
-    }).catch(() => {});
-  });
-  wrap.append(span, btn);
+  btn.addEventListener("click", () => copyValue(text, btn));
+  const openBtn = document.createElement("button");
+  openBtn.className = "btn btn-ghost btn-sm";
+  openBtn.textContent = "Open";
+  openBtn.title = "Open in a new tab";
+  openBtn.addEventListener("click", () => window.open(text, "_blank", "noopener"));
+  wrap.append(span, btn, openBtn);
   return wrap;
 }
 
@@ -967,9 +1085,8 @@ function staggerIn(card, i) {
 
 function renderListing(dirs, files) {
   filesListEl.textContent = "";
-  const u = user.get();
-  const isMaster = u?.role === "master";
-  if (isMaster) document.getElementById("files-heading").textContent = "All files & folders";
+  const isMaster = false;
+  document.getElementById("files-heading").textContent = "Your files & folders";
 
   if (!dirs.length && !files.length) {
     const empty = document.createElement("div");
@@ -1068,17 +1185,23 @@ function renderDirectoryCard(d, isMaster) {
     setTimeout(() => { copyBtn.textContent = "Copy"; copyBtn.classList.remove("copied"); }, 1500);
   });
 
-  const addBtn = document.createElement("button");
-  addBtn.className = "btn btn-ghost btn-sm";
-  addBtn.textContent = "Add files";
-  addBtn.addEventListener("click", e => { e.stopPropagation(); addFilesToDirectory(d); });
+  if (_canCreateDirectories) {
+    const addBtn = document.createElement("button");
+    addBtn.className = "btn btn-ghost btn-sm";
+    addBtn.textContent = "Add files";
+    addBtn.addEventListener("click", e => { e.stopPropagation(); addFilesToDirectory(d); });
+    acts.appendChild(addBtn);
+  }
 
-  const delBtn = document.createElement("button");
-  delBtn.className = "btn btn-danger btn-sm";
-  delBtn.textContent = "Delete all";
-  delBtn.addEventListener("click", e => { e.stopPropagation(); deleteDirectory(d.id, d.title, d.file_count); });
+  acts.append(openBtn, copyBtn);
 
-  acts.append(addBtn, openBtn, copyBtn, delBtn);
+  if (_canDeleteFiles) {
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn btn-danger btn-sm";
+    delBtn.textContent = "Delete all";
+    delBtn.addEventListener("click", e => { e.stopPropagation(); deleteDirectory(d.id, d.title, d.file_count); });
+    acts.appendChild(delBtn);
+  }
   header.append(ico, name, meta, acts);
   card.appendChild(header);
 
@@ -1130,12 +1253,14 @@ async function loadDirectoryMembers(d, body) {
     size.className = "file-meta";
     size.textContent = formatBytes(f.size_bytes);
 
-    const removeBtn = document.createElement("button");
-    removeBtn.className = "btn btn-danger btn-sm";
-    removeBtn.textContent = "Remove";
-    removeBtn.addEventListener("click", () => deleteDirectoryMember(d.id, f.id, f.filename));
-
-    row.append(name, size, removeBtn);
+    row.append(name, size);
+    if (_canDeleteFiles) {
+      const removeBtn = document.createElement("button");
+      removeBtn.className = "btn btn-danger btn-sm";
+      removeBtn.textContent = "Remove";
+      removeBtn.addEventListener("click", () => deleteDirectoryMember(d.id, f.id, f.filename));
+      row.appendChild(removeBtn);
+    }
     holder.appendChild(row);
   }
 }
@@ -1231,18 +1356,23 @@ function renderFileCard(f, isMaster) {
   const acts = document.createElement("div");
   acts.style.cssText = "display:flex;gap:5px;flex-shrink:0";
 
-  const mintBtn = document.createElement("button");
-  mintBtn.className = "btn btn-ghost btn-sm";
-  mintBtn.textContent = "+ Link";
-  mintBtn.title = "Create a new share link for this file";
-  mintBtn.addEventListener("click", e => { e.stopPropagation(); openMintModal(f.id); });
+  if (_canRegenerateLinks) {
+    const mintBtn = document.createElement("button");
+    mintBtn.className = "btn btn-ghost btn-sm";
+    mintBtn.textContent = "+ Link";
+    mintBtn.title = "Create a new share link for this file";
+    mintBtn.addEventListener("click", e => { e.stopPropagation(); openMintModal(f.id); });
+    acts.appendChild(mintBtn);
+  }
 
-  const delBtn = document.createElement("button");
-  delBtn.className = "btn btn-danger btn-sm";
-  delBtn.textContent = "Delete";
-  delBtn.addEventListener("click", e => { e.stopPropagation(); deleteFile(f.id, f.original_filename); });
+  if (_canDeleteFiles) {
+    const delBtn = document.createElement("button");
+    delBtn.className = "btn btn-danger btn-sm";
+    delBtn.textContent = "Delete";
+    delBtn.addEventListener("click", e => { e.stopPropagation(); deleteFile(f.id, f.original_filename); });
+    acts.appendChild(delBtn);
+  }
 
-  acts.append(mintBtn, delBtn);
   header.append(ico, name, meta, acts);
   card.appendChild(header);
 
@@ -1332,23 +1462,36 @@ function renderLinkRow(lk, f) {
   copyBtn.className = "btn btn-ghost btn-sm";
   copyBtn.textContent = "Copy";
   copyBtn.addEventListener("click", () => {
-    navigator.clipboard.writeText(url).then(() => {
-      copyBtn.textContent = "Copied!";
-      setTimeout(() => (copyBtn.textContent = "Copy"), 1500);
-    }).catch(() => {});
+    copyValue(url, copyBtn);
   });
   row.appendChild(copyBtn);
 
+  const copyMdBtn = document.createElement("button");
+  copyMdBtn.className = "btn btn-ghost btn-sm";
+  copyMdBtn.textContent = "MD";
+  copyMdBtn.title = "Copy as Markdown link";
+  copyMdBtn.addEventListener("click", () => copyValue(`[${f.original_filename}](${url})`, copyMdBtn));
+  row.appendChild(copyMdBtn);
+
+  const openBtn = document.createElement("button");
+  openBtn.className = "btn btn-ghost btn-sm";
+  openBtn.textContent = "Open";
+  openBtn.title = "Open this link in a new tab";
+  openBtn.addEventListener("click", () => window.open(url, "_blank", "noopener"));
+  row.appendChild(openBtn);
+
   if (!inactive) {
-    const deactBtn = document.createElement("button");
-    deactBtn.className = "btn btn-ghost btn-sm";
-    deactBtn.textContent = "Deactivate";
-    deactBtn.addEventListener("click", async () => {
-      const resp = await apiFetch(`/links/${lk.id}`, { method: "DELETE" });
-      if (resp.ok) { showToast("Link deactivated."); loadFiles(); }
-      else showToast("Failed to deactivate.", "error");
-    });
-    row.appendChild(deactBtn);
+    if (_canRegenerateLinks) {
+      const deactBtn = document.createElement("button");
+      deactBtn.className = "btn btn-ghost btn-sm";
+      deactBtn.textContent = "Deactivate";
+      deactBtn.addEventListener("click", async () => {
+        const resp = await apiFetch(`/links/${lk.id}`, { method: "PATCH", json: { active: false } });
+        if (resp.ok) { showToast("Link deactivated."); loadFiles(); }
+        else showToast("Failed to deactivate.", "error");
+      });
+      row.appendChild(deactBtn);
+    }
   } else {
     const badge = document.createElement("span");
     badge.className = "badge badge-gray";
@@ -1367,11 +1510,26 @@ function renderLinkRow(lk, f) {
       row.appendChild(reactBtn);
     }
 
-    const hideBtn = document.createElement("button");
-    hideBtn.className = "btn btn-ghost btn-sm";
-    hideBtn.textContent = "Hide";
-    hideBtn.addEventListener("click", () => row.remove());
-    row.appendChild(hideBtn);
+  }
+
+  if (_canDeleteLinks) {
+    const deleteBtn = document.createElement("button");
+    deleteBtn.className = "btn btn-ghost btn-sm";
+    deleteBtn.style.color = "var(--danger)";
+    deleteBtn.textContent = "Delete";
+    deleteBtn.addEventListener("click", async () => {
+      const ok = await showConfirm({
+        title: "Delete link?",
+        message: "This permanently removes this share link. The file remains stored.",
+        confirmText: "Delete link",
+        danger: true,
+      });
+      if (!ok) return;
+      const resp = await apiFetch(`/links/${lk.id}`, { method: "DELETE" });
+      if (resp.ok) { showToast("Link deleted."); loadFiles(); }
+      else showToast("Failed to delete link.", "error");
+    });
+    row.appendChild(deleteBtn);
   }
 
   return row;
@@ -1448,6 +1606,9 @@ mintConfirm.addEventListener("click", async () => {
 
 let _canRegenerateLinks = false;
 let _canUseApiKeys = false;
+let _canDeleteFiles = false;
+let _canDeleteLinks = false;
+let _canCreateDirectories = false;
 
 async function checkPermissions() {
   try {
@@ -1460,8 +1621,13 @@ async function checkPermissions() {
       const dirOpt = document.getElementById("dir-encrypt-client");
       if (dirOpt) dirOpt.remove();
     }
-    _canRegenerateLinks = !!(me.can_regenerate_links || me.role === "master");
-    _canUseApiKeys = !!(me.can_use_api_keys || me.role === "master");
+    _canRegenerateLinks = !!me.can_regenerate_links;
+    _canUseApiKeys = !!me.can_use_api_keys;
+    _canDeleteFiles = !!me.can_delete;
+    _canDeleteLinks = !!me.can_delete_links;
+    _canCreateDirectories = !!me.can_create_directories;
+    const dirBtn = document.getElementById("create-dir-btn");
+    if (dirBtn) dirBtn.style.display = _canCreateDirectories ? "" : "none";
     if (_canUseApiKeys) {
       document.getElementById("keys-section").style.display = "";
       loadUserKeys();
@@ -1499,7 +1665,7 @@ async function loadUserKeys() {
 
     const idSpan = document.createElement('span');
     idSpan.style.cssText = 'font-family:var(--font-mono);font-weight:500';
-    idSpan.textContent = `Key #${k.id}`;
+    idSpan.textContent = `Key #${k.user_key_number ?? k.id}`;
 
     const ipSpan = document.createElement('span');
     ipSpan.className = 'text-xs text-muted';
@@ -1604,6 +1770,10 @@ document.getElementById('user-reset-ip-confirm').addEventListener('click', async
 
 document.getElementById('user-create-key-btn').addEventListener('click', userCreateKey);
 
-checkPermissions();
-loadUsage();
-loadFiles();
+async function initFilesPage() {
+  await checkPermissions();
+  await loadUsage();
+  await loadFiles();
+}
+
+initFilesPage();

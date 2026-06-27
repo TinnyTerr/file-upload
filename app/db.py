@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from contextlib import contextmanager
@@ -146,6 +147,11 @@ def init_db(engine: Engine) -> None:
     from app.models import link as _link  # noqa: F401
     from app.models import api_key as _api_key  # noqa: F401
     from app.models import credential as _credential  # noqa: F401
+    from app.models import storage_settings as _storage_settings  # noqa: F401
+    from app.models import content_blob as _content_blob  # noqa: F401
+    from app.models import directory_collaborator as _directory_collaborator  # noqa: F401
+    from app.models import dropbox_link as _dropbox_link  # noqa: F401
+    from app.models import remote_upload_job as _remote_upload_job  # noqa: F401
 
     # create_all() does a non-atomic check-then-create: it inspects existing
     # tables, then issues bare CREATE TABLE. When multiple worker processes call
@@ -164,6 +170,19 @@ def init_db(engine: Engine) -> None:
 _ADDED_COLUMNS = [
     ("files", "enc_access_blob", "BLOB"),
     ("files", "directory_id", "INTEGER"),
+    ("files", "blob_id", "INTEGER"),
+    ("files", "source_type", "TEXT NOT NULL DEFAULT 'upload'"),
+    ("files", "saved_from_file_id", "INTEGER"),
+    ("files", "archive_original_stored_size_bytes", "BIGINT NOT NULL DEFAULT 0"),
+    ("files", "archive_saved_bytes", "BIGINT NOT NULL DEFAULT 0"),
+    ("api_keys", "user_key_number", "INTEGER NOT NULL DEFAULT 0"),
+    ("permissions", "can_delete_links", "BOOLEAN NOT NULL DEFAULT 1"),
+    ("permissions", "can_create_directories", "BOOLEAN NOT NULL DEFAULT 1"),
+    ("permissions", "can_manage_lifecycle", "BOOLEAN NOT NULL DEFAULT 1"),
+    ("permissions", "can_view_admin", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("permissions", "can_manage_users", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("permissions", "can_manage_storage", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("permissions", "can_manage_api_keys", "BOOLEAN NOT NULL DEFAULT 0"),
 ]
 
 
@@ -181,3 +200,124 @@ def _migrate_add_columns(engine: Engine) -> None:
             cols = {c["name"] for c in inspector.get_columns(table)}
             if column not in cols:
                 conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN {column} {ddl}'))
+        if "api_keys" in existing_tables:
+            _backfill_api_key_numbers(conn)
+        if "files" in existing_tables and "content_blobs" in existing_tables:
+            _backfill_content_blobs(conn)
+
+
+def _backfill_api_key_numbers(conn) -> None:
+    rows = conn.execute(
+        text(
+            """
+            SELECT id, owner_id
+            FROM api_keys
+            ORDER BY owner_id ASC, created_at ASC, id ASC
+            """
+        )
+    ).mappings().all()
+    counters: dict[int, int] = {}
+    for row in rows:
+        owner_id = int(row["owner_id"])
+        counters[owner_id] = counters.get(owner_id, 0) + 1
+        conn.execute(
+            text("UPDATE api_keys SET user_key_number = :n WHERE id = :id AND user_key_number = 0"),
+            {"n": counters[owner_id], "id": row["id"]},
+        )
+
+
+def _hash_existing_file(path) -> dict[str, str] | None:
+    if not path.exists() or not path.is_file():
+        return None
+    sha256 = hashlib.sha256()
+    sha1 = hashlib.sha1()
+    md5 = hashlib.md5()
+    blake2b = hashlib.blake2b()
+    with open(path, "rb") as fh:
+        while True:
+            chunk = fh.read(1024 * 1024)
+            if not chunk:
+                break
+            sha256.update(chunk)
+            sha1.update(chunk)
+            md5.update(chunk)
+            blake2b.update(chunk)
+    return {
+        "sha256": sha256.hexdigest(),
+        "sha1": sha1.hexdigest(),
+        "md5": md5.hexdigest(),
+        "blake2b": blake2b.hexdigest(),
+    }
+
+
+def _legacy_hashes(seed: str) -> dict[str, str]:
+    raw = seed.encode("utf-8", "replace")
+    return {
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "sha1": hashlib.sha1(raw).hexdigest(),
+        "md5": hashlib.md5(raw).hexdigest(),
+        "blake2b": hashlib.blake2b(raw).hexdigest(),
+    }
+
+
+def _backfill_content_blobs(conn) -> None:
+    from app.storage.paths import safe_join, storage_root
+
+    rows = conn.execute(
+        text(
+            """
+            SELECT id, storage_path, original_filename, size_bytes, stored_size_bytes, content_type,
+                   encryption_mode, compressed, archived, blob_id
+            FROM files
+            WHERE blob_id IS NULL
+            ORDER BY id ASC
+            """
+        )
+    ).mappings().all()
+    for row in rows:
+        rel = row["storage_path"]
+        hashes = None
+        try:
+            hashes = _hash_existing_file(safe_join(storage_root(), rel))
+        except (OSError, ValueError):
+            hashes = None
+        if hashes is None:
+            hashes = _legacy_hashes(f"legacy:{row['id']}:{rel}")
+        transform = "legacy"
+        if row["encryption_mode"]:
+            transform += f":{row['encryption_mode']}"
+        if row["compressed"]:
+            transform += ":compressed"
+        if row["archived"]:
+            transform += ":archived"
+        result = conn.execute(
+            text(
+                """
+                INSERT INTO content_blobs
+                    (storage_path, content_type, size_bytes, stored_size_bytes,
+                     sha256, sha1, md5, blake2b, stored_sha256, transform_key,
+                     ref_count, created_at)
+                VALUES
+                    (:storage_path, :content_type, :size_bytes, :stored_size_bytes,
+                     :sha256, :sha1, :md5, :blake2b, :stored_sha256, :transform_key,
+                     1, :created_at)
+                """
+            ),
+            {
+                "storage_path": rel,
+                "content_type": row["content_type"] or "application/octet-stream",
+                "size_bytes": int(row["size_bytes"] or 0),
+                "stored_size_bytes": int(row["stored_size_bytes"] or 0),
+                "sha256": hashes["sha256"],
+                "sha1": hashes["sha1"],
+                "md5": hashes["md5"],
+                "blake2b": hashes["blake2b"],
+                "stored_sha256": hashes["sha256"],
+                "transform_key": transform,
+                "created_at": datetime.now(timezone.utc),
+            },
+        )
+        conn.execute(
+            text("UPDATE files SET blob_id = :blob_id WHERE id = :file_id"),
+            {"blob_id": result.lastrowid, "file_id": row["id"]},
+        )

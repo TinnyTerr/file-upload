@@ -1,4 +1,4 @@
-import { formatBytes, showAlert, showPrompt, showToast, observeReveals } from "./api.js";
+import { apiFetch, formatBytes, isLoggedIn, showAlert, showPrompt, showToast, observeReveals } from "./api.js";
 import { buildZip } from "./zip.js";
 
 const slug = location.pathname.split("/d/")[1]?.replace(/\/$/, "");
@@ -14,6 +14,8 @@ const manifestEl = document.getElementById("dir-manifest");
 const bannerEl   = document.getElementById("enc-banner");
 const dlAllBtn   = document.getElementById("dl-all");
 const dlNote     = document.getElementById("dl-note");
+const togglePreviewsBtn = document.getElementById("toggle-previews");
+const saveFolderBtn = document.getElementById("save-folder");
 
 // Client key lives in the fragment (#ek=), never sent to the server.
 function getFragmentKey() {
@@ -43,9 +45,11 @@ function fileIcon(ct) {
 }
 
 let DATA = null;
+let PREVIEW_DATA = null;
 let ENC = "none";
 let fragKey = null;
 let queryKey = null;
+let previewsEnabled = true;
 
 async function load() {
   if (!slug) return showError();
@@ -53,6 +57,8 @@ async function load() {
     const resp = await fetch(`/d/${slug}/info`);
     if (!resp.ok) return showError();
     DATA = await resp.json();
+    const manifest = await fetch(`/d/${slug}/preview-manifest`).catch(() => null);
+    if (manifest?.ok) PREVIEW_DATA = await manifest.json();
     render();
   } catch {
     showError();
@@ -82,6 +88,7 @@ function render() {
   showBanner();
   renderManifest();
   wireDownloadAll();
+  wireToolbar();
   // #dir-state was display:none at load — re-observe so its reveals animate in.
   observeReveals();
 }
@@ -111,6 +118,10 @@ function renderManifest() {
     e.className = "empty";
     e.textContent = "This folder is empty.";
     manifestEl.appendChild(e);
+    return;
+  }
+  if (PREVIEW_DATA && previewsEnabled) {
+    renderPreviewGroups();
     return;
   }
   DATA.files.forEach((f, i) => {
@@ -143,6 +154,101 @@ function renderManifest() {
     row.append(idx, icon, name, size, btn);
     manifestEl.appendChild(row);
   });
+}
+
+function renderPreviewGroups() {
+  const labels = {
+    images: "Images",
+    videos: "Videos",
+    audio: "Audio",
+    text: "Text",
+    pdfs: "PDFs",
+    archives: "Archives",
+    other: "Other files",
+  };
+  for (const [group, files] of Object.entries(PREVIEW_DATA.groups || {})) {
+    if (!files.length) continue;
+    const section = document.createElement("section");
+    section.className = "dir-section";
+    const title = document.createElement("div");
+    title.className = "dir-section-title";
+    title.textContent = `${labels[group] || group} (${files.length})`;
+    const grid = document.createElement("div");
+    grid.className = "dir-grid";
+    files.forEach(file => grid.appendChild(renderTile(file, group)));
+    section.append(title, grid);
+    manifestEl.appendChild(section);
+  }
+}
+
+function renderTile(f, group) {
+  const tile = document.createElement("div");
+  tile.className = "dir-tile";
+  const preview = document.createElement("div");
+  preview.className = "dir-tile-preview";
+  if (group === "images" && ENC === "none") {
+    const img = document.createElement("img");
+    img.alt = f.filename;
+    img.src = f.preview_url;
+    img.onerror = () => {
+      preview.textContent = "Cannot preview";
+    };
+    preview.appendChild(img);
+  } else if (group === "videos" && ENC === "none") {
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.muted = true;
+    video.src = f.preview_url;
+    preview.appendChild(video);
+  } else if (group === "archives") {
+    const status = f.preview?.status === "readable"
+      ? `${f.preview.entry_count || f.preview.entries?.length || 0} entries`
+      : "Cannot read preview";
+    preview.textContent = status;
+  } else {
+    preview.textContent = fileIcon(f.content_type);
+  }
+  const name = document.createElement("div");
+  name.className = "dir-tile-name";
+  name.title = f.filename;
+  name.textContent = f.filename;
+  const meta = document.createElement("div");
+  meta.className = "dir-row-size";
+  meta.textContent = formatBytes(f.size_bytes);
+  const actions = document.createElement("div");
+  actions.className = "dir-tile-actions";
+  const download = document.createElement("button");
+  download.className = "btn btn-ghost btn-sm";
+  download.textContent = "Download";
+  download.addEventListener("click", () => downloadOne(f, download));
+  const open = document.createElement("button");
+  open.className = "btn btn-ghost btn-sm";
+  open.textContent = "Open";
+  open.addEventListener("click", () => window.open(`/file/${f.slug}`, "_blank", "noopener"));
+  actions.append(download, open);
+  tile.append(preview, name, meta, actions);
+  return tile;
+}
+
+function wireToolbar() {
+  togglePreviewsBtn.addEventListener("click", () => {
+    previewsEnabled = !previewsEnabled;
+    togglePreviewsBtn.textContent = previewsEnabled ? "Disable previews" : "Enable previews";
+    renderManifest();
+  });
+  if (isLoggedIn()) {
+    saveFolderBtn.classList.remove("hidden");
+    saveFolderBtn.addEventListener("click", async () => {
+      saveFolderBtn.disabled = true;
+      const resp = await apiFetch(`/d/${slug}/save`, { method: "POST" });
+      saveFolderBtn.disabled = false;
+      if (resp.ok) showToast("Folder saved to your files.");
+      else {
+        const d = await resp.json().catch(() => ({}));
+        showToast(d.detail || "Folder save failed.", "error");
+      }
+    });
+  }
 }
 
 // ── Decrypt a single client-encrypted file in a Web Worker ──────────────────

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import secrets as _secrets
 import shutil
@@ -17,14 +18,18 @@ from sqlalchemy.orm import Session
 
 from app.audit.log import record
 from app.deps import client_ip, get_db, get_upload_user, require_active_user, require_master, require_permission
+from app.links.consume import resolve_active_link
 from app.links.slugs import new_slug
+from app.models.content_blob import ContentBlob
 from app.models.file import FileObject
 from app.models.link import Link
 from app.models.session import SessionRow
 from app.models.user import User
 from app.permissions.policy import ensure_permissions
 from app.security.csrf import require_csrf
-from app.storage.paths import safe_join, storage_root
+from app.storage.accounting import enforce_global_upload_capacity
+from app.storage.blobs import attach_blob, file_hashes, hash_file, release_blob, unlink_queued
+from app.storage.paths import storage_root
 
 _UNSAFE_CT = frozenset({
     "text/html", "text/xhtml", "text/xhtml+xml",
@@ -34,6 +39,7 @@ _UNSAFE_CT = frozenset({
 _NO_ENCRYPT_COMPRESS = frozenset({"client"})  # ciphertext won't shrink
 
 router = APIRouter(tags=["files"])
+_log = logging.getLogger(__name__)
 
 _CHUNK = 256 * 1024  # 256 KiB read buffer
 _REQUEST_OVERHEAD_ALLOWANCE = 1024 * 1024
@@ -48,8 +54,25 @@ _CHUNK_TOKEN_AAD = b"chunked-upload-v1"
 
 
 def _used_bytes(db: Session, user_id: int) -> int:
-    result = db.query(func.sum(FileObject.stored_size_bytes)).filter_by(owner_id=user_id).scalar()
+    result = db.query(func.sum(FileObject.size_bytes)).filter_by(owner_id=user_id).scalar()
     return result or 0
+
+
+def _can_edit_directory(db: Session, directory_id: int, user: User) -> bool:
+    from app.models.directory import Directory
+    from app.models.directory_collaborator import DirectoryCollaborator
+
+    directory = db.get(Directory, directory_id)
+    if directory is None:
+        return False
+    if user.role == "master" or directory.owner_id == user.id:
+        return True
+    return (
+        db.query(DirectoryCollaborator.id)
+        .filter_by(directory_id=directory_id, user_id=user.id, role="editor")
+        .first()
+        is not None
+    )
 
 
 def _file_url(request: Request, slug: str) -> str:
@@ -93,7 +116,7 @@ def _prepare_upload(
         directory = db.get(Directory, directory_id)
         if directory is None:
             raise HTTPException(404, detail="directory not found")
-        if user.role != "master" and directory.owner_id != user.id:
+        if not _can_edit_directory(db, directory.id, user):
             raise HTTPException(403, detail="not your directory")
         encryption_mode = directory.encryption_mode
         compress = False
@@ -115,8 +138,10 @@ def _prepare_upload(
 def _precheck_declared_size(db: Session, user: User, perm, declared: int) -> None:
     """Reject obviously-too-big uploads up front, before any bytes are stored."""
     if declared > perm.max_file_bytes + _REQUEST_OVERHEAD_ALLOWANCE:
+        _log.warning("upload precheck rejected user_id=%s reason=max_file declared_bytes=%s", user.id, declared)
         raise HTTPException(413, detail="file exceeds max file size")
     if _used_bytes(db, user.id) + declared > perm.quota_bytes + _REQUEST_OVERHEAD_ALLOWANCE:
+        _log.warning("upload precheck rejected user_id=%s reason=user_quota declared_bytes=%s", user.id, declared)
         raise HTTPException(413, detail="upload would exceed your quota")
 
 
@@ -142,6 +167,8 @@ def _finalize_stored_file(
     auto_unarchive_on_download: bool,
     max_uses: Optional[int],
     expires_in_seconds: Optional[int],
+    source_type: str = "upload",
+    saved_from_file_id: Optional[int] = None,
 ) -> dict:
     """Take a fully-assembled upload sitting at `work_path` and run the rest of the
     pipeline: quota check, optional compression, DB record, optional server-side
@@ -154,8 +181,16 @@ def _finalize_stored_file(
     base_path = storage_root() / rel_path
     directory_id = directory.id if directory is not None else None
 
+    try:
+        plain_hashes = hash_file(work_path)
+        enforce_global_upload_capacity(db, stored)
+    except HTTPException:
+        work_path.unlink(missing_ok=True)
+        _log.warning("upload finalize rejected user_id=%s reason=global_storage stored_bytes=%s", user.id, stored)
+        raise
     if _used_bytes(db, user.id) + stored > perm.quota_bytes:
         work_path.unlink(missing_ok=True)
+        _log.warning("upload finalize rejected user_id=%s reason=user_quota stored_bytes=%s", user.id, stored)
         raise HTTPException(413, detail="upload would exceed your quota")
 
     size_bytes = stored
@@ -189,6 +224,8 @@ def _finalize_stored_file(
             directory_id=directory_id,
             storage_path=rel_path,
             original_filename=display_name,
+            source_type=source_type,
+            saved_from_file_id=saved_from_file_id,
             size_bytes=size_bytes,
             stored_size_bytes=0,
             content_type=ct,
@@ -235,7 +272,21 @@ def _finalize_stored_file(
 
         # Finalize: rename work file to storage path
         current.rename(base_path)
-        file_obj.stored_size_bytes = base_path.stat().st_size
+        stored_hashes = hash_file(base_path)
+        transform_key = f"{encryption_mode}:compressed={int(file_compressed)}"
+        blob = attach_blob(
+            db,
+            final_path=base_path,
+            rel_path=rel_path,
+            logical_size=size_bytes,
+            content_type=ct,
+            hashes=plain_hashes,
+            stored_hashes=stored_hashes,
+            transform_key=transform_key,
+        )
+        file_obj.blob_id = blob.id
+        file_obj.storage_path = blob.storage_path
+        file_obj.stored_size_bytes = blob.stored_size_bytes
         file_obj.enc_key_blob = enc_key_blob_val
         file_obj.enc_access_blob = enc_access_blob_val
 
@@ -248,7 +299,7 @@ def _finalize_stored_file(
             # Bundle members are reached through the directory page, not a capped
             # per-file link, so they get an uncapped link and the directory tally grows.
             link_max_uses = None
-            directory.total_bytes = (directory.total_bytes or 0) + file_obj.stored_size_bytes
+            directory.total_bytes = (directory.total_bytes or 0) + file_obj.size_bytes
         elif expires_in_seconds is not None:
             try:
                 expires_link = datetime.now(timezone.utc) + timedelta(seconds=expires_in_seconds)
@@ -262,11 +313,22 @@ def _finalize_stored_file(
         record(db, actor=user.username, action="file.uploaded",
                target=f"file:{file_obj.id}", ip=client_ip(request))
         db.commit()
+        _log.info(
+            "upload finalized file_id=%s owner_id=%s stored_bytes=%s size_bytes=%s encryption=%s compressed=%s directory_id=%s",
+            file_obj.id,
+            user.id,
+            file_obj.stored_size_bytes,
+            file_obj.size_bytes,
+            encryption_mode,
+            file_compressed,
+            directory_id,
+        )
 
     except Exception:
         for p in [work_path, base_path.with_suffix(".zst.work"), base_path.with_suffix(".fupl.work"), base_path]:
             p.unlink(missing_ok=True)
         db.rollback()
+        _log.exception("upload finalize failed owner_id=%s rel_path=%s stored_bytes=%s", user.id, rel_path, stored)
         raise
 
     base_url = _file_url(request, slug)
@@ -284,6 +346,8 @@ def _finalize_stored_file(
         "max_uses": max_uses,
         "expires_at": expires_link.isoformat() if expires_link else None,
         "compressed": file_compressed,
+        "source_type": source_type,
+        "saved_from_file_id": saved_from_file_id,
     }
 
 
@@ -312,6 +376,16 @@ async def upload_file(
         encryption_mode=encryption_mode, compress=compress, is_permanent=is_permanent,
         temp_days=temp_days, randomize_filename=randomize_filename, directory_id=directory_id,
     )
+    has_lifecycle_options = (
+        not is_permanent
+        or temp_days is not None
+        or delete_if_idle_days is not None
+        or archive_after_idle_days is not None
+        or auto_unarchive_on_download is not True
+    )
+    if has_lifecycle_options and not perm.can_manage_lifecycle:
+        _log.warning("single upload rejected user_id=%s reason=lifecycle_permission", user.id)
+        raise HTTPException(403, detail="lifecycle options not permitted")
 
     content_length = request.headers.get("content-length")
     if content_length:
@@ -338,6 +412,7 @@ async def upload_file(
         # Any failure mid-read (size cap, connection reset, I/O error) must clean
         # up the partial .work file — not just HTTPException.
         work.unlink(missing_ok=True)
+        _log.exception("single upload stream failed user_id=%s rel_path=%s stored_bytes=%s", user.id, rel_path, stored)
         raise
 
     return _finalize_stored_file(
@@ -517,6 +592,16 @@ def upload_init(
         is_permanent=body.is_permanent, temp_days=body.temp_days,
         randomize_filename=body.randomize_filename, directory_id=body.directory_id,
     )
+    has_lifecycle_options = (
+        not is_permanent
+        or temp_days is not None
+        or body.delete_if_idle_days is not None
+        or body.archive_after_idle_days is not None
+        or body.auto_unarchive_on_download is not True
+    )
+    if has_lifecycle_options and not perm.can_manage_lifecycle:
+        _log.warning("chunked upload init rejected user_id=%s reason=lifecycle_permission", user.id)
+        raise HTTPException(403, detail="lifecycle options not permitted")
 
     _precheck_declared_size(db, user, perm, body.total_size)
 
@@ -551,6 +636,15 @@ def upload_init(
         "eis": body.expires_in_seconds,
         "exp": int(time.time()) + _CHUNK_SESSION_TTL,
     }
+    _log.info(
+        "chunked upload initialized user_id=%s total_bytes=%s chunks=%s chunk_size=%s encryption=%s directory_id=%s",
+        user.id,
+        body.total_size,
+        n,
+        chunk_size,
+        encryption_mode,
+        directory.id if directory is not None else None,
+    )
     return {
         "upload_id": _seal_chunk_token(request, meta),
         "chunk_size": chunk_size,
@@ -620,6 +714,7 @@ async def upload_chunk(
         os.replace(tmp, parts / str(index))
     except BaseException:
         tmp.unlink(missing_ok=True)
+        _log.exception("chunked upload chunk failed user_id=%s index=%s expected_bytes=%s written_bytes=%s", user.id, index, expected, written)
         raise
 
     return {"index": index, "num_chunks": n}
@@ -644,6 +739,7 @@ def upload_finalize(
     missing = [i for i in range(n) if i not in received]
     if missing:
         # Keep the parts so the client can resume the gaps; just report what's left.
+        _log.info("chunked upload finalize incomplete user_id=%s missing_count=%s", user.id, len(missing))
         raise HTTPException(409, detail={"error": "upload incomplete", "missing": missing[:512]})
 
     # Assemble the chunks (in order) into the single work file the normal pipeline expects.
@@ -672,7 +768,7 @@ def upload_finalize(
         if directory is None:
             work.unlink(missing_ok=True)
             raise HTTPException(404, detail="directory not found")
-        if user.role != "master" and directory.owner_id != user.id:
+        if not _can_edit_directory(db, directory.id, user):
             work.unlink(missing_ok=True)
             raise HTTPException(403, detail="not your directory")
 
@@ -692,6 +788,7 @@ def upload_finalize(
     )
     # Pipeline committed — the raw chunks are now redundant.
     shutil.rmtree(parts, ignore_errors=True)
+    _log.info("chunked upload finalized user_id=%s total_bytes=%s chunks=%s", user.id, total, n)
     return result
 
 
@@ -706,6 +803,7 @@ def upload_abort(
     meta = _open_chunk_token(request, upload_id, user)
     shutil.rmtree(_parts_dir(meta["rel"]), ignore_errors=True)
     (storage_root() / meta["rel"]).with_suffix(".part").unlink(missing_ok=True)
+    _log.info("chunked upload aborted user_id=%s total_bytes=%s", user.id, meta.get("total"))
     return {"status": "aborted"}
 
 
@@ -720,6 +818,79 @@ def _recover_access_key(request: Request, f: FileObject) -> str | None:
         return open_box(get_master_key(state.settings), f.enc_access_blob).decode()
     except Exception:
         return None
+
+
+@router.post("/files/{slug}/save")
+def save_shared_file(
+    slug: str,
+    request: Request,
+    _csrf: SessionRow = Depends(require_csrf),
+    user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    link = resolve_active_link(db, slug)
+    if link is None:
+        raise HTTPException(404, detail="not found")
+    source = db.get(FileObject, link.file_id)
+    if source is None:
+        raise HTTPException(404, detail="not found")
+    perm = ensure_permissions(db, user.id, master=(user.role == "master"))
+    if _used_bytes(db, user.id) + source.size_bytes > perm.quota_bytes:
+        raise HTTPException(413, detail="save would exceed your quota")
+    blob = db.get(ContentBlob, source.blob_id) if source.blob_id else None
+    if blob is not None:
+        blob.ref_count = (blob.ref_count or 0) + 1
+
+    saved = FileObject(
+        owner_id=user.id,
+        directory_id=None,
+        blob_id=source.blob_id,
+        storage_path=source.storage_path,
+        original_filename=source.original_filename,
+        source_type="saved",
+        saved_from_file_id=source.id,
+        size_bytes=source.size_bytes,
+        stored_size_bytes=source.stored_size_bytes,
+        content_type=source.content_type,
+        encryption_mode=source.encryption_mode,
+        enc_key_blob=source.enc_key_blob,
+        enc_access_blob=source.enc_access_blob,
+        compressed=source.compressed,
+        archived=source.archived,
+        archive_codec=source.archive_codec,
+        archive_original_stored_size_bytes=source.archive_original_stored_size_bytes,
+        archive_saved_bytes=source.archive_saved_bytes,
+        archive_after_idle_days=source.archive_after_idle_days,
+        lifecycle_state=source.lifecycle_state,
+        is_permanent=True,
+        delete_if_idle_days=source.delete_if_idle_days,
+        auto_unarchive_on_download=source.auto_unarchive_on_download,
+    )
+    db.add(saved)
+    db.flush()
+    new_link = Link(file_id=saved.id, slug=new_slug())
+    db.add(new_link)
+    record(db, actor=user.username, action="file.saved",
+           target=f"file:{source.id}->file:{saved.id}", ip=client_ip(request))
+    db.commit()
+    _log.info(
+        "shared file saved source_file_id=%s saved_file_id=%s owner_id=%s blob_id=%s",
+        source.id,
+        saved.id,
+        user.id,
+        saved.blob_id,
+    )
+    return {
+        "file_id": saved.id,
+        "slug": new_link.slug,
+        "url": _file_url(request, new_link.slug),
+        "raw_url": _file_url(request, new_link.slug) + "/raw",
+        "saved_from_file_id": source.id,
+        "source_type": "saved",
+        "blob_id": saved.blob_id,
+        "encryption_mode": saved.encryption_mode,
+        "access_key": _recover_access_key(request, saved),
+    }
 
 
 @router.get("/files/")
@@ -760,14 +931,20 @@ def _serialize_files(request: Request, db: Session, files: list[FileObject]) -> 
         result.append({
             "id": f.id,
             "owner_id": f.owner_id,
+            "blob_id": f.blob_id,
             "original_filename": f.original_filename,
+            "source_type": f.source_type,
+            "saved_from_file_id": f.saved_from_file_id,
             "size_bytes": f.size_bytes,
             "stored_size_bytes": f.stored_size_bytes,
+            "hashes": file_hashes(db, f),
             "content_type": f.content_type,
             "encryption_mode": f.encryption_mode,
             "compressed": f.compressed,
             "archived": f.archived,
             "lifecycle_state": f.lifecycle_state,
+            "archive_original_stored_size_bytes": f.archive_original_stored_size_bytes,
+            "archive_saved_bytes": f.archive_saved_bytes,
             "is_permanent": f.is_permanent,
             "expires_at": f.expires_at.isoformat() if f.expires_at else None,
             "last_downloaded_at": f.last_downloaded_at.isoformat() if f.last_downloaded_at else None,
@@ -803,33 +980,20 @@ def delete_file(
         raise HTTPException(404, detail="not found")
     if user.role != "master" and file_obj.owner_id != user.id:
         raise HTTPException(403, detail="not your file")
-
     db.query(Link).filter_by(file_id=file_obj.id).delete()
     if file_obj.directory_id is not None:
         from app.models.directory import Directory
         directory = db.get(Directory, file_obj.directory_id)
         if directory is not None:
-            directory.total_bytes = max(0, (directory.total_bytes or 0) - (file_obj.stored_size_bytes or 0))
+            directory.total_bytes = max(0, (directory.total_bytes or 0) - (file_obj.size_bytes or 0))
 
-    # Resolve the path before committing, but only unlink AFTER the DB delete is
-    # durable — otherwise a commit failure would leave a registered file whose
-    # bytes are already gone from disk.
-    try:
-        full_path = safe_join(storage_root(), file_obj.storage_path)
-    except ValueError:
-        full_path = None
+    unlink_after_commit = [release_blob(db, file_obj)]
 
     db.delete(file_obj)
     record(db, actor=user.username, action="file.deleted",
            target=f"file:{file_id}", ip=client_ip(request))
     db.commit()
-
-    if full_path is not None:
-        try:
-            if full_path.exists():
-                os.unlink(full_path)
-        except OSError:
-            pass
+    unlink_queued(unlink_after_commit)
     return {"status": "deleted"}
 
 
@@ -895,11 +1059,11 @@ def mint_link(
 
 
 @router.delete("/links/{link_id}")
-def deactivate_link(
+def delete_link(
     link_id: int,
     request: Request,
     _csrf: SessionRow = Depends(require_csrf),
-    user: User = Depends(require_active_user),
+    user: User = Depends(require_permission("can_delete_links")),
     db: Session = Depends(get_db),
 ) -> dict:
     link = db.get(Link, link_id)
@@ -908,11 +1072,11 @@ def deactivate_link(
     file_obj = db.get(FileObject, link.file_id)
     if file_obj is None or (user.role != "master" and file_obj.owner_id != user.id):
         raise HTTPException(403, detail="not your file")
-    link.active = False
-    record(db, actor=user.username, action="link.deactivated",
+    db.delete(link)
+    record(db, actor=user.username, action="link.deleted",
            target=f"link:{link_id}", ip=client_ip(request))
     db.commit()
-    return {"status": "deactivated"}
+    return {"status": "deleted"}
 
 
 @router.patch("/links/{link_id}")
@@ -931,8 +1095,8 @@ def edit_link(
     if file_obj is None or (user.role != "master" and file_obj.owner_id != user.id):
         raise HTTPException(403, detail="not your file")
 
-    # max_uses: only update when explicitly provided
-    if body.max_uses is not None:
+    # max_uses: update when explicitly provided, including null = unlimited.
+    if "max_uses" in body.model_fields_set:
         link.max_uses = body.max_uses
     if body.expires_in_seconds is not None:
         try:
@@ -953,7 +1117,8 @@ def disk_stats(
     user: User = Depends(require_master),
     db: Session = Depends(get_db),
 ) -> dict:
-    total_bytes = db.query(func.sum(FileObject.stored_size_bytes)).scalar() or 0
+    from app.storage.accounting import used_storage_bytes
+    total_bytes = used_storage_bytes(db)
     total_files = db.query(func.count(FileObject.id)).scalar() or 0
     total_links = db.query(func.count(Link.id)).filter_by(active=True).scalar() or 0
     from app.models.user import User as UserModel
