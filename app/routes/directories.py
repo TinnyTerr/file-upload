@@ -115,7 +115,10 @@ def create_directory(
     title = (body.title or "Untitled folder").strip()[:512] or "Untitled folder"
     expires_at = None
     if body.expires_in_seconds is not None and body.expires_in_seconds >= 1:
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=body.expires_in_seconds)
+        try:
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=body.expires_in_seconds)
+        except OverflowError:
+            raise HTTPException(400, detail="expires_in_seconds is too large")
 
     enc_key_blob = None
     enc_access_blob = None
@@ -351,20 +354,65 @@ def directory_info(slug: str, db: Session = Depends(get_db)) -> dict:
     }
 
 
-def _member_plaintext(request: Request, f: FileObject) -> bytes:
-    """Recover a member file's plaintext bytes. Directory members are never
-    compressed, so this only has to undo server-side encryption (if any)."""
+def _new_tempfile(suffix: str) -> Path:
+    fd, p = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    return Path(p)
+
+
+def _member_source(request: Request, f: FileObject) -> tuple[Path, bool]:
+    """Resolve a member to a path holding its plaintext bytes.
+
+    Returns (path, is_temp); the caller unlinks when is_temp is True. Everything
+    streams through temp files instead of buffering whole members in RAM.
+
+    Members are only ever compressed by the archive lifecycle job, which wraps the
+    (already server-encrypted) bytes — so decompression must run BEFORE decryption.
+    """
     full = safe_join(storage_root(), f.storage_path)
     if not full.exists():
         raise HTTPException(500, detail="file missing from storage")
-    if f.encryption_mode == "server":
-        from app.crypto.aead import decrypt_stream
-        from app.security.secretbox import open_box
-        if not f.enc_key_blob:
-            raise HTTPException(500, detail="encryption key not stored")
-        key = open_box(_master_key(request), f.enc_key_blob)
-        return b"".join(decrypt_stream(key, full))
-    return full.read_bytes()
+
+    needs_decompress = bool(f.compressed or f.archived)
+    needs_decrypt = f.encryption_mode == "server"
+    if not needs_decompress and not needs_decrypt:
+        return full, False
+
+    src = full
+    intermediate: Path | None = None
+    try:
+        if needs_decompress:
+            from app.storage.compress import decompress_stream
+            dec = _new_tempfile(".dec")
+            intermediate = dec
+            with open(dec, "wb") as out:
+                for chunk in decompress_stream(src, f.size_bytes):
+                    out.write(chunk)
+            src = dec
+
+        if needs_decrypt:
+            from app.crypto.aead import decrypt_stream
+            from app.security.secretbox import open_box
+            if not f.enc_key_blob:
+                raise HTTPException(500, detail="encryption key not stored")
+            key = open_box(_master_key(request), f.enc_key_blob)
+            plain = _new_tempfile(".plain")
+            try:
+                with open(plain, "wb") as out:
+                    for chunk in decrypt_stream(key, src):
+                        out.write(chunk)
+            except Exception:
+                plain.unlink(missing_ok=True)
+                raise
+            if intermediate is not None:
+                intermediate.unlink(missing_ok=True)
+            return plain, True
+
+        return src, True
+    except Exception:
+        if intermediate is not None:
+            intermediate.unlink(missing_ok=True)
+        raise
 
 
 @router.get("/d/{slug}/zip")
@@ -385,11 +433,19 @@ def directory_zip(slug: str, request: Request, ek: str | None = None, db: Sessio
     os.close(fd)
     tmp = Path(tmp_path)
     try:
-        seen: dict[str, int] = {}
+        seen: set[str] = set()
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as zf:
             for f, _lk in pairs:
                 name = _safe_arcname(f.original_filename, seen)
-                zf.writestr(name, _member_plaintext(request, f))
+                # Stream each member from disk (zf.write) instead of loading its
+                # full plaintext into memory (zf.writestr) — a bundle of large
+                # files would otherwise exhaust server RAM.
+                src, is_temp = _member_source(request, f)
+                try:
+                    zf.write(src, name)
+                finally:
+                    if is_temp:
+                        src.unlink(missing_ok=True)
     except Exception:
         tmp.unlink(missing_ok=True)
         raise
@@ -411,17 +467,23 @@ def directory_zip(slug: str, request: Request, ek: str | None = None, db: Sessio
     )
 
 
-def _safe_arcname(name: str, seen: dict[str, int]) -> str:
-    """Flatten to a safe in-zip name and de-duplicate collisions."""
+def _safe_arcname(name: str, seen: set[str]) -> str:
+    """Flatten to a safe in-zip name and de-duplicate collisions.
+
+    Probes generated candidates against everything already emitted (not just the
+    original clean names), so a synthesized "file (1).txt" can't silently collide
+    with a real "file (1).txt" that exists in the same bundle.
+    """
     base = os.path.basename(name.replace("\\", "/")).strip() or "file"
     base = "".join(c for c in base if ord(c) >= 0x20)
-    if base in seen:
-        seen[base] += 1
-        stem, dot, ext = base.partition(".")
-        base = f"{stem} ({seen[base]}){dot}{ext}" if dot else f"{base} ({seen[base]})"
-    else:
-        seen[base] = 0
-    return base
+    stem, dot, ext = base.partition(".")
+    candidate = base
+    counter = 1
+    while candidate in seen:
+        candidate = f"{stem} ({counter}){dot}{ext}" if dot else f"{base} ({counter})"
+        counter += 1
+    seen.add(candidate)
+    return candidate
 
 
 @router.get("/d/{slug}")

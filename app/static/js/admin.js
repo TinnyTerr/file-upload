@@ -26,6 +26,7 @@ document.querySelectorAll(".tab").forEach(tab => {
     if (tab.dataset.tab === "audit") loadAudit();
     if (tab.dataset.tab === "files") loadAdminFiles();
     if (tab.dataset.tab === "keys") loadKeys();
+    if (tab.dataset.tab === "users") loadUsers();
   });
 });
 
@@ -156,7 +157,7 @@ async function loadUsers() {
 async function deleteUser(id, username) {
   const ok = await showConfirm({
     title: "Delete user?",
-    message: `"${username}" will be removed. Their uploaded files stay on disk but become orphaned (no owner).`,
+    message: `"${username}" will be removed along with all their files, folders, API keys, and share links. This cannot be undone.`,
     confirmText: "Delete user",
     danger: true,
   });
@@ -459,7 +460,7 @@ async function loadAdminFiles() {
         navigator.clipboard.writeText(adminDirectoryUrl(d)).then(() => {
           copyBtn.textContent = "Copied!";
           setTimeout(() => (copyBtn.textContent = "Copy"), 1500);
-        });
+        }).catch(() => {});
       });
 
       const delBtn = document.createElement("button");
@@ -660,7 +661,7 @@ function buildLinkPanel(container, f) {
         navigator.clipboard.writeText(url).then(() => {
           copyBtn.textContent = "Copied!";
           setTimeout(() => (copyBtn.textContent = "Copy"), 1500);
-        });
+        }).catch(() => {});
       });
 
       const editBtn = document.createElement("button");
@@ -928,7 +929,7 @@ async function createKey() {
   copyBtn.className = 'btn btn-ghost btn-sm';
   copyBtn.textContent = 'Copy key';
   copyBtn.addEventListener('click', () => {
-    navigator.clipboard.writeText(rawKey).then(() => showToast('Copied!'));
+    navigator.clipboard.writeText(rawKey).then(() => showToast('Copied!')).catch(() => {});
   });
 
   body.append(warning, display, copyBtn);

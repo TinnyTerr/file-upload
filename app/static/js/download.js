@@ -76,7 +76,10 @@ async function clientDecryptAndDownload(slug, fragmentKey, filename) {
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
+    // Firefox only honors a click on an anchor that's actually in the document.
+    document.body.appendChild(a);
     a.click();
+    a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   } catch (err) {
     showAlert({ title: 'Decryption failed', message: err.message, glyph: '🔒', kind: 'error' });
@@ -244,7 +247,7 @@ function showFile(data) {
         const orig = btn.textContent;
         btn.textContent = "Copied!";
         setTimeout(() => (btn.textContent = orig), 1500);
-      });
+      }).catch(() => {});
     });
   }
   wireCopy("copy-raw",   rawUrl);
@@ -280,13 +283,12 @@ function buildPreview(ct, rawSrc, filename) {
     img.alt  = filename;
     img.src  = rawSrc;
     img.style.cssText = "display:block;max-width:100%;max-height:480px;object-fit:contain;margin:0 auto;";
-    let errored = false;
-    img.onerror = () => { errored = true; };
     body = document.createElement("div");
     body.className = "preview-body";
     body.appendChild(img);
-    // Remove whole wrap if image fails
-    setTimeout(() => { if (errored && body.parentElement) body.parentElement.remove(); }, 3000);
+    // Remove the whole preview wrap whenever the image fails — handled directly in
+    // onerror (no fixed timeout, which missed failures on slow connections).
+    img.onerror = () => { if (body.parentElement) body.parentElement.remove(); };
 
   } else if (ct.startsWith("video/")) {
     const video = document.createElement("video");

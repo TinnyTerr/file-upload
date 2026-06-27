@@ -35,6 +35,7 @@ class LockoutPolicy:
         return until > _utcnow()
 
     def register_failure(self, session: Session, identifier: str, identifier_type: str) -> None:
+        now = _utcnow()
         row = self._get(session, identifier, identifier_type)
         if row is None:
             row = LoginAttempt(identifier=identifier, identifier_type=identifier_type, failed_count=0)
@@ -45,13 +46,23 @@ class LockoutPolicy:
             until = row.locked_until
             if until.tzinfo is None:
                 until = until.replace(tzinfo=timezone.utc)
-            if until <= _utcnow():
+            if until <= now:
                 row.failed_count = 0
                 row.locked_until = None
+        else:
+            # Sub-threshold failures also decay: if the last failure is older than
+            # the lockout window, the counter resets instead of accumulating
+            # indefinitely (e.g. 4 stray failures over a week then a 5th = lockout).
+            last = row.updated_at
+            if last is not None:
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                if (now - last).total_seconds() > self.lockout_seconds:
+                    row.failed_count = 0
         row.failed_count += 1
-        row.updated_at = _utcnow()
+        row.updated_at = now
         if row.failed_count >= self.max_attempts:
-            row.locked_until = _utcnow() + timedelta(seconds=self.lockout_seconds)
+            row.locked_until = now + timedelta(seconds=self.lockout_seconds)
         session.flush()
 
     def reset(self, session: Session, identifier: str, identifier_type: str) -> None:

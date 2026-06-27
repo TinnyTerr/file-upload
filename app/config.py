@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     master_key_b64: str = ""
     config_path: str = DEFAULT_CONFIG_PATH
     trust_proxy: bool = False
+    # Comma-separated hostnames that may appear in X-Forwarded-Host when building
+    # the HTTPS redirect. Empty = never trust X-Forwarded-Host (use the bound Host).
+    allowed_hosts: str = ""
 
 
 def _parse_bool(value: str | None, *, default: bool = False) -> bool:
@@ -82,6 +85,7 @@ def load_settings(config_path: str | None = None) -> Settings:
         master_key_b64=master_key_b64,
         config_path=str(path),
         trust_proxy=_parse_bool(raw.get("TRUST_PROXY"), default=False),
+        allowed_hosts=raw.get("ALLOWED_HOSTS", ""),
     )
 
 

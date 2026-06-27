@@ -19,6 +19,10 @@ def resolve_active_link(session: Session, slug: str, now: datetime | None = None
         return None
     if link.expires_at is not None and link.expires_at <= now:
         return None
+    # Mirror consume_use's gate so an exhausted link stops resolving — otherwise
+    # /info would keep leaking file metadata after the last download was spent.
+    if link.max_uses is not None and link.use_count >= link.max_uses:
+        return None
     return link
 
 

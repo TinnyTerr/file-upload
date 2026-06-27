@@ -83,13 +83,16 @@ def _parse_range(header: str, file_size: int) -> tuple[int, int] | None:
     if s:
         start = int(s)
         end = int(e) if e else file_size - 1
+        # RFC 7233: an end past the last byte is clamped, not rejected.
+        if end >= file_size:
+            end = file_size - 1
     elif e:
         suffix = int(e)
         start = max(0, file_size - suffix)
         end = file_size - 1
     else:
         return None
-    if start > end or start >= file_size or end >= file_size:
+    if start > end or start >= file_size:
         return None
     return start, end
 
@@ -135,13 +138,17 @@ def download_raw(slug: str, request: Request, ek: str | None = None, db: Session
     if not consume_use(db, slug):
         raise HTTPException(404, detail="not found")
 
+    # The use was claimed in this same transaction; if the commit fails the
+    # increment rolls back too. Serving the file anyway would let a client exceed
+    # max_uses, so fail the request instead of silently swallowing the error.
     try:
         f.last_downloaded_at = datetime.now(timezone.utc)
         record(db, actor="anonymous", action="file.downloaded",
                target=f"file:{f.id}", ip=client_ip(request))
         db.commit()
     except Exception:
-        pass
+        db.rollback()
+        raise HTTPException(500, detail="could not record download")
 
     try:
         full_path = safe_join(storage_root(), f.storage_path)
@@ -179,28 +186,37 @@ def download_raw(slug: str, request: Request, ek: str | None = None, db: Session
                 raise HTTPException(503, detail="file is archived; contact admin to unarchive")
             from app.storage.compress import decompress_stream as _dec
 
-            fd1, tmp1_path = tempfile.mkstemp(suffix=".dec")
+            fd1, tmp1_path = tempfile.mkstemp(suffix=".step1")
             tmp1 = Path(tmp1_path)
             _os.close(fd1)
-            try:
-                with open(tmp1, "wb") as fh:
-                    for chunk in _decrypt_stream(per_file_key, full_path):
-                        fh.write(chunk)
-            except Exception:
-                tmp1.unlink(missing_ok=True)
-                raise HTTPException(500, detail="decryption failed")
-
             fd2, tmp2_path = tempfile.mkstemp(suffix=".plain")
             tmp2 = Path(tmp2_path)
             _os.close(fd2)
+
+            # The compression layer can sit on either side of the encryption layer,
+            # depending on which stage produced it — so the undo order differs:
+            #  · upload-time (f.compressed): stored as ENC(ZSTD(x)) → decrypt, then decompress
+            #  · archive job (f.archived):   stored as ZSTD(ENC(x)) → decompress, then decrypt
+            # (the archive job skips already-compressed files, so the two never overlap)
             try:
-                with open(tmp2, "wb") as fh:
-                    for chunk in _dec(tmp1, f.size_bytes):
-                        fh.write(chunk)
+                if f.archived and not f.compressed:
+                    with open(tmp1, "wb") as fh:
+                        for chunk in _dec(full_path, f.size_bytes):
+                            fh.write(chunk)
+                    with open(tmp2, "wb") as fh:
+                        for chunk in _decrypt_stream(per_file_key, tmp1):
+                            fh.write(chunk)
+                else:
+                    with open(tmp1, "wb") as fh:
+                        for chunk in _decrypt_stream(per_file_key, full_path):
+                            fh.write(chunk)
+                    with open(tmp2, "wb") as fh:
+                        for chunk in _dec(tmp1, f.size_bytes):
+                            fh.write(chunk)
             except Exception:
                 tmp1.unlink(missing_ok=True)
                 tmp2.unlink(missing_ok=True)
-                raise HTTPException(500, detail="decompression failed")
+                raise HTTPException(500, detail="failed to recover file contents")
             tmp1.unlink(missing_ok=True)
 
             return FileResponse(

@@ -15,6 +15,10 @@ from app.security.passwords import verify_password
 
 router = APIRouter(prefix="/keys", tags=["keys"])
 
+# Cap on simultaneously-active keys per user. Keys are never hard-deleted (only
+# deactivated), so without a ceiling a user could grow the table without bound.
+_MAX_ACTIVE_KEYS_PER_USER = 20
+
 
 @router.post("/")
 def create_key(
@@ -23,6 +27,12 @@ def create_key(
     user: User = Depends(require_permission("can_use_api_keys")),
     db: Session = Depends(get_db),
 ) -> dict:
+    active_count = db.query(ApiKey).filter_by(owner_id=user.id, active=True).count()
+    if active_count >= _MAX_ACTIVE_KEYS_PER_USER:
+        raise HTTPException(
+            429,
+            detail=f"active API key limit reached ({_MAX_ACTIVE_KEYS_PER_USER}); revoke one first",
+        )
     raw = generate_key()
     key = ApiKey(owner_id=user.id, key_hash=hash_key(raw))
     db.add(key)

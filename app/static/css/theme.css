@@ -797,8 +797,9 @@ tbody tr:hover td { background: var(--surface-2); }
   pointer-events: none;
   transition: opacity 0.15s ease;
 }
-.help-icon:hover::after,
-.help-icon:hover::before { opacity: 1; }
+/* The floating tooltip engine in api.js drives .help-icon[data-tip] now; the CSS
+   pseudo-element tooltip above is kept hidden so the two don't render on top of
+   each other. */
 
 /* ── Toggle switch ───────────────────────────────────────────────────── */
 .toggle { position: relative; display: inline-block; width: 40px; height: 23px; flex-shrink: 0; vertical-align: middle; }

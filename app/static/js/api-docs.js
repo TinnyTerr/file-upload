@@ -13,7 +13,7 @@ document.querySelectorAll(".ho").forEach(el => { el.textContent = origin; });
 const copyBase = document.getElementById("copy-base");
 if (copyBase) {
   copyBase.addEventListener("click", () => {
-    navigator.clipboard.writeText(origin);
+    navigator.clipboard.writeText(origin).catch(() => {});
     copyBase.textContent = "Copied!";
     setTimeout(() => (copyBase.textContent = "Copy"), 1500);
   });
@@ -28,7 +28,7 @@ document.querySelectorAll(".code[data-copy]").forEach(block => {
   btn.className = "copy-btn";
   btn.textContent = "Copy";
   btn.addEventListener("click", () => {
-    navigator.clipboard.writeText(text);
+    navigator.clipboard.writeText(text).catch(() => {});
     btn.textContent = "Copied";
     btn.classList.add("copied");
     setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 1500);

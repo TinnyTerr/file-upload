@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.audit.log import record
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 
 class CreateUserBody(BaseModel):
-    username: str
+    username: str = Field(..., max_length=255)
     password: str
     role: str = "user"
     can_upload: bool = True
@@ -115,8 +115,43 @@ def delete_user(
     if user is None:
         raise HTTPException(404, detail="not found")
 
+    import os
+    from app.models.api_key import ApiKey
+    from app.models.directory import Directory
+    from app.models.file import FileObject
+    from app.models.link import Link
+    from app.storage.paths import safe_join, storage_root
+
+    # Foreign keys are enforced (PRAGMA foreign_keys=ON) and none of the dependent
+    # tables cascade, so every row that references this user must be removed first
+    # or the delete fails with an IntegrityError. Files owned by the user — plus
+    # any files a master uploaded into the user's directories — also get their
+    # bytes unlinked so nothing is left orphaned on disk.
+    dirs = db.query(Directory).filter_by(owner_id=user_id).all()
+    dir_ids = [d.id for d in dirs]
+
+    files = db.query(FileObject).filter_by(owner_id=user_id).all()
+    if dir_ids:
+        files += db.query(FileObject).filter(FileObject.directory_id.in_(dir_ids)).all()
+
+    for f in {ff.id: ff for ff in files}.values():
+        try:
+            full = safe_join(storage_root(), f.storage_path)
+            if full.exists():
+                os.unlink(full)
+        except (OSError, ValueError):
+            pass
+        db.query(Link).filter_by(file_id=f.id).delete()
+        db.delete(f)
+    db.flush()
+
+    for d in dirs:
+        db.delete(d)
+    db.query(ApiKey).filter_by(owner_id=user_id).delete()
     db.query(SessionRow).filter_by(user_id=user_id).delete()
     db.query(Permission).filter_by(user_id=user_id).delete()
+    db.flush()
+
     record(db, actor=master.username, action="user.deleted",
            target=f"user:{user_id}", ip=client_ip(request))
     db.delete(user)

@@ -29,6 +29,20 @@ def install_append_only_triggers(engine: Engine) -> None:
         for s in stmts:
             conn.execute(text(s))
 
+    # Serialize the hash chain at the DB layer: a UNIQUE index on prev_hash means
+    # two writers that concurrently read the same predecessor can't both commit —
+    # the loser hits a constraint violation and rolls back instead of silently
+    # forking the chain (which would make verify_chain() report tampering forever).
+    # Guarded so a pre-existing fork in an old DB doesn't block startup.
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_audit_prev_hash "
+                "ON audit_log(prev_hash)"
+            ))
+    except Exception:
+        pass
+
 
 def _escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("|", "\\|")

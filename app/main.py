@@ -44,7 +44,7 @@ class _RevalidatingStatic(StaticFiles):
 from app.audit.log import install_append_only_triggers
 from app.bootstrap import ensure_master
 from app.config import load_settings
-from app.db import make_engine, make_session_factory, init_db
+from app.db import make_engine, make_session_factory, init_db, init_lock
 from app.deps import AppState
 from app.jobs.lifecycle import (
     archive_idle_job, delete_idle_job, temp_expiry_job, link_expiry_job,
@@ -74,6 +74,9 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
     session_factory = make_session_factory(engine)
 
     secure = settings.app_env != "dev"
+    _allowed_hosts = {
+        h.strip().lower() for h in (settings.allowed_hosts or "").split(",") if h.strip()
+    }
     state = AppState(
         settings=settings,
         session_factory=session_factory,
@@ -84,12 +87,17 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         storage_root().mkdir(parents=True, exist_ok=True)
-        with session_factory() as s:
-            state.bootstrap_password = ensure_master(s)
+        # Serialize first-run admin creation across worker processes: without
+        # this, every worker's lifespan passes the "no user yet" check and races
+        # to INSERT 'admin', and all but one hit UNIQUE constraint failed.
+        with init_lock(engine):
+            with session_factory() as s:
+                state.bootstrap_password = ensure_master(s)
 
         reconcile_stale_states(session_factory, storage_root())
 
         from apscheduler.schedulers.background import BackgroundScheduler
+        from app.routes.files import _sweep_stale_parts
         scheduler = BackgroundScheduler()
         _sf = session_factory
         _sr = storage_root()
@@ -97,6 +105,8 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
         scheduler.add_job(delete_idle_job, "interval", hours=1, args=[_sf, _sr], id="delete_idle")
         scheduler.add_job(temp_expiry_job, "interval", hours=1, args=[_sf, _sr], id="temp_expiry")
         scheduler.add_job(link_expiry_job, "interval", minutes=10, args=[_sf], id="link_expiry")
+        # Stale-upload cleanup moved off the upload_init hot path onto the scheduler.
+        scheduler.add_job(_sweep_stale_parts, "interval", hours=1, id="sweep_stale_parts")
         scheduler.start()
         try:
             yield
@@ -126,6 +136,11 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
                         hdrs.append((b"x-frame-options", b"DENY"))
                     if b"referrer-policy" not in existing:
                         hdrs.append((b"referrer-policy", b"no-referrer"))
+                    # HSTS only outside dev (where there's no TLS) — tells browsers
+                    # to refuse plain HTTP to this origin after the first visit.
+                    if secure and b"strict-transport-security" not in existing:
+                        hdrs.append((b"strict-transport-security",
+                                     b"max-age=63072000; includeSubDomains"))
                     message = {**message, "headers": hdrs}
                 await send(message)
 
@@ -153,7 +168,12 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
                 if settings.trust_proxy:
                     fwd_host = headers.get(b"x-forwarded-host", b"").decode()
                     if fwd_host:
-                        host = fwd_host.split(",", 1)[0].strip()
+                        candidate = fwd_host.split(",", 1)[0].strip()
+                        # Only honor X-Forwarded-Host when explicitly allow-listed.
+                        # Otherwise an attacker hitting the origin directly could set
+                        # it to evil.com and turn this 308 into a cached open redirect.
+                        if candidate.lower() in _allowed_hosts:
+                            host = candidate
                 path = scope.get("path", "/")
                 qs = scope.get("query_string", b"").decode()
                 location = f"https://{host}{path}"

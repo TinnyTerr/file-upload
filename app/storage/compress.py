@@ -36,15 +36,22 @@ def compress_file(src: Path, dst: Path) -> int:
 def decompress_stream(path: Path, original_size: int) -> Iterator[bytes]:
     dctx = zstd.ZstdDecompressor()
     produced = 0
+    # When original_size is unknown (0), the per-file ratio check can't apply — but
+    # leaving only the 10 GiB absolute cap would let a tiny file expand massively
+    # before being caught. Fall back to a conservative absolute budget instead.
+    fallback_budget = _READ_SIZE * _BOMB_RATIO  # ~13 MiB
     with open(path, "rb") as fh:
-        reader = dctx.stream_reader(fh, read_size=_READ_SIZE)
-        while True:
-            chunk = reader.read(_READ_SIZE)
-            if not chunk:
-                break
-            produced += len(chunk)
-            if original_size > 0 and produced > original_size * _BOMB_RATIO:
-                raise ValueError("decompression bomb detected")
-            if produced > _BOMB_MAX:
-                raise ValueError("decompression exceeded size cap")
-            yield chunk
+        with dctx.stream_reader(fh, read_size=_READ_SIZE) as reader:
+            while True:
+                chunk = reader.read(_READ_SIZE)
+                if not chunk:
+                    break
+                produced += len(chunk)
+                if original_size > 0:
+                    if produced > original_size * _BOMB_RATIO:
+                        raise ValueError("decompression bomb detected")
+                elif produced > fallback_budget:
+                    raise ValueError("decompression bomb detected")
+                if produced > _BOMB_MAX:
+                    raise ValueError("decompression exceeded size cap")
+                yield chunk

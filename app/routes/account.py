@@ -38,6 +38,12 @@ def change_credentials(body: ChangeCredsBody, request: Request,
     user.username = body.new_username
     user.password_hash = hash_password(body.new_password)
     user.must_change_credentials = False
+    # Revoke every other session for this user so a previously stolen/leaked
+    # cookie can't outlive the password change. Keep the current one alive.
+    db.query(SessionRow).filter(
+        SessionRow.user_id == user.id,
+        SessionRow.id != session_row.id,
+    ).delete()
     record(db, actor=actor, action="account.credentials_changed",
            target=f"user:{user.id}", ip=client_ip(request))
     db.commit()

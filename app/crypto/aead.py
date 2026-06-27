@@ -55,12 +55,25 @@ def decrypt_stream(key: bytes, path: Path) -> Iterator[bytes]:
             raise ValueError("unsupported version")
         base_nonce = fh.read(12)
         (total,) = struct.unpack(">I", fh.read(4))
+        # encrypt_file always writes at least one chunk; total == 0 means a
+        # corrupted/forged header. Don't silently decrypt to an empty result.
+        if total <= 0:
+            raise ValueError("invalid chunk count")
 
         for idx in range(total):
             is_last = idx == total - 1
-            ct = fh.read() if is_last else fh.read(_PLAINTEXT_CHUNK + 16)
-            if ct is None or (not is_last and len(ct) < 16):
-                raise ValueError(f"truncated at chunk {idx}")
+            if is_last:
+                ct = fh.read()
+                # The last chunk carries at least the 16-byte GCM tag.
+                if ct is None or len(ct) < 16:
+                    raise ValueError(f"truncated at chunk {idx}")
+            else:
+                # Every non-final chunk is exactly one full plaintext block + tag;
+                # anything shorter is a truncation, caught here rather than as an
+                # opaque AEAD failure.
+                ct = fh.read(_PLAINTEXT_CHUNK + 16)
+                if ct is None or len(ct) < _PLAINTEXT_CHUNK + 16:
+                    raise ValueError(f"truncated at chunk {idx}")
             plaintext = aesgcm.decrypt(_nonce(base_nonce, idx, is_last), ct, _aad(idx, is_last))
             if plaintext:
                 yield plaintext

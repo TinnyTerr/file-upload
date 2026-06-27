@@ -144,6 +144,10 @@ function renderQueue() {
 }
 
 function refreshQueueItem(item) {
+  // A dismissed/removed item may still have in-flight chunk requests that call
+  // back here. Don't resurrect it by appending a fresh element if it's no longer
+  // in the queue.
+  if (!fileQueue.some(i => i.id === item.id)) return;
   const el = document.getElementById(`fq-${item.id}`);
   const newEl = buildQueueItem(item);
   if (el) el.replaceWith(newEl);
@@ -467,6 +471,12 @@ async function addFilesToDirectory(d) {
   }, { once: true });
   document.body.appendChild(input);
   input.click();
+  // If the user cancels the picker the 'change' event never fires, so the hidden
+  // input would linger in the DOM. Clean it up on the next window focus (which
+  // fires when the file dialog closes) if 'change' didn't already remove it.
+  window.addEventListener("focus", () => {
+    if (input.isConnected) input.remove();
+  }, { once: true });
 }
 
 function directoryShareUrl(dir, encMode, sharedKeyBytes) {
@@ -499,7 +509,7 @@ function showDirectorySuccess(dir, encMode, sharedKeyBytes) {
   copyBtn.className = "btn btn-ghost btn-sm";
   copyBtn.textContent = "Copy";
   copyBtn.addEventListener("click", () => {
-    navigator.clipboard.writeText(shareUrl);
+    navigator.clipboard.writeText(shareUrl).catch(() => {});
     copyBtn.textContent = "Copied!";
     copyBtn.classList.add("copied");
     setTimeout(() => { copyBtn.textContent = "Copy"; copyBtn.classList.remove("copied"); }, 1500);
@@ -535,7 +545,17 @@ function showDirectorySuccess(dir, encMode, sharedKeyBytes) {
 async function encryptFileClientSide(file, key = null) {
   return new Promise((resolve, reject) => {
     const worker = new Worker("/static/js/aead-worker.js");
+    // Without this, a worker that fails to load/run (CSP, network, syntax error)
+    // would leave the promise pending forever and hang the upload.
+    worker.onerror = (e) => {
+      worker.terminate();
+      reject(new Error(e.message || "encryption worker error"));
+    };
     const reader = new FileReader();
+    reader.onerror = () => {
+      worker.terminate();
+      reject(new Error("could not read file for encryption"));
+    };
     reader.onload = (e) => {
       // A provided key (folder bundles) encrypts every member with one key; null
       // makes the worker mint a fresh per-file key.
@@ -622,7 +642,7 @@ function showSuccessModal(data, encMode, clientKeyBytes) {
   const copyBtn = document.createElement("button");
   copyBtn.className = "btn btn-ghost btn-sm";
   copyBtn.textContent = "Copy";
-  copyBtn.addEventListener("click", () => navigator.clipboard.writeText(shareUrl));
+  copyBtn.addEventListener("click", () => navigator.clipboard.writeText(shareUrl).catch(() => {}));
   row.append(urlSpan, copyBtn);
   body.appendChild(row);
 
@@ -910,7 +930,7 @@ function makeCopyRow(text, label) {
       const orig = btn.textContent;
       btn.textContent = "Copied!";
       setTimeout(() => (btn.textContent = orig), 1500);
-    });
+    }).catch(() => {});
   });
   wrap.append(span, btn);
   return wrap;
@@ -1042,7 +1062,7 @@ function renderDirectoryCard(d, isMaster) {
   copyBtn.textContent = "Copy";
   copyBtn.addEventListener("click", e => {
     e.stopPropagation();
-    navigator.clipboard.writeText(shareUrl);
+    navigator.clipboard.writeText(shareUrl).catch(() => {});
     copyBtn.textContent = "Copied!";
     copyBtn.classList.add("copied");
     setTimeout(() => { copyBtn.textContent = "Copy"; copyBtn.classList.remove("copied"); }, 1500);
@@ -1315,7 +1335,7 @@ function renderLinkRow(lk, f) {
     navigator.clipboard.writeText(url).then(() => {
       copyBtn.textContent = "Copied!";
       setTimeout(() => (copyBtn.textContent = "Copy"), 1500);
-    });
+    }).catch(() => {});
   });
   row.appendChild(copyBtn);
 
@@ -1538,7 +1558,7 @@ async function userCreateKey() {
   copyBtn.className = 'btn btn-ghost btn-sm';
   copyBtn.textContent = 'Copy key';
   copyBtn.addEventListener('click', () => {
-    navigator.clipboard.writeText(rawKey).then(() => showToast('Copied!'));
+    navigator.clipboard.writeText(rawKey).then(() => showToast('Copied!')).catch(() => {});
   });
 
   body.append(warning, display, copyBtn);

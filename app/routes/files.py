@@ -179,7 +179,10 @@ def _finalize_stored_file(
         display_name = _randomized_filename(original_filename) if randomize_filename else original_filename
         expires_at: datetime | None = None
         if not is_permanent and temp_days:
-            expires_at = datetime.now(timezone.utc) + timedelta(days=temp_days)
+            try:
+                expires_at = datetime.now(timezone.utc) + timedelta(days=temp_days)
+            except OverflowError:
+                raise HTTPException(400, detail="temp_days is too large")
 
         file_obj = FileObject(
             owner_id=user.id,
@@ -236,29 +239,35 @@ def _finalize_stored_file(
         file_obj.enc_key_blob = enc_key_blob_val
         file_obj.enc_access_blob = enc_access_blob_val
 
+        # Link minting + commit live INSIDE the try so a DB failure here also
+        # triggers the on-disk cleanup below — otherwise base_path (already
+        # renamed into place) would leak when the transaction rolls back.
+        expires_link: datetime | None = None
+        link_max_uses = max_uses
+        if directory is not None:
+            # Bundle members are reached through the directory page, not a capped
+            # per-file link, so they get an uncapped link and the directory tally grows.
+            link_max_uses = None
+            directory.total_bytes = (directory.total_bytes or 0) + file_obj.stored_size_bytes
+        elif expires_in_seconds is not None:
+            try:
+                expires_link = datetime.now(timezone.utc) + timedelta(seconds=expires_in_seconds)
+            except OverflowError:
+                raise HTTPException(400, detail="expires_in_seconds is too large")
+
+        slug = new_slug()
+        link = Link(file_id=file_obj.id, slug=slug, max_uses=link_max_uses, expires_at=expires_link)
+        db.add(link)
+
+        record(db, actor=user.username, action="file.uploaded",
+               target=f"file:{file_obj.id}", ip=client_ip(request))
+        db.commit()
+
     except Exception:
         for p in [work_path, base_path.with_suffix(".zst.work"), base_path.with_suffix(".fupl.work"), base_path]:
             p.unlink(missing_ok=True)
         db.rollback()
         raise
-
-    expires_link: datetime | None = None
-    link_max_uses = max_uses
-    if directory is not None:
-        # Bundle members are reached through the directory page, not a capped
-        # per-file link, so they get an uncapped link and the directory tally grows.
-        link_max_uses = None
-        directory.total_bytes = (directory.total_bytes or 0) + file_obj.stored_size_bytes
-    elif expires_in_seconds is not None:
-        expires_link = datetime.now(timezone.utc) + timedelta(seconds=expires_in_seconds)
-
-    slug = new_slug()
-    link = Link(file_id=file_obj.id, slug=slug, max_uses=link_max_uses, expires_at=expires_link)
-    db.add(link)
-
-    record(db, actor=user.username, action="file.uploaded",
-           target=f"file:{file_obj.id}", ip=client_ip(request))
-    db.commit()
 
     base_url = _file_url(request, slug)
     raw_url = base_url + "/raw"
@@ -325,7 +334,9 @@ async def upload_file(
                 if stored > perm.max_file_bytes:
                     raise HTTPException(413, detail="file exceeds max file size")
                 fh.write(chunk)
-    except HTTPException:
+    except Exception:
+        # Any failure mid-read (size cap, connection reset, I/O error) must clean
+        # up the partial .work file — not just HTTPException.
         work.unlink(missing_ok=True)
         raise
 
@@ -455,6 +466,14 @@ def _sweep_stale_parts() -> None:
                     p.unlink(missing_ok=True)
             except OSError:
                 pass
+        # Single-shot uploads that died mid-write leave a stale .work file behind;
+        # sweep those too (the live-upload window is far under the TTL cutoff).
+        for p in root.rglob("*.work"):
+            try:
+                if p.is_file() and p.stat().st_mtime < cutoff:
+                    p.unlink(missing_ok=True)
+            except OSError:
+                pass
     except OSError:
         pass
 
@@ -487,7 +506,9 @@ def upload_init(
     user: User = Depends(get_upload_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    _sweep_stale_parts()
+    # NOTE: stale-part sweeping runs on the scheduler (see main.py), not here —
+    # an rglob over the whole storage root on every upload init was needless I/O
+    # amplification on the hot path under concurrent uploads.
 
     (encryption_mode, compress, is_permanent, temp_days,
      randomize_filename, directory, perm) = _prepare_upload(
@@ -783,23 +804,32 @@ def delete_file(
     if user.role != "master" and file_obj.owner_id != user.id:
         raise HTTPException(403, detail="not your file")
 
-    try:
-        full_path = safe_join(storage_root(), file_obj.storage_path)
-        if full_path.exists():
-            os.unlink(full_path)
-    except OSError:
-        pass
-
     db.query(Link).filter_by(file_id=file_obj.id).delete()
     if file_obj.directory_id is not None:
         from app.models.directory import Directory
         directory = db.get(Directory, file_obj.directory_id)
         if directory is not None:
             directory.total_bytes = max(0, (directory.total_bytes or 0) - (file_obj.stored_size_bytes or 0))
+
+    # Resolve the path before committing, but only unlink AFTER the DB delete is
+    # durable — otherwise a commit failure would leave a registered file whose
+    # bytes are already gone from disk.
+    try:
+        full_path = safe_join(storage_root(), file_obj.storage_path)
+    except ValueError:
+        full_path = None
+
     db.delete(file_obj)
     record(db, actor=user.username, action="file.deleted",
            target=f"file:{file_id}", ip=client_ip(request))
     db.commit()
+
+    if full_path is not None:
+        try:
+            if full_path.exists():
+                os.unlink(full_path)
+        except OSError:
+            pass
     return {"status": "deleted"}
 
 
@@ -839,7 +869,10 @@ def mint_link(
 
     expires_at: datetime | None = None
     if body.expires_in_seconds is not None:
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=body.expires_in_seconds)
+        try:
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=body.expires_in_seconds)
+        except OverflowError:
+            raise HTTPException(400, detail="expires_in_seconds is too large")
 
     slug = new_slug()
     link = Link(file_id=file_id, slug=slug, max_uses=body.max_uses, expires_at=expires_at)
@@ -902,7 +935,10 @@ def edit_link(
     if body.max_uses is not None:
         link.max_uses = body.max_uses
     if body.expires_in_seconds is not None:
-        link.expires_at = datetime.now(timezone.utc) + timedelta(seconds=body.expires_in_seconds)
+        try:
+            link.expires_at = datetime.now(timezone.utc) + timedelta(seconds=body.expires_in_seconds)
+        except OverflowError:
+            raise HTTPException(400, detail="expires_in_seconds is too large")
     if body.active is not None:
         link.active = body.active
 
