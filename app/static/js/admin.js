@@ -264,13 +264,15 @@ function renderStatusPills(id, counts, labels = {}) {
     return;
   }
   for (const [key, value] of entries) {
+    const info = labels[key] || {};
     const pill = document.createElement("div");
     pill.className = "status-pill";
-    setTooltip(pill, labels[key]?.tip);
+    setTooltip(pill, info.tip);
     const strong = document.createElement("strong");
     strong.textContent = Number(value || 0).toLocaleString();
+    if (info.color) strong.style.color = info.color;
     const span = document.createElement("span");
-    span.textContent = labels[key]?.label || key.replaceAll("_", " ");
+    span.textContent = info.label || key.replaceAll("_", " ");
     pill.append(strong, span);
     el.appendChild(pill);
   }
@@ -308,22 +310,22 @@ async function loadDetails() {
   })), { bytes: true });
 
   renderStatusPills("lifecycle-chart", d.lifecycle_counts, {
-    active: { label: "active", tip: "Files in normal downloadable state." },
-    archived: { label: "archived", tip: "Files compressed by lifecycle/archive controls." },
-    archiving: { label: "archiving", tip: "Files currently being archived or left stale by interruption." },
-    unarchiving: { label: "unarchiving", tip: "Files currently expanding back to normal storage." },
+    active:      { label: "active",      tip: "Files in normal downloadable state.",                            color: "var(--success)" },
+    archived:    { label: "archived",    tip: "Files compressed by lifecycle/archive controls.",                color: "var(--accent)" },
+    archiving:   { label: "archiving",   tip: "Files currently being archived or left stale by interruption.", color: "var(--warning)" },
+    unarchiving: { label: "unarchiving", tip: "Files currently expanding back to normal storage.",             color: "var(--warning)" },
   });
   renderStatusPills("link-status-chart", d.link_status_counts, {
-    active: { label: "active", tip: "Usable links right now." },
-    inactive: { label: "inactive", tip: "Manually deactivated links." },
-    expired: { label: "expired", tip: "Links past their expiry timestamp." },
-    used_up: { label: "used up", tip: "Links that reached their download limit." },
+    active:   { label: "active",   tip: "Usable links right now.",                  color: "var(--success)" },
+    inactive: { label: "inactive", tip: "Manually deactivated links.",              color: "var(--text-muted)" },
+    expired:  { label: "expired",  tip: "Links past their expiry timestamp.",       color: "var(--danger)" },
+    used_up:  { label: "used up",  tip: "Links that reached their download limit.", color: "var(--warning)" },
   });
   renderStatusPills("api-key-chart", d.api_key_status_counts, {
-    active: { label: "active", tip: "Keys that can authenticate API requests." },
-    inactive: { label: "revoked", tip: "Keys that were revoked and no longer work." },
-    bound: { label: "IP bound", tip: "Keys pinned to a first-use IP address." },
-    unbound: { label: "unbound", tip: "Keys that will bind to their next client IP." },
+    active:   { label: "active",   tip: "Keys that can authenticate API requests.",     color: "var(--success)" },
+    inactive: { label: "revoked",  tip: "Keys that were revoked and no longer work.",   color: "var(--text-muted)" },
+    bound:    { label: "IP bound", tip: "Keys pinned to a first-use IP address.",       color: "var(--accent)" },
+    unbound:  { label: "unbound",  tip: "Keys that will bind to their next client IP.", color: "var(--text-dim)" },
   });
   const auditTotal = (d.recent_audit_counts || []).reduce((sum, row) => sum + (row.count || 0), 0);
   renderBarList("audit-activity-chart", (d.recent_audit_counts || []).map(row => ({
@@ -473,14 +475,14 @@ async function loadUsers() {
     lbl.className = "text-xs text-muted";
     lbl.style.marginBottom = "3px";
     lbl.textContent = `${formatBytes(stats.bytes)} / ${quota ? formatBytes(quota) : "∞"}`;
-    const bar = document.createElement("div");
-    bar.className = "quota-bar";
-    bar.style.maxWidth = "160px";
+    const storageBar = document.createElement("div");
+    storageBar.className = "quota-bar";
+    storageBar.style.maxWidth = "160px";
     const fill = document.createElement("div");
     fill.className = "quota-bar-fill" + (pct >= 90 ? " danger" : pct >= 70 ? " warn" : "");
     fill.style.width = pct.toFixed(1) + "%";
-    bar.appendChild(fill);
-    td5.append(lbl, bar);
+    storageBar.appendChild(fill);
+    td5.append(lbl, storageBar);
 
     const td6 = document.createElement("td");
     td6.className = "text-xs text-muted";

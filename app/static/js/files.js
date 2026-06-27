@@ -48,32 +48,26 @@ document.querySelectorAll(".mode-btn[data-mode]").forEach(btn => {
 function setMode(mode) {
   uploadMode = mode;
   document.querySelectorAll(".mode-btn[data-mode]").forEach(b => b.classList.toggle("active", b.dataset.mode === mode));
-  fileQueue = fileQueue.filter(i => i.status === "uploading");
-  renderQueue();
-  fileInput.removeAttribute("multiple");
-  fileInput.removeAttribute("webkitdirectory");
 
-  if (mode === "files") {
-    fileInput.setAttribute("multiple", "");
-    dropSub.textContent = "Select one or many files · encrypt and set limits below";
-  } else if (mode === "folder") {
-    fileInput.setAttribute("webkitdirectory", "");
-    fileInput.setAttribute("multiple", "");
-    dropSub.textContent = "Select a folder — it becomes one shared page with a download-all link";
+  const isLocal = mode === "files" || mode === "folder";
+  document.getElementById("local-upload-panel").classList.toggle("hidden", !isLocal);
+  document.getElementById("remote-upload-panel").classList.toggle("hidden", mode !== "remote");
+  document.getElementById("receive-upload-panel").classList.toggle("hidden", mode !== "receive");
+
+  if (isLocal) {
+    fileQueue = fileQueue.filter(i => i.status === "uploading");
+    renderQueue();
+    fileInput.removeAttribute("multiple");
+    fileInput.removeAttribute("webkitdirectory");
+    if (mode === "files") {
+      fileInput.setAttribute("multiple", "");
+      dropSub.textContent = "Select one or many files · encrypt and set limits below";
+    } else {
+      fileInput.setAttribute("webkitdirectory", "");
+      fileInput.setAttribute("multiple", "");
+      dropSub.textContent = "Select a folder — it becomes one shared page with a download-all link";
+    }
   }
-}
-
-document.querySelectorAll(".source-btn").forEach(btn => {
-  btn.addEventListener("click", () => setSource(btn.dataset.source));
-});
-
-function setSource(source) {
-  document.querySelectorAll(".source-btn").forEach(btn => {
-    btn.classList.toggle("active", btn.dataset.source === source);
-  });
-  document.getElementById("local-upload-panel").classList.toggle("hidden", source !== "local");
-  document.getElementById("remote-upload-panel").classList.toggle("hidden", source !== "remote");
-  document.getElementById("dropbox-upload-panel").classList.toggle("hidden", source !== "dropbox");
 }
 
 // ── File selection ────────────────────────────────────────────────────────
@@ -320,7 +314,7 @@ document.getElementById("remote-upload-btn")?.addEventListener("click", async ()
     return;
   }
   const result = await resp.json();
-  status.textContent = "Saved.";
+  status.textContent = "";
   showSuccessModal(result, "none", null);
   urlEl.value = "";
   nameEl.value = "";
@@ -328,17 +322,15 @@ document.getElementById("remote-upload-btn")?.addEventListener("click", async ()
   loadUsage();
 });
 
-document.getElementById("dropbox-create-btn")?.addEventListener("click", async () => {
-  const expiresRaw = document.getElementById("dropbox-expires").value.trim() || "1h";
+document.getElementById("receive-create-btn")?.addEventListener("click", async () => {
+  const expiresRaw = document.getElementById("receive-expires").value.trim() || "1h";
   const expires = parseDuration(expiresRaw);
   if (expires === null) {
     showToast('Invalid duration — use "1h", "7d", "30m"', "error");
     return;
   }
-  const btn = document.getElementById("dropbox-create-btn");
-  const status = document.getElementById("dropbox-status");
+  const btn = document.getElementById("receive-create-btn");
   btn.disabled = true;
-  status.textContent = "Creating one-use upload link...";
   const resp = await apiFetch("/dropbox-links", {
     method: "POST",
     json: { expires_in_seconds: expires },
@@ -346,15 +338,18 @@ document.getElementById("dropbox-create-btn")?.addEventListener("click", async (
   btn.disabled = false;
   if (!resp.ok) {
     const d = await resp.json().catch(() => ({}));
-    status.textContent = "";
-    showToast(d.detail || "Dropbox link creation failed.", "error");
+    showToast(d.detail || "Failed to create upload link.", "error");
     return;
   }
   const link = await resp.json();
-  status.textContent = "Ready.";
-  showGeneratedLinkModal("Dropbox upload link", link.url, {
-    subtitle: "One file can be uploaded through this link. It disables itself after the first successful upload.",
-  });
+  const resultEl = document.getElementById("receive-result");
+  resultEl.textContent = "";
+  const hint = document.createElement("div");
+  hint.className = "text-xs text-muted";
+  hint.style.marginBottom = "8px";
+  hint.textContent = "Share this link. One upload only — it disables after the first file is received.";
+  resultEl.appendChild(hint);
+  resultEl.appendChild(makeCopyRow(link.url, "Upload link"));
 });
 
 async function startUpload() {

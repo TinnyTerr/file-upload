@@ -34,6 +34,7 @@
     .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
     .dashboard-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
     .dashboard-card-title { display:flex; align-items:center; gap:8px; font-family:var(--font-mono); font-size:11px; letter-spacing:0.1em; text-transform:uppercase; color:var(--text-muted); margin-bottom:12px; }
+    .dashboard-card-title::before { content:''; width:5px; height:5px; background:var(--accent); border-radius:1px; transform:rotate(45deg); box-shadow:0 0 6px var(--accent-glow); flex-shrink:0; }
     .storage-cap-row { display:grid; grid-template-columns:minmax(220px, 1fr) auto; gap:12px; align-items:end; }
     .storage-cap-row .form-group { margin-bottom:0; }
     .storage-hero { display:grid; grid-template-columns:180px minmax(0, 1fr); gap:20px; align-items:center; }
@@ -51,8 +52,8 @@
     .metric-tile-sub { color:var(--text-muted); font-size:11px; margin-top:4px; }
     .chart-list { display:grid; gap:10px; }
     .chart-row-head { display:flex; justify-content:space-between; gap:10px; font-size:12px; color:var(--text-dim); }
-    .chart-row-label { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .chart-row-value { font-family:var(--font-mono); color:var(--text-muted); white-space:nowrap; }
+    .chart-row-label { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); }
+    .chart-row-value { font-family:var(--font-mono); color:var(--text-dim); white-space:nowrap; }
     .status-stack { display:flex; flex-wrap:wrap; gap:8px; }
     .status-pill { border:1px solid var(--border); background:var(--surface-2); border-radius:var(--radius-sm); padding:8px 10px; min-width:86px; }
     .status-pill strong { display:block; font-family:var(--font-display); font-size:20px; line-height:1; margin-bottom:4px; }
@@ -68,6 +69,9 @@
     .action-card-sub { font-size:12px; line-height:1.45; color:var(--text-muted); }
     .danger-card { border-color:rgba(255,108,88,.34); background:linear-gradient(180deg, rgba(255,108,88,.08), var(--surface)); }
     .danger-card .action-card-title { color:#ffad9f; }
+    .lifecycle-card { border-color:rgba(242,183,92,.22); background:var(--accent-bg); }
+    .lifecycle-card .action-card-title { color:var(--accent); }
+    .lifecycle-card:hover { border-color:var(--accent-ring); }
     .audit-integrity { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
     .audit-integrity.hidden { display:none !important; }
     .select-cell { flex:0 0 auto; display:flex; align-items:center; }
@@ -128,7 +132,7 @@
 
     <div class="tabs" data-reveal>
       <div class="tab active" data-tab="users">Users</div>
-      <div class="tab" data-tab="details">Details</div>
+      <div class="tab" data-tab="details">Overview</div>
       <div class="tab" data-tab="files">Files</div>
       <div class="tab" data-tab="audit">Audit log</div>
       <div class="tab" data-tab="backend">Backend</div>
@@ -215,19 +219,19 @@
         <div class="dashboard-card">
           <div class="dashboard-card-title">Lifecycle controls <i class="help-icon" data-tip="Manual lifecycle jobs run immediately and report how many rows they processed.">?</i></div>
           <div class="lifecycle-grid">
-            <button class="action-card" data-lifecycle="/admin/lifecycle/archive-idle" data-tooltip="Find idle files that meet their archive-after-idle rule and compress/archive them.">
+            <button class="action-card lifecycle-card" data-lifecycle="/admin/lifecycle/archive-idle" data-tooltip="Find idle files that meet their archive-after-idle rule and compress/archive them.">
               <div class="action-card-title">Run archive scan</div>
               <div class="action-card-sub">Archive eligible idle files and update savings.</div>
             </button>
-            <button class="action-card" data-lifecycle="/admin/lifecycle/temp-expiry" data-tooltip="Delete temporary files whose file expiry time has passed.">
+            <button class="action-card lifecycle-card" data-lifecycle="/admin/lifecycle/temp-expiry" data-tooltip="Delete temporary files whose file expiry time has passed.">
               <div class="action-card-title">Run temp expiry</div>
               <div class="action-card-sub">Remove expired temporary file records and bytes.</div>
             </button>
-            <button class="action-card" data-lifecycle="/admin/lifecycle/link-expiry" data-tooltip="Deactivate links that passed their expiry or download limit.">
+            <button class="action-card lifecycle-card" data-lifecycle="/admin/lifecycle/link-expiry" data-tooltip="Deactivate links that passed their expiry or download limit.">
               <div class="action-card-title">Run link expiry</div>
               <div class="action-card-sub">Mark expired or used-up links inactive.</div>
             </button>
-            <button class="action-card" data-lifecycle="/admin/lifecycle/reconcile" data-tooltip="Repair stale lifecycle states left by interrupted archive/unarchive jobs.">
+            <button class="action-card lifecycle-card" data-lifecycle="/admin/lifecycle/reconcile" data-tooltip="Repair stale lifecycle states left by interrupted archive/unarchive jobs.">
               <div class="action-card-title">Reconcile states</div>
               <div class="action-card-sub">Move stale in-progress lifecycle states back to a stable state.</div>
             </button>

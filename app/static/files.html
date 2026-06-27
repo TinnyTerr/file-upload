@@ -33,18 +33,13 @@
       <div class="section-label">Upload</div>
 
       <div class="mode-group" style="margin-bottom:14px">
-        <button class="source-btn mode-btn active" data-source="local" type="button">Local</button>
-        <button class="source-btn mode-btn" data-source="remote" type="button">Remote URL</button>
-        <button class="source-btn mode-btn" data-source="dropbox" type="button">Dropbox</button>
+        <button class="mode-btn active" data-mode="files" type="button">Files</button>
+        <button class="mode-btn" data-mode="folder" type="button">Folder</button>
+        <button class="mode-btn" data-mode="remote" type="button">Remote URL</button>
+        <button class="mode-btn" data-mode="receive" type="button">Receive link</button>
       </div>
 
       <div id="local-upload-panel">
-      <!-- Mode selector -->
-      <div class="mode-group">
-        <button class="mode-btn active" data-mode="files">Files</button>
-        <button class="mode-btn" data-mode="folder">Folder</button>
-      </div>
-
       <!-- Drop zone — the dispatch bay -->
       <div class="drop-zone" id="drop-zone">
         <input type="file" id="file-input" multiple>
@@ -195,20 +190,19 @@
         </div>
       </div>
 
-      <div id="dropbox-upload-panel" class="hidden">
+      <div id="receive-upload-panel" class="hidden">
+        <p class="text-sm text-muted" style="margin-bottom:14px">Generate a one-use link you can give to someone else so they can upload a single file directly into your account.</p>
         <div class="form-row">
-          <div class="form-group">
+          <div class="form-group" style="max-width:200px">
             <label>
-              Link expires after
-              <i class="help-icon" data-tip="Creates a one-file, one-use upload page into your account. The token is disabled after the first successful upload.">?</i>
+              Expires after
+              <i class="help-icon" data-tip="The link disables itself after the first successful upload, or after this duration elapses — whichever comes first.">?</i>
             </label>
-            <input type="text" id="dropbox-expires" placeholder="1h">
+            <input type="text" id="receive-expires" placeholder="1h">
           </div>
         </div>
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <button class="btn btn-primary" id="dropbox-create-btn" type="button">Create dropbox link</button>
-          <span class="text-sm text-muted" id="dropbox-status"></span>
-        </div>
+        <button class="btn btn-primary" id="receive-create-btn" type="button">Create upload link</button>
+        <div id="receive-result" style="margin-top:14px"></div>
       </div>
     </div>
 
