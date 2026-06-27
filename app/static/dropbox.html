@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="color-scheme" content="dark">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dropbox — Oxymoron</title>
+  <link rel="stylesheet" href="/static/css/theme.css">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none';">
+  <style>
+    .dropbox-hero { text-align: center; padding: 48px 24px 32px; }
+    .dropbox-icon { font-size: 52px; opacity: 0.45; margin-bottom: 16px; line-height: 1; }
+    .dropbox-title {
+      font-family: var(--font-display);
+      font-size: 26px; font-weight: 600; letter-spacing: -0.02em;
+      margin-bottom: 8px;
+    }
+    .dropbox-meta { font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); }
+    .selected-file-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 14px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-top: 12px;
+    }
+    .selected-file-icon { font-size: 20px; opacity: 0.7; flex-shrink: 0; }
+    .selected-file-info { flex: 1; min-width: 0; }
+    .selected-file-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 14px; }
+    .selected-file-size { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); }
+    .upload-actions { margin-top: 16px; display: flex; justify-content: flex-end; }
+  </style>
+</head>
+<body>
+  <nav class="nav">
+    <a href="/" class="nav-logo">Oxymoron<span class="logo-sub">(for files)</span></a>
+    <div class="nav-spacer"></div>
+  </nav>
+
+  <div class="container" style="max-width:580px">
+
+    <div id="loading-state" class="empty">
+      <div class="empty-icon">⟳</div>
+      Loading…
+    </div>
+
+    <div id="error-state" class="hidden">
+      <div class="dropbox-hero">
+        <div class="dropbox-icon">📪</div>
+        <div class="dropbox-title" id="error-title">Link unavailable</div>
+        <div class="download-meta"><span id="error-msg">This dropbox link has expired or already been used.</span></div>
+      </div>
+    </div>
+
+    <div id="upload-state" class="hidden">
+      <div class="dropbox-hero">
+        <div class="dropbox-icon">📥</div>
+        <div class="dropbox-title">Drop a file here</div>
+        <div class="dropbox-meta" id="expires-meta"></div>
+      </div>
+      <div class="card">
+        <div class="drop-zone" id="drop-zone">
+          <input type="file" id="file-input">
+          <div class="drop-icon">↑</div>
+          <div class="drop-label"><strong>Drop a file</strong> or click to browse</div>
+          <div class="drop-sub">One file only · sent directly to the recipient</div>
+        </div>
+        <div id="selected-file" class="hidden selected-file-row">
+          <span class="selected-file-icon" id="file-icon"></span>
+          <div class="selected-file-info">
+            <div class="selected-file-name" id="file-name"></div>
+            <div class="selected-file-size" id="file-size"></div>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="clear-file">✕</button>
+        </div>
+        <div id="upload-progress-wrap" class="hidden" style="margin-top:12px">
+          <div class="progress"><div class="progress-bar" id="upload-progress-bar" style="width:0%"></div></div>
+          <div class="text-xs text-muted mt-4" id="upload-progress-label">Uploading…</div>
+        </div>
+        <div class="upload-actions">
+          <button class="btn btn-primary" id="send-btn" disabled>Send file</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="success-state" class="hidden">
+      <div class="dropbox-hero">
+        <div class="dropbox-icon" style="opacity:0.85">✓</div>
+        <div class="dropbox-title">File delivered</div>
+        <div class="dropbox-meta">Your file was sent successfully.</div>
+      </div>
+    </div>
+
+  </div>
+
+  <script type="module" src="/static/js/dropbox.js"></script>
+</body>
+</html>
