@@ -156,78 +156,216 @@ function renderManifest() {
   });
 }
 
+const GROUP_LABELS = { images:"Images", videos:"Videos", audio:"Audio", text:"Text", pdfs:"PDFs", archives:"Archives", other:"Other files" };
+
+let _previewableMedia = [];
+let _lb = null;
+
 function renderPreviewGroups() {
-  const labels = {
-    images: "Images",
-    videos: "Videos",
-    audio: "Audio",
-    text: "Text",
-    pdfs: "PDFs",
-    archives: "Archives",
-    other: "Other files",
-  };
-  for (const [group, files] of Object.entries(PREVIEW_DATA.groups || {})) {
+  _previewableMedia = [];
+  const groups = PREVIEW_DATA.groups || {};
+
+  // First pass — index previewable media (images + videos, unencrypted only)
+  const filePreviewIdx = new Map();
+  for (const [group, files] of Object.entries(groups)) {
+    for (const f of files) {
+      if (ENC === "none" && f.preview_url && (group === "images" || group === "videos")) {
+        filePreviewIdx.set(f.slug, _previewableMedia.length);
+        _previewableMedia.push({ f, group });
+      }
+    }
+  }
+
+  // Second pass — render sections
+  for (const [group, files] of Object.entries(groups)) {
     if (!files.length) continue;
     const section = document.createElement("section");
     section.className = "dir-section";
-    const title = document.createElement("div");
-    title.className = "dir-section-title";
-    title.textContent = `${labels[group] || group} (${files.length})`;
-    const grid = document.createElement("div");
-    grid.className = "dir-grid";
-    files.forEach(file => grid.appendChild(renderTile(file, group)));
-    section.append(title, grid);
+    const sectionTitle = document.createElement("div");
+    sectionTitle.className = "dir-section-title";
+    sectionTitle.textContent = `${GROUP_LABELS[group] || group} (${files.length})`;
+    const gallery = document.createElement("div");
+    gallery.className = "dir-gallery";
+    files.forEach(f => {
+      const previewIdx = filePreviewIdx.has(f.slug) ? filePreviewIdx.get(f.slug) : -1;
+      gallery.appendChild(renderGalleryTile(f, group, previewIdx));
+    });
+    section.append(sectionTitle, gallery);
     manifestEl.appendChild(section);
   }
 }
 
-function renderTile(f, group) {
+function renderGalleryTile(f, group, previewIdx) {
   const tile = document.createElement("div");
-  tile.className = "dir-tile";
-  const preview = document.createElement("div");
-  preview.className = "dir-tile-preview";
-  if (group === "images" && ENC === "none") {
+  tile.className = "dir-gallery-tile" + (previewIdx >= 0 ? " previewable" : "");
+
+  // Thumbnail
+  const thumb = document.createElement("div");
+  thumb.className = "dir-gallery-thumb";
+  if (group === "images" && ENC === "none" && f.preview_url) {
     const img = document.createElement("img");
     img.alt = f.filename;
     img.src = f.preview_url;
+    img.loading = "lazy";
     img.onerror = () => {
-      preview.textContent = "Cannot preview";
+      thumb.textContent = "";
+      const icon = document.createElement("span");
+      icon.className = "dir-gallery-thumb-icon";
+      icon.textContent = fileIcon(f.content_type);
+      thumb.appendChild(icon);
     };
-    preview.appendChild(img);
-  } else if (group === "videos" && ENC === "none") {
+    thumb.appendChild(img);
+  } else if (group === "videos" && ENC === "none" && f.preview_url) {
     const video = document.createElement("video");
     video.preload = "metadata";
     video.muted = true;
     video.src = f.preview_url;
-    preview.appendChild(video);
-  } else if (group === "archives") {
-    const status = f.preview?.status === "readable"
-      ? `${f.preview.entry_count || f.preview.entries?.length || 0} entries`
-      : "Cannot read preview";
-    preview.textContent = status;
+    thumb.appendChild(video);
   } else {
-    preview.textContent = fileIcon(f.content_type);
+    const icon = document.createElement("span");
+    icon.className = "dir-gallery-thumb-icon";
+    icon.textContent = fileIcon(f.content_type);
+    thumb.appendChild(icon);
   }
+
+  // Hover overlay — placed inside thumb so it only covers the image, not info/actions
+  if (previewIdx >= 0) {
+    const overlay = document.createElement("div");
+    overlay.className = "dir-gallery-tile-overlay";
+    const overlayIcon = document.createElement("span");
+    overlayIcon.className = "dir-gallery-tile-overlay-icon";
+    overlayIcon.textContent = group === "videos" ? "▶" : "⤢";
+    overlay.appendChild(overlayIcon);
+    thumb.appendChild(overlay);
+  }
+
+  // Info
+  const info = document.createElement("div");
+  info.className = "dir-gallery-info";
   const name = document.createElement("div");
-  name.className = "dir-tile-name";
+  name.className = "dir-gallery-name";
   name.title = f.filename;
   name.textContent = f.filename;
-  const meta = document.createElement("div");
-  meta.className = "dir-row-size";
-  meta.textContent = formatBytes(f.size_bytes);
+  const size = document.createElement("div");
+  size.className = "dir-gallery-size";
+  size.textContent = formatBytes(f.size_bytes);
+  info.append(name, size);
+
+  // Actions
   const actions = document.createElement("div");
-  actions.className = "dir-tile-actions";
-  const download = document.createElement("button");
-  download.className = "btn btn-ghost btn-sm";
-  download.textContent = "Download";
-  download.addEventListener("click", () => downloadOne(f, download));
-  const open = document.createElement("button");
-  open.className = "btn btn-ghost btn-sm";
-  open.textContent = "Open";
-  open.addEventListener("click", () => window.open(`/file/${f.slug}`, "_blank", "noopener"));
-  actions.append(download, open);
-  tile.append(preview, name, meta, actions);
+  actions.className = "dir-gallery-actions";
+  const dl = document.createElement("button");
+  dl.className = "btn btn-ghost btn-sm";
+  dl.textContent = "↓";
+  dl.setAttribute("data-tooltip", "Download");
+  dl.addEventListener("click", e => { e.stopPropagation(); downloadOne(f, dl); });
+  actions.appendChild(dl);
+
+  tile.append(thumb, info, actions);
+
+  if (previewIdx >= 0) {
+    tile.addEventListener("click", () => openLightbox(previewIdx));
+  }
+
   return tile;
+}
+
+// ── Lightbox ──────────────────────────────────────────────────────────────────
+function openLightbox(idx) {
+  if (_lb) closeLightbox();
+
+  const el = document.createElement("div");
+  el.className = "lightbox";
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-modal", "true");
+
+  const counter = document.createElement("div");
+  counter.className = "lightbox-counter";
+
+  const closeBtn = document.createElement("button");
+  closeBtn.className = "lightbox-close";
+  closeBtn.setAttribute("aria-label", "Close");
+  closeBtn.textContent = "✕";
+  closeBtn.addEventListener("click", closeLightbox);
+
+  const prev = document.createElement("button");
+  prev.className = "lightbox-arrow lightbox-prev";
+  prev.setAttribute("aria-label", "Previous");
+  prev.textContent = "‹";
+  prev.addEventListener("click", () => navLightbox(-1));
+
+  const next = document.createElement("button");
+  next.className = "lightbox-arrow lightbox-next";
+  next.setAttribute("aria-label", "Next");
+  next.textContent = "›";
+  next.addEventListener("click", () => navLightbox(1));
+
+  const mediaWrap = document.createElement("div");
+  mediaWrap.className = "lightbox-media-wrap";
+
+  const caption = document.createElement("div");
+  caption.className = "lightbox-caption";
+  const captionName = document.createElement("div");
+  captionName.className = "lightbox-caption-name";
+  const captionMeta = document.createElement("div");
+  captionMeta.className = "lightbox-caption-meta";
+  caption.append(captionName, captionMeta);
+
+  el.append(counter, closeBtn, prev, next, mediaWrap, caption);
+  el.addEventListener("click", e => { if (e.target === el) closeLightbox(); });
+
+  _lb = { el, counter, prev, next, mediaWrap, captionName, captionMeta, idx };
+  document.body.appendChild(el);
+  document.addEventListener("keydown", onLightboxKey);
+  _updateLightbox();
+}
+
+function _updateLightbox() {
+  const { f, group } = _previewableMedia[_lb.idx];
+  const total = _previewableMedia.length;
+
+  _lb.counter.textContent = `${_lb.idx + 1} / ${total}`;
+  _lb.prev.disabled = _lb.idx === 0;
+  _lb.next.disabled = _lb.idx === total - 1;
+  _lb.captionName.textContent = f.filename;
+  _lb.captionMeta.textContent = formatBytes(f.size_bytes);
+
+  _lb.mediaWrap.textContent = "";
+  if (group === "images") {
+    const img = document.createElement("img");
+    img.className = "lightbox-media";
+    img.src = f.preview_url;
+    img.alt = f.filename;
+    _lb.mediaWrap.appendChild(img);
+  } else if (group === "videos") {
+    const video = document.createElement("video");
+    video.className = "lightbox-media";
+    video.src = f.preview_url;
+    video.controls = true;
+    video.autoplay = true;
+    _lb.mediaWrap.appendChild(video);
+  }
+}
+
+function navLightbox(dir) {
+  const newIdx = _lb.idx + dir;
+  if (newIdx < 0 || newIdx >= _previewableMedia.length) return;
+  _lb.idx = newIdx;
+  _updateLightbox();
+}
+
+function onLightboxKey(e) {
+  if (!_lb) return;
+  if (e.key === "ArrowLeft") navLightbox(-1);
+  else if (e.key === "ArrowRight") navLightbox(1);
+  else if (e.key === "Escape") closeLightbox();
+}
+
+function closeLightbox() {
+  if (!_lb) return;
+  document.removeEventListener("keydown", onLightboxKey);
+  _lb.el.remove();
+  _lb = null;
 }
 
 function wireToolbar() {

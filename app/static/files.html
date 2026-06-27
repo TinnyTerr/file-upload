@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title>Files — Oxymoron</title>
   <link rel="stylesheet" href="/static/css/theme.css">
   <script src="/static/js/qrcode.min.js"></script>
@@ -36,7 +37,7 @@
         <button class="mode-btn active" data-mode="files" type="button">Files</button>
         <button class="mode-btn" data-mode="folder" type="button">Folder</button>
         <button class="mode-btn" data-mode="remote" type="button">Remote URL</button>
-        <button class="mode-btn" data-mode="receive" type="button">Receive link</button>
+        <button class="mode-btn" data-mode="receive" type="button">Dropbox</button>
       </div>
 
       <div id="local-upload-panel">
@@ -171,38 +172,51 @@
       </div>
 
       <div id="remote-upload-panel" class="hidden">
-        <div class="form-row">
-          <div class="form-group" style="flex:2">
-            <label>
-              Remote file URL
-              <i class="help-icon" data-tip="Server-side fetch. Only public http/https URLs are allowed; local/private network addresses and private redirects are rejected.">?</i>
-            </label>
-            <input type="url" id="remote-url" placeholder="https://example.com/file.zip">
+        <div class="remote-panel">
+          <div class="remote-panel-label">Server-side fetch</div>
+          <div class="form-row">
+            <div class="form-group" style="flex:2">
+              <label>
+                Remote file URL
+                <i class="help-icon" data-tip="Server-side fetch. Only public http/https URLs are allowed; local/private network addresses and private redirects are rejected.">?</i>
+              </label>
+              <div class="url-input-wrap">
+                <span class="url-prefix">⇒</span>
+                <input type="url" id="remote-url" placeholder="https://example.com/file.zip">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Save as</label>
+              <input type="text" id="remote-name" placeholder="Optional filename">
+            </div>
           </div>
-          <div class="form-group">
-            <label>Save as</label>
-            <input type="text" id="remote-name" placeholder="Optional filename">
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-primary" id="remote-upload-btn" type="button">Fetch &amp; store</button>
+            <span class="text-sm" id="remote-status"></span>
           </div>
-        </div>
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-          <button class="btn btn-primary" id="remote-upload-btn" type="button">Start remote upload</button>
-          <span class="text-sm text-muted" id="remote-status"></span>
         </div>
       </div>
 
       <div id="receive-upload-panel" class="hidden">
-        <p class="text-sm text-muted" style="margin-bottom:14px">Generate a one-use link you can give to someone else so they can upload a single file directly into your account.</p>
-        <div class="form-row">
-          <div class="form-group" style="max-width:200px">
-            <label>
-              Expires after
-              <i class="help-icon" data-tip="The link disables itself after the first successful upload, or after this duration elapses — whichever comes first.">?</i>
-            </label>
-            <input type="text" id="receive-expires" placeholder="1h">
+        <div class="receive-panel">
+          <div class="receive-panel-label">Dropbox</div>
+          <div class="receive-slot">
+            <div class="receive-slot-icon">📥</div>
+            <div class="receive-slot-label">Inbound upload link</div>
+            <div class="receive-slot-sub">Send this link to anyone — they can drop one file straight into your account. The link disables itself after the first upload.</div>
           </div>
+          <div class="form-row" id="receive-create-form" style="display:none;align-items:flex-end">
+            <div class="form-group" style="max-width:200px;margin-bottom:0">
+              <label>
+                Expires after
+                <i class="help-icon" data-tip="The link disables itself after the first successful upload, or after this duration elapses — whichever comes first.">?</i>
+              </label>
+              <input type="text" id="receive-expires" placeholder="1h">
+            </div>
+            <button class="btn btn-primary" id="receive-create-btn" type="button">Create link</button>
+          </div>
+          <div id="receive-result"></div>
         </div>
-        <button class="btn btn-primary" id="receive-create-btn" type="button">Create upload link</button>
-        <div id="receive-result" style="margin-top:14px"></div>
       </div>
     </div>
 
