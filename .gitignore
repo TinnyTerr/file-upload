@@ -185,3 +185,4 @@ app/data/
 pytest_output.txt
 server.log
 /data/
+public/

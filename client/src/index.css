@@ -1,0 +1,195 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
+@import "tailwindcss";
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Oxymoron — redesigned design system (fresh "fancy, functional" direction).
+   Departs from the original AMOLED-black/amber theme: a deep slate canvas with
+   a violet→cyan accent, glassy surfaces, soft glow, and a clean type scale.
+   Tokens are exposed to Tailwind via @theme so utilities like `bg-surface`,
+   `text-accent`, `rounded-card`, `shadow-pop` are generated.
+   ──────────────────────────────────────────────────────────────────────── */
+@theme {
+  /* Surfaces — cool slate, layered */
+  --color-canvas: #0a0c14;
+  --color-canvas-2: #0e111b;
+  --color-surface: #141927;
+  --color-surface-2: #1b2233;
+  --color-surface-3: #232c41;
+
+  /* Borders */
+  --color-line: #28324a;
+  --color-line-strong: #3a466a;
+
+  /* Text */
+  --color-ink: #eef2fb;
+  --color-ink-dim: #aab4cc;
+  --color-ink-muted: #6f7a96;
+
+  /* Accent — electric violet → cyan */
+  --color-accent: #8b7cff;
+  --color-accent-hover: #a394ff;
+  --color-accent-active: #7567f0;
+  --color-accent-ink: #0a0617;
+  --color-accent-soft: #1d1f3a;
+  --color-cyan: #45d6e6;
+  --color-cyan-soft: #103038;
+
+  /* Status */
+  --color-good: #38d39f;
+  --color-good-soft: #0f2e28;
+  --color-warn: #f4c453;
+  --color-warn-soft: #322a12;
+  --color-bad: #ff6b7e;
+  --color-bad-hover: #ff8593;
+  --color-bad-soft: #361923;
+
+  /* Radii */
+  --radius-card: 16px;
+  --radius-pop: 20px;
+  --radius-field: 10px;
+  --radius-pill: 999px;
+
+  /* Shadows / glow */
+  --shadow-pop: 0 24px 60px -18px rgba(0, 0, 0, 0.7);
+  --shadow-soft: 0 10px 30px -14px rgba(0, 0, 0, 0.6);
+  --shadow-glow: 0 0 0 1px rgba(139, 124, 255, 0.25), 0 12px 40px -10px rgba(139, 124, 255, 0.35);
+
+  /* Type */
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Space Grotesk", var(--font-sans);
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Code", monospace;
+
+  /* Easing */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    font-family: var(--font-sans);
+    color: var(--color-ink);
+    background:
+      radial-gradient(1100px 620px at 78% -8%, rgba(139, 124, 255, 0.16), transparent 60%),
+      radial-gradient(900px 540px at 12% 8%, rgba(69, 214, 230, 0.1), transparent 55%),
+      var(--color-canvas);
+    background-attachment: fixed;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: rgba(139, 124, 255, 0.35);
+    color: #fff;
+  }
+
+  /* Inputs inherit font */
+  input,
+  select,
+  textarea,
+  button {
+    font-family: inherit;
+  }
+
+  /* Custom scrollbar */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-surface-3) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--color-surface-3);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+}
+
+@layer components {
+  /* Frosted glass card */
+  .glass {
+    background: color-mix(in oklab, var(--color-surface) 86%, transparent);
+    backdrop-filter: blur(14px);
+    border: 1px solid var(--color-line);
+  }
+
+  /* Monospace eyebrow / data label */
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--color-ink-muted);
+  }
+
+  /* Reveal-in animation (replaces [data-reveal]) */
+  .reveal {
+    animation: reveal-in 0.6s var(--ease-out) both;
+  }
+}
+
+@keyframes reveal-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes sheen {
+  to {
+    transform: translateX(220%);
+  }
+}
