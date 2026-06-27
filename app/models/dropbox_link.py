@@ -20,6 +20,7 @@ class DropboxUploadLink(Base):
     target_directory_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("directories.id"), nullable=True, index=True
     )
+    token_enc: Mapped[bytes | None] = mapped_column(nullable=True)
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)

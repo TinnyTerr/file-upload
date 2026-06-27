@@ -235,6 +235,109 @@ export function showPrompt({ title = "Enter a value", message = "", placeholder 
   });
 }
 
+export function showCopyModal(url, filename, { key = "", keyLabel = "", keyHint = "", hint = "" } = {}) {
+  function _cpBtn(text, label) {
+    const btn = document.createElement("button");
+    btn.className = "btn btn-ghost btn-sm";
+    btn.textContent = label;
+    btn.addEventListener("click", () => {
+      navigator.clipboard.writeText(text).then(() => {
+        const orig = btn.textContent;
+        btn.textContent = "Copied!";
+        setTimeout(() => (btn.textContent = orig), 1400);
+      }).catch(() => {});
+    });
+    return btn;
+  }
+
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+
+  const modal = document.createElement("div");
+  modal.className = "modal";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.style.maxWidth = "480px";
+
+  const titleEl = document.createElement("div");
+  titleEl.className = "modal-title";
+  titleEl.textContent = "Share link";
+
+  const body = document.createElement("div");
+
+  const urlBox = document.createElement("div");
+  urlBox.style.cssText = "background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:9px 12px;font-size:12px;word-break:break-all;font-family:var(--font-mono);color:var(--text-muted);margin-bottom:10px";
+  urlBox.textContent = url;
+  body.appendChild(urlBox);
+
+  const btnRow = document.createElement("div");
+  btnRow.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px";
+  const openBtn = document.createElement("button");
+  openBtn.className = "btn btn-ghost btn-sm";
+  openBtn.textContent = "Open ↗";
+  openBtn.addEventListener("click", () => window.open(url, "_blank", "noopener"));
+  btnRow.append(
+    _cpBtn(url, "Copy link"),
+    _cpBtn(`[${filename}](${url})`, "Markdown"),
+    _cpBtn(`<a href="${url}">${filename}</a>`, "HTML"),
+    openBtn,
+  );
+  body.appendChild(btnRow);
+
+  if (hint) {
+    const hintEl = document.createElement("div");
+    hintEl.style.cssText = "font-size:12px;color:var(--warning);margin-top:10px";
+    hintEl.textContent = hint;
+    body.appendChild(hintEl);
+  }
+
+  if (key) {
+    const sep = document.createElement("div");
+    sep.style.cssText = "border-top:1px solid var(--border);margin:14px 0 12px";
+    body.appendChild(sep);
+
+    if (keyHint) {
+      const kh = document.createElement("div");
+      kh.style.cssText = "font-size:12px;color:var(--warning);margin-bottom:8px";
+      kh.textContent = keyHint;
+      body.appendChild(kh);
+    }
+
+    const kl = document.createElement("div");
+    kl.className = "text-xs text-muted";
+    kl.style.marginBottom = "4px";
+    kl.textContent = keyLabel || "Decryption key";
+    body.appendChild(kl);
+
+    const keyBox = document.createElement("div");
+    keyBox.style.cssText = "background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:8px 12px;font-size:12px;word-break:break-all;font-family:var(--font-mono);color:var(--text-muted);margin-bottom:8px";
+    keyBox.textContent = key;
+    body.appendChild(keyBox);
+
+    body.appendChild(_cpBtn(key, "Copy key"));
+  }
+
+  const footer = document.createElement("div");
+  footer.className = "modal-footer";
+  const doneBtn = document.createElement("button");
+  doneBtn.className = "btn btn-primary";
+  doneBtn.textContent = "Done";
+  const close = () => {
+    overlay.classList.add("closing");
+    setTimeout(() => overlay.remove(), 170);
+  };
+  doneBtn.addEventListener("click", close);
+  footer.appendChild(doneBtn);
+
+  modal.append(titleEl, body, footer);
+  overlay.appendChild(modal);
+  overlay.addEventListener("mousedown", e => { if (e.target === overlay) close(); });
+  const onKey = e => { if (e.key === "Escape") { e.preventDefault(); close(); document.removeEventListener("keydown", onKey); } };
+  document.addEventListener("keydown", onKey);
+  document.body.appendChild(overlay);
+  requestAnimationFrame(() => doneBtn.focus());
+}
+
 // ── Floating tooltip engine ────────────────────────────────────────────────
 // One shared element follows the hovered/focused [data-tooltip] (and legacy
 // .help-icon[data-tip]) target, positioned to stay on-screen.

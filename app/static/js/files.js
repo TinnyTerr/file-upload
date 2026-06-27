@@ -1,4 +1,4 @@
-import { apiFetch, csrf, user, requireAuth, setupNav, formatBytes, formatDate, parseDuration, showToast, showConfirm, showPrompt, observeReveals } from "./api.js";
+import { apiFetch, csrf, user, requireAuth, setupNav, formatBytes, formatDate, parseDuration, showToast, showConfirm, showPrompt, observeReveals, showCopyModal } from "./api.js";
 
 if (!requireAuth()) throw new Error("not authenticated");
 setupNav("files");
@@ -68,6 +68,7 @@ function setMode(mode) {
       dropSub.textContent = "Select a folder — it becomes one shared page with a download-all link";
     }
   }
+  if (mode === "receive") loadActiveDropbox();
 }
 
 // ── File selection ────────────────────────────────────────────────────────
@@ -302,19 +303,22 @@ document.getElementById("remote-upload-btn")?.addEventListener("click", async ()
     return;
   }
   btn.disabled = true;
-  status.textContent = "Fetching from server...";
+  status.className = "text-sm remote-status-running";
+  status.textContent = "Fetching…";
   const body = { url };
   if (nameEl.value.trim()) body.original_filename = nameEl.value.trim();
   const resp = await apiFetch("/files/remote-upload", { method: "POST", json: body });
   btn.disabled = false;
   if (!resp.ok) {
     const d = await resp.json().catch(() => ({}));
-    status.textContent = "";
-    showToast(d.detail || "Remote upload failed.", "error");
+    status.className = "text-sm remote-status-error";
+    status.textContent = d.detail || "Remote upload failed.";
     return;
   }
   const result = await resp.json();
-  status.textContent = "";
+  status.className = "text-sm remote-status-done";
+  status.textContent = "Stored ✓";
+  setTimeout(() => { status.textContent = ""; status.className = "text-sm text-muted"; }, 3000);
   showSuccessModal(result, "none", null);
   urlEl.value = "";
   nameEl.value = "";
@@ -341,16 +345,69 @@ document.getElementById("receive-create-btn")?.addEventListener("click", async (
     showToast(d.detail || "Failed to create upload link.", "error");
     return;
   }
-  const link = await resp.json();
-  const resultEl = document.getElementById("receive-result");
-  resultEl.textContent = "";
-  const hint = document.createElement("div");
-  hint.className = "text-xs text-muted";
-  hint.style.marginBottom = "8px";
-  hint.textContent = "Share this link. One upload only — it disables after the first file is received.";
-  resultEl.appendChild(hint);
-  resultEl.appendChild(makeCopyRow(link.url, "Upload link"));
+  loadActiveDropbox();
 });
+
+async function loadActiveDropbox() {
+  const resultEl = document.getElementById("receive-result");
+  const createForm = document.getElementById("receive-create-form");
+  createForm.style.display = "none";
+  resultEl.textContent = "";
+
+  const loadingNote = document.createElement("div");
+  loadingNote.className = "text-sm text-muted";
+  loadingNote.style.marginTop = "12px";
+  loadingNote.textContent = "Checking for active link…";
+  resultEl.appendChild(loadingNote);
+
+  let resp;
+  try { resp = await apiFetch("/dropbox-links/active"); } catch { resp = null; }
+  resultEl.textContent = "";
+
+  if (resp && resp.ok) {
+    const link = await resp.json();
+    const box = document.createElement("div");
+    box.className = "receive-result-box";
+
+    const title = document.createElement("div");
+    title.className = "receive-result-title";
+    title.textContent = "Active dropbox link";
+
+    const hint = document.createElement("div");
+    hint.className = "receive-hint";
+    const exp = link.expires_at ? `expires ${new Date(link.expires_at).toLocaleString()}` : "no expiry";
+    hint.textContent = `One-use only — ${exp}.`;
+
+    const copyRow = makeCopyRow(link.url, "Upload link");
+    copyRow.style.marginTop = "10px";
+
+    const revokeBtn = document.createElement("button");
+    revokeBtn.className = "btn btn-ghost btn-sm";
+    revokeBtn.style.cssText = "color:var(--danger);margin-top:10px";
+    revokeBtn.textContent = "Revoke link";
+    revokeBtn.addEventListener("click", async () => {
+      const ok = await showConfirm({
+        title: "Revoke dropbox link?",
+        message: "The link will stop working immediately.",
+        confirmText: "Revoke",
+        danger: true,
+      });
+      if (!ok) return;
+      const r = await apiFetch(`/dropbox-links/${link.id}`, { method: "DELETE" });
+      if (r.ok || r.status === 204) {
+        showToast("Link revoked.");
+        loadActiveDropbox();
+      } else {
+        showToast("Failed to revoke.", "error");
+      }
+    });
+
+    box.append(title, hint, copyRow, revokeBtn);
+    resultEl.appendChild(box);
+  } else {
+    createForm.style.display = "";
+  }
+}
 
 async function startUpload() {
   const maxUsesRaw   = document.getElementById("max-uses").value.trim();
@@ -536,54 +593,70 @@ function directoryShareUrl(dir, encMode, sharedKeyBytes) {
 }
 
 function showDirectorySuccess(dir, encMode, sharedKeyBytes) {
+  document.querySelector("#success-modal .modal-title").textContent = "Folder shared";
   const body = document.getElementById("success-body");
   body.textContent = "";
-  document.querySelector("#success-modal .modal-title").textContent = "Folder shared";
-
-  const shareUrl = directoryShareUrl(dir, encMode, sharedKeyBytes);
-
-  const lead = document.createElement("div");
-  lead.className = "dialog-msg";
-  lead.style.marginBottom = "12px";
-  lead.textContent = "Anyone with this link can browse the folder and download everything as a zip.";
-  body.appendChild(lead);
-
-  const row = document.createElement("div");
-  row.className = "copy-row";
-  const urlSpan = document.createElement("span");
-  urlSpan.className = "copy-row-text";
-  urlSpan.style.cssText = "font-size:12px;word-break:break-all";
-  urlSpan.textContent = shareUrl;
-  const copyBtn = document.createElement("button");
-  copyBtn.className = "btn btn-ghost btn-sm";
-  copyBtn.textContent = "Copy";
-  copyBtn.addEventListener("click", () => {
-    navigator.clipboard.writeText(shareUrl).catch(() => {});
-    copyBtn.textContent = "Copied!";
-    copyBtn.classList.add("copied");
-    setTimeout(() => { copyBtn.textContent = "Copy"; copyBtn.classList.remove("copied"); }, 1500);
-  });
-  row.append(urlSpan, copyBtn);
-  body.appendChild(row);
-
-  if (encMode === "client" && sharedKeyBytes) {
-    const hint = document.createElement("div");
-    hint.className = "hint";
-    hint.style.cssText = "color:var(--warning);margin-top:8px";
-    hint.textContent = "⚠ End-to-end encrypted. The key (#ek=) is in this URL only — save it. It cannot be recovered from the server.";
-    body.appendChild(hint);
-  } else if (encMode === "server") {
-    const hint = document.createElement("div");
-    hint.className = "hint";
-    hint.style.cssText = "color:var(--warning);margin-top:8px";
-    hint.textContent = "🔐 Server-encrypted. The access key (?ek=) is required — share the full URL. You can also recover it later from your folder list.";
-    body.appendChild(hint);
-  }
 
   const qrWrap = document.getElementById("qr-wrap");
   qrWrap.textContent = "";
+
+  const shareUrl = directoryShareUrl(dir, encMode, sharedKeyBytes);
+  const filename = dir.title || "folder";
+
+  const qrContainer = document.createElement("div");
+  qrContainer.style.cssText = "text-align:center;margin-bottom:16px";
   if (typeof QRCode !== "undefined") {
-    new QRCode(qrWrap, { text: shareUrl, width: 120, height: 120, colorDark: "#e7efe9", colorLight: "#0a1416" });
+    new QRCode(qrContainer, { text: shareUrl, width: 160, height: 160, colorDark: "#e7efe9", colorLight: "#0a1416" });
+  }
+  body.appendChild(qrContainer);
+
+  const nameEl = document.createElement("div");
+  nameEl.style.cssText = "text-align:center;font-size:13px;font-weight:500;margin-bottom:4px;word-break:break-all";
+  nameEl.textContent = filename;
+  body.appendChild(nameEl);
+
+  const lead = document.createElement("div");
+  lead.style.cssText = "text-align:center;font-size:12px;color:var(--text-muted);margin-bottom:12px";
+  lead.textContent = "Anyone with this link can browse and download all files.";
+  body.appendChild(lead);
+
+  const mk = (label, text) => {
+    const b = document.createElement("button");
+    b.className = "btn btn-ghost btn-sm";
+    b.textContent = label;
+    b.addEventListener("click", () => {
+      navigator.clipboard.writeText(text).catch(() => {});
+      b.textContent = "Copied!";
+      b.classList.add("copied");
+      setTimeout(() => { b.textContent = label; b.classList.remove("copied"); }, 1500);
+    });
+    return b;
+  };
+
+  const btnRow = document.createElement("div");
+  btnRow.style.cssText = "display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin-bottom:8px";
+  const openBtn = document.createElement("button");
+  openBtn.className = "btn btn-ghost btn-sm";
+  openBtn.textContent = "Open ↗";
+  openBtn.addEventListener("click", () => window.open(shareUrl, "_blank", "noopener"));
+  btnRow.append(
+    mk("Copy link", shareUrl),
+    mk("Markdown", `[${filename}](${shareUrl})`),
+    mk("HTML", `<a href="${shareUrl}">${filename}</a>`),
+    openBtn,
+  );
+  body.appendChild(btnRow);
+
+  if (encMode === "client" && sharedKeyBytes) {
+    const hint = document.createElement("div");
+    hint.style.cssText = "font-size:12px;color:var(--warning);margin-top:10px";
+    hint.textContent = "⚠ End-to-end encrypted — the key (#ek=) is in this URL only. Save it; it cannot be recovered from the server.";
+    body.appendChild(hint);
+  } else if (encMode === "server") {
+    const hint = document.createElement("div");
+    hint.style.cssText = "font-size:12px;color:var(--warning);margin-top:10px";
+    hint.textContent = "🔐 Server-encrypted — the access key (?ek=) in this URL is required. Share the full URL.";
+    body.appendChild(hint);
   }
 
   const modal = document.getElementById("success-modal");
@@ -749,40 +822,83 @@ function showGeneratedLinkModal(title, url, { subtitle = "", filename = "link" }
 }
 
 function showSuccessModal(data, encMode, clientKeyBytes) {
+  document.querySelector("#success-modal .modal-title").textContent = "Upload complete";
   const body = document.getElementById("success-body");
   body.textContent = "";
-  document.querySelector("#success-modal .modal-title").textContent = "Upload complete";
+
+  const qrWrap = document.getElementById("qr-wrap");
+  qrWrap.textContent = "";
 
   const shareUrl = fullShareUrl(data, encMode, clientKeyBytes);
-  const noKeyUrl = data.url || shareUrl.split(/[?#]ek=/)[0];
+  const filename = data.original_filename || "file";
   const keyOnly = encMode === "client" && clientKeyBytes
     ? b64urlEncode(clientKeyBytes)
     : encMode === "server" && data.access_key ? data.access_key : "";
 
-  addActionRow(body, "Full", shareUrl, { filename: data.original_filename || "file", open: true });
+  // QR centered
+  const qrContainer = document.createElement("div");
+  qrContainer.style.cssText = "text-align:center;margin-bottom:16px";
+  if (typeof QRCode !== "undefined") {
+    new QRCode(qrContainer, { text: shareUrl, width: 160, height: 160, colorDark: "#e2e8f0", colorLight: "#1a1f2e" });
+  }
+  body.appendChild(qrContainer);
+
+  const nameEl = document.createElement("div");
+  nameEl.style.cssText = "text-align:center;font-size:13px;font-weight:500;margin-bottom:12px;word-break:break-all";
+  nameEl.textContent = filename;
+  body.appendChild(nameEl);
+
+  const mk = (label, text) => {
+    const b = document.createElement("button");
+    b.className = "btn btn-ghost btn-sm";
+    b.textContent = label;
+    b.addEventListener("click", () => copyValue(text, b));
+    return b;
+  };
+
+  const btnRow = document.createElement("div");
+  btnRow.style.cssText = "display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin-bottom:8px";
+  const openBtn = document.createElement("button");
+  openBtn.className = "btn btn-ghost btn-sm";
+  openBtn.textContent = "Open ↗";
+  openBtn.addEventListener("click", () => window.open(shareUrl, "_blank", "noopener"));
+  btnRow.append(
+    mk("Copy link", shareUrl),
+    mk("Markdown", `[${filename}](${shareUrl})`),
+    mk("HTML", `<a href="${shareUrl}">${filename}</a>`),
+    openBtn,
+  );
+  body.appendChild(btnRow);
+
   if (keyOnly) {
-    addActionRow(body, "No key", noKeyUrl, { filename: data.original_filename || "file", open: true });
-    addActionRow(body, "Key", keyOnly, { filename: "key" });
+    const sep = document.createElement("div");
+    sep.style.cssText = "border-top:1px solid var(--border);margin:14px 0 12px";
+    body.appendChild(sep);
+
+    const kLabel = document.createElement("div");
+    kLabel.className = "text-xs text-muted";
+    kLabel.style.marginBottom = "4px";
+    kLabel.textContent = encMode === "server" ? "Access key (?ek=)" : "Decryption key (#ek=)";
+    body.appendChild(kLabel);
+
+    const keyBox = document.createElement("div");
+    keyBox.style.cssText = "background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius);padding:8px 12px;font-size:12px;word-break:break-all;font-family:var(--font-mono);color:var(--text-muted);margin-bottom:8px";
+    keyBox.textContent = keyOnly;
+    body.appendChild(keyBox);
+
+    body.appendChild(mk("Copy key", keyOnly));
   }
 
   if (encMode === "client" && clientKeyBytes) {
     const hint = document.createElement("div");
-    hint.className = "hint";
-    hint.style.cssText = "color:var(--warning);margin-top:8px";
-    hint.textContent = "⚠ End-to-end encrypted. The key (#ek=) is in this URL only — save it. It cannot be recovered from the server.";
+    hint.style.cssText = "font-size:12px;color:var(--warning);margin-top:10px";
+    hint.textContent = "⚠ End-to-end encrypted — the key above is in this URL only. Save it; it cannot be recovered from the server.";
     body.appendChild(hint);
   } else if (encMode === "server") {
     const hint = document.createElement("div");
-    hint.className = "hint";
-    hint.style.cssText = "color:var(--warning);margin-top:8px";
-    hint.textContent = "🔐 Server-side encrypted. The access key (?ek=) is required to download — share the full URL. (You can also recover it later from your Files list.)";
+    hint.style.cssText = "font-size:12px;color:var(--warning);margin-top:10px";
+    hint.textContent = "🔐 Server-encrypted — the access key above is required to download. Share the full URL or key separately.";
     body.appendChild(hint);
-  }
-
-  const qrWrap = document.getElementById("qr-wrap");
-  qrWrap.textContent = "";
-  if (typeof QRCode !== "undefined") {
-    new QRCode(qrWrap, { text: shareUrl, width: 120, height: 120, colorDark: "#e2e8f0", colorLight: "#1a1f2e" });
   }
 
   document.getElementById("success-modal").classList.remove("hidden");
@@ -1462,16 +1578,17 @@ function renderLinkRow(lk, f) {
   copyBtn.className = "btn btn-ghost btn-sm";
   copyBtn.textContent = "Copy";
   copyBtn.addEventListener("click", () => {
-    copyValue(url, copyBtn);
+    const key = f && f.encryption_mode === "server" && f.access_key ? f.access_key : "";
+    showCopyModal(url, f?.original_filename || "file", {
+      key,
+      keyLabel: f?.encryption_mode === "server" ? "Access key (?ek=)" : "",
+      keyHint: key ? "🔐 Server-encrypted — this key is required to download." : "",
+      hint: f?.encryption_mode === "client"
+        ? "🔒 End-to-end encrypted — key not stored server-side. Append your #ek= to this URL before sharing."
+        : "",
+    });
   });
   row.appendChild(copyBtn);
-
-  const copyMdBtn = document.createElement("button");
-  copyMdBtn.className = "btn btn-ghost btn-sm";
-  copyMdBtn.textContent = "MD";
-  copyMdBtn.title = "Copy as Markdown link";
-  copyMdBtn.addEventListener("click", () => copyValue(`[${f.original_filename}](${url})`, copyMdBtn));
-  row.appendChild(copyMdBtn);
 
   const openBtn = document.createElement("button");
   openBtn.className = "btn btn-ghost btn-sm";

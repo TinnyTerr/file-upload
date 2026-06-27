@@ -1,4 +1,4 @@
-import { apiFetch, requireAuth, requireMaster, setupNav, formatBytes, formatDate, parseSize, parseDuration, showToast, showConfirm, showPrompt } from "./api.js";
+import { apiFetch, requireAuth, requireMaster, setupNav, formatBytes, formatDate, parseSize, parseDuration, showToast, showConfirm, showPrompt, showCopyModal } from "./api.js";
 
 if (!requireAuth()) throw new Error("not authenticated");
 if (!requireMaster()) throw new Error("not master");
@@ -46,7 +46,6 @@ function pctOf(value, total) {
 
 function bar(label, used, total, tip, tone = "info") {
   const wrap = document.createElement("div");
-  wrap.style.marginBottom = "10px";
   setTooltip(wrap, tip);
   const pct = pctOf(used, total);
   const lbl = document.createElement("div");
@@ -56,10 +55,15 @@ function bar(label, used, total, tip, tone = "info") {
   name.textContent = label;
   const val = document.createElement("span");
   val.className = "chart-row-value";
-  val.textContent = `${formatBytes(used)} / ${formatBytes(total)} (${pct.toFixed(1)}%)`;
+  val.textContent = `${formatBytes(used)} / ${formatBytes(total)}`;
+  const pctSpan = document.createElement("span");
+  pctSpan.style.cssText = "font-family:var(--font-mono);font-size:11px;color:var(--text-muted);margin-left:6px;";
+  pctSpan.textContent = `${pct.toFixed(1)}%`;
+  val.appendChild(pctSpan);
   lbl.append(name, val);
   const q = document.createElement("div");
   q.className = "quota-bar";
+  q.style.height = "7px";
   const f = document.createElement("div");
   let cls = "quota-bar-fill info";
   if (tone === "capacity") cls = "quota-bar-fill capacity" + (pct >= 90 ? " danger" : pct >= 70 ? " warn" : "");
@@ -74,18 +78,17 @@ function renderStorageRing(d) {
   const el = document.getElementById("storage-ring");
   el.textContent = "";
   const pct = pctOf(d.used_bytes, d.global_storage_quota_bytes);
-  const radius = 48;
+  const radius = 51;
   const circumference = 2 * Math.PI * radius;
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 120 120");
-  for (const cls of ["storage-ring-track", "storage-ring-fill"]) {
+  svg.setAttribute("viewBox", "0 0 128 128");
+  const cx = "64", cy = "64", r = String(radius);
+  for (const cls of ["storage-ring-track", "storage-ring-glow", "storage-ring-fill"]) {
     const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
     c.setAttribute("class", cls);
-    c.setAttribute("cx", "60");
-    c.setAttribute("cy", "60");
-    c.setAttribute("r", String(radius));
-    if (cls === "storage-ring-fill") {
-      c.setAttribute("stroke-dasharray", `${(circumference * pct / 100).toFixed(1)} ${circumference.toFixed(1)}`);
+    c.setAttribute("cx", cx); c.setAttribute("cy", cy); c.setAttribute("r", r);
+    if (cls === "storage-ring-fill" || cls === "storage-ring-glow") {
+      c.setAttribute("stroke-dasharray", `0 ${circumference.toFixed(1)}`);
     }
     svg.appendChild(c);
   }
@@ -93,13 +96,32 @@ function renderStorageRing(d) {
   label.className = "storage-ring-label";
   const main = document.createElement("div");
   main.className = "storage-ring-main";
-  main.textContent = `${pct.toFixed(1)}%`;
+  main.textContent = "0%";
   const sub = document.createElement("div");
   sub.className = "storage-ring-sub";
   sub.textContent = "used";
   label.append(main, sub);
   el.append(svg, label);
   setTooltip(el, `${formatBytes(d.used_bytes)} used of ${formatBytes(d.global_storage_quota_bytes)} global storage cap.`);
+  // Animate the ring fill and number after paint
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const fill = svg.querySelector(".storage-ring-fill");
+    const glow = svg.querySelector(".storage-ring-glow");
+    const arc = (circumference * pct / 100).toFixed(1);
+    const da = `${arc} ${circumference.toFixed(1)}`;
+    fill.setAttribute("stroke-dasharray", da);
+    if (glow) glow.setAttribute("stroke-dasharray", da);
+    const start = performance.now();
+    const dur = 900;
+    const tick = (now) => {
+      const t = Math.min(1, (now - start) / dur);
+      const eased = 1 - Math.pow(1 - t, 3);
+      main.textContent = `${(pct * eased).toFixed(1)}%`;
+      if (t < 1) requestAnimationFrame(tick);
+      else main.textContent = `${pct.toFixed(1)}%`;
+    };
+    requestAnimationFrame(tick);
+  }));
 }
 
 function metricTile(label, value, sub, tip) {
@@ -116,6 +138,21 @@ function metricTile(label, value, sub, tip) {
   s.className = "metric-tile-sub";
   s.textContent = sub || "";
   card.append(l, v, s);
+  // Count-up for pure numbers
+  const raw = parseFloat(String(value).replace(/,/g, ""));
+  if (!isNaN(raw) && raw > 0 && String(value) === raw.toLocaleString()) {
+    v.textContent = "0";
+    const dur = Math.min(900, 300 + raw * 0.4);
+    const start = performance.now();
+    const tick = (now) => {
+      const t = Math.min(1, (now - start) / dur);
+      const eased = 1 - Math.pow(1 - t, 3);
+      v.textContent = Math.round(raw * eased).toLocaleString();
+      if (t < 1) requestAnimationFrame(tick);
+      else v.textContent = value;
+    };
+    requestAnimationFrame(tick);
+  }
   return card;
 }
 
@@ -224,12 +261,14 @@ function renderBarList(id, rows, { bytes = false } = {}) {
     el.appendChild(empty);
     return;
   }
-  for (const row of filtered.slice(0, 8)) {
+  const items = filtered.slice(0, 8);
+  items.forEach((row, i) => {
+    let wrap;
     if (bytes) {
-      el.appendChild(bar(row.label, row.value || 0, row.total || 0, row.tip, row.tone || "info"));
+      wrap = bar(row.label, row.value || 0, row.total || 0, row.tip, row.tone || "info");
     } else {
       const total = row.total || 1;
-      const wrap = document.createElement("div");
+      wrap = document.createElement("div");
       setTooltip(wrap, row.tip);
       const head = document.createElement("div");
       head.className = "chart-row-head";
@@ -243,13 +282,30 @@ function renderBarList(id, rows, { bytes = false } = {}) {
       const q = document.createElement("div");
       q.className = "quota-bar";
       const f = document.createElement("div");
-      f.className = "quota-bar-fill info";
+      f.className = row.color ? "quota-bar-fill" : "quota-bar-fill info";
+      if (row.color) f.style.background = row.color;
       f.style.width = pctOf(row.value || 0, total).toFixed(1) + "%";
+      f.style.animationDelay = `${i * 60}ms`;
       q.appendChild(f);
       wrap.append(head, q);
-      el.appendChild(wrap);
     }
-  }
+    wrap.style.animationDelay = `${i * 40}ms`;
+    el.appendChild(wrap);
+  });
+  // Stagger animate bar fills: set to 0, then allow CSS transition to target width
+  requestAnimationFrame(() => {
+    el.querySelectorAll(".quota-bar-fill").forEach((f, i) => {
+      const target = f.style.width;
+      f.style.transition = "none";
+      f.style.width = "0";
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          f.style.transition = `width ${0.6 + i * 0.04}s cubic-bezier(0.16,1,0.3,1) ${i * 55}ms`;
+          f.style.width = target;
+        });
+      });
+    });
+  });
 }
 
 function renderStatusPills(id, counts, labels = {}) {
@@ -268,9 +324,15 @@ function renderStatusPills(id, counts, labels = {}) {
     const pill = document.createElement("div");
     pill.className = "status-pill";
     setTooltip(pill, info.tip);
+    const color = info.color || "var(--text-dim)";
+    pill.style.cssText = `border-left: 2px solid ${color}; background: var(--surface-2);`;
     const strong = document.createElement("strong");
-    strong.textContent = Number(value || 0).toLocaleString();
-    if (info.color) strong.style.color = info.color;
+    const num = Number(value || 0);
+    strong.textContent = num.toLocaleString();
+    strong.style.color = color;
+    if (num > 0 && color !== "var(--text-muted)" && color !== "var(--text-dim)") {
+      strong.style.textShadow = `0 0 18px ${color}60`;
+    }
     const span = document.createElement("span");
     span.textContent = info.label || key.replaceAll("_", " ");
     pill.append(strong, span);
@@ -306,7 +368,7 @@ async function loadDetails() {
     value: row.stored_bytes || 0,
     total: typeTotal || 1,
     tip: `${row.count} file(s), ${formatBytes(row.stored_bytes || 0)} stored.`,
-    tone: "info",
+    color: typeColor(row.content_type),
   })), { bytes: true });
 
   renderStatusPills("lifecycle-chart", d.lifecycle_counts, {
@@ -744,22 +806,68 @@ const selectedDirectories = new Set();
 const selectedKeys = new Set();
 
 function selectionBox(kind, id, label) {
-  const wrap = document.createElement("span");
-  wrap.className = "select-cell";
+  const wrap = document.createElement("label");
+  wrap.className = "select-cell custom-check";
+  wrap.addEventListener("click", e => e.stopPropagation());
   const input = document.createElement("input");
   input.type = "checkbox";
   input.setAttribute("aria-label", label);
-  setTooltip(input, label);
+  setTooltip(wrap, label);
   const set = kind === "files" ? selectedFiles : kind === "directories" ? selectedDirectories : selectedKeys;
   input.checked = set.has(id);
-  input.addEventListener("click", e => e.stopPropagation());
   input.addEventListener("change", () => {
     if (input.checked) set.add(id);
     else set.delete(id);
     loadDangerZone();
+    updateBulkBar();
   });
-  wrap.appendChild(input);
+  const box = document.createElement("span");
+  box.className = "custom-check-box";
+  box.innerHTML = '<svg viewBox="0 0 10 8" xmlns="http://www.w3.org/2000/svg"><polyline points="1.5,4 4,6.5 8.5,1.5"/></svg>';
+  wrap.append(input, box);
   return wrap;
+}
+
+function typeColor(ct) {
+  if (!ct) return null;
+  if (ct.startsWith("image/")) return "#a78bfa";
+  if (ct.startsWith("video/")) return "#60a5fa";
+  if (ct.startsWith("audio/")) return "#34d399";
+  if (ct === "application/pdf") return "#f87171";
+  if (ct.startsWith("text/")) return "#fbbf24";
+  if (/zip|tar|gzip|7z|rar/.test(ct)) return "#fb923c";
+  return null;
+}
+
+function updateBulkBar() {
+  const bar = document.getElementById("bulk-action-bar");
+  if (!bar) return;
+  const fileCount = selectedFiles.size;
+  const dirCount = selectedDirectories.size;
+  const keyCount = selectedKeys.size;
+  const total = fileCount + dirCount + keyCount;
+  bar.classList.toggle("visible", total > 0);
+  document.getElementById("bulk-bar-count").textContent = total;
+  const actionsEl = document.getElementById("bulk-bar-actions");
+  actionsEl.textContent = "";
+  const addBtn = (action, label, danger) => {
+    const btn = document.createElement("button");
+    btn.className = `btn-bulk ${danger ? "btn-bulk-danger" : "btn-bulk-neutral"}`;
+    btn.textContent = label;
+    btn.dataset.bulkAction = action;
+    btn.addEventListener("click", () => runBulkAction(btn));
+    actionsEl.appendChild(btn);
+  };
+  if (fileCount > 0) {
+    addBtn("archive_files", "Archive", false);
+    addBtn("unarchive_files", "Unarchive", false);
+    addBtn("delete_files", "Delete files", true);
+  }
+  if (dirCount > 0) addBtn("delete_directories", "Delete folders", true);
+  if (keyCount > 0) {
+    addBtn("revoke_api_keys", "Revoke keys", true);
+    addBtn("reset_api_key_ips", "Reset IPs", false);
+  }
 }
 
 // Encryption badge for a file, or null when unencrypted.
@@ -926,13 +1034,14 @@ async function loadAdminFiles() {
       const copyBtn = document.createElement("button");
       copyBtn.className = "btn btn-ghost btn-sm";
       copyBtn.textContent = "Copy";
-      setTooltip(copyBtn, "Copy this folder's share URL.");
-      copyBtn.addEventListener("click", () => {
-        navigator.clipboard.writeText(adminDirectoryUrl(d)).then(() => {
-          copyBtn.textContent = "Copied!";
-          setTimeout(() => (copyBtn.textContent = "Copy"), 1500);
-        }).catch(() => {});
-      });
+      setTooltip(copyBtn, "Open share options for this folder.");
+      copyBtn.addEventListener("click", () => showCopyModal(adminDirectoryUrl(d), d.title, {
+        hint: d.encryption_mode === "client"
+          ? "🔒 End-to-end encrypted — the #ek= key is embedded in this URL."
+          : d.encryption_mode === "server"
+          ? "🔐 Server-encrypted — the ?ek= access key is embedded in this URL."
+          : "",
+      }));
 
       const delBtn = document.createElement("button");
       delBtn.className = "btn btn-danger btn-sm";
@@ -1123,19 +1232,19 @@ function buildLinkPanel(container, f) {
       const copyBtn = document.createElement("button");
       copyBtn.className = "btn btn-ghost btn-sm";
       copyBtn.textContent = "Copy";
-      setTooltip(copyBtn, "Copy this share URL.");
-      copyBtn.addEventListener("click", () => copyAdminText(url, copyBtn));
-      const copyMdBtn = document.createElement("button");
-      copyMdBtn.className = "btn btn-ghost btn-sm";
-      copyMdBtn.textContent = "MD";
-      setTooltip(copyMdBtn, "Copy as a Markdown link.");
-      copyMdBtn.addEventListener("click", () => copyAdminText(`[${f.original_filename}](${url})`, copyMdBtn));
+      setTooltip(copyBtn, "Open share options for this link.");
+      copyBtn.addEventListener("click", () => showCopyModal(url, f.original_filename, {
+        key: f.encryption_mode === "server" && f.access_key ? f.access_key : "",
+        keyLabel: f.encryption_mode === "server" ? "Access key (?ek=)" : "",
+        keyHint: f.encryption_mode === "server" && f.access_key ? "🔐 Server-encrypted — this key is required to download." : "",
+        hint: f.encryption_mode === "client" ? "🔒 End-to-end encrypted — key not stored server-side. Append #ek= before sharing." : "",
+      }));
       const openBtn = document.createElement("button");
       openBtn.className = "btn btn-ghost btn-sm";
       openBtn.textContent = "Open";
       setTooltip(openBtn, "Open this link in a new tab.");
       openBtn.addEventListener("click", () => window.open(url, "_blank", "noopener"));
-      lrow.append(copyBtn, copyMdBtn, openBtn);
+      lrow.append(copyBtn, openBtn);
 
       if (!lk.active && !expired && !usedUp) {
         const reactBtn = document.createElement("button");
@@ -1161,14 +1270,13 @@ function buildLinkPanel(container, f) {
       const copyBtn = document.createElement("button");
       copyBtn.className = "btn btn-ghost btn-sm";
       copyBtn.textContent = "Copy";
-      setTooltip(copyBtn, "Copy this share URL.");
-      copyBtn.addEventListener("click", () => copyAdminText(url, copyBtn));
-
-      const copyMdBtn = document.createElement("button");
-      copyMdBtn.className = "btn btn-ghost btn-sm";
-      copyMdBtn.textContent = "MD";
-      setTooltip(copyMdBtn, "Copy as a Markdown link.");
-      copyMdBtn.addEventListener("click", () => copyAdminText(`[${f.original_filename}](${url})`, copyMdBtn));
+      setTooltip(copyBtn, "Open share options for this link.");
+      copyBtn.addEventListener("click", () => showCopyModal(url, f.original_filename, {
+        key: f.encryption_mode === "server" && f.access_key ? f.access_key : "",
+        keyLabel: f.encryption_mode === "server" ? "Access key (?ek=)" : "",
+        keyHint: f.encryption_mode === "server" && f.access_key ? "🔐 Server-encrypted — this key is required to download." : "",
+        hint: f.encryption_mode === "client" ? "🔒 End-to-end encrypted — key not stored server-side. Append #ek= before sharing." : "",
+      }));
 
       const openBtn = document.createElement("button");
       openBtn.className = "btn btn-ghost btn-sm";
@@ -1199,7 +1307,7 @@ function buildLinkPanel(container, f) {
       setTooltip(delLinkBtn, "Permanently delete this share link. The file remains stored.");
       delLinkBtn.addEventListener("click", () => deleteAdminLink(lk.id));
 
-      lrow.append(dot, slugSpan, ...(clientWarn ? [clientWarn] : []), uses, exp, copyBtn, copyMdBtn, openBtn, editBtn, deactBtn, delLinkBtn);
+      lrow.append(dot, slugSpan, ...(clientWarn ? [clientWarn] : []), uses, exp, copyBtn, openBtn, editBtn, deactBtn, delLinkBtn);
     }
 
     container.appendChild(lrow);
@@ -1319,7 +1427,7 @@ function idsForBulkAction(action) {
 }
 
 function loadDangerZone() {
-  document.querySelectorAll("[data-bulk-action]").forEach(btn => {
+  document.querySelectorAll(".tab-panel [data-bulk-action]").forEach(btn => {
     const meta = BULK_META[btn.dataset.bulkAction] || {};
     const ids = idsForBulkAction(btn.dataset.bulkAction);
     const requiresSelection = !!meta.selectedKind;
@@ -1328,14 +1436,11 @@ function loadDangerZone() {
     if (sub && requiresSelection) {
       const label = meta.selectedKind === "directories" ? "folder" : "file";
       sub.textContent = ids.length
-        ? `${ids.length} selected ${label}${ids.length !== 1 ? "s" : ""}.`
-        : `Requires checked ${label}s in the Files tab.`;
-    } else if (sub && ["revoke_api_keys", "reset_api_key_ips"].includes(btn.dataset.bulkAction)) {
-      sub.textContent = ids.length
-        ? `${ids.length} selected key${ids.length !== 1 ? "s" : ""}.`
-        : meta.description;
+        ? `${ids.length} ${label}${ids.length !== 1 ? "s" : ""} selected.`
+        : `No ${label}s selected.`;
     }
   });
+  updateBulkBar();
 }
 
 function renderDangerResult(title, processed, affected) {
@@ -1660,6 +1765,14 @@ document.getElementById("clear-file-selection").addEventListener("click", () => 
   selectedDirectories.clear();
   loadDangerZone();
   loadAdminFiles();
+});
+document.getElementById("bulk-bar-clear").addEventListener("click", () => {
+  selectedFiles.clear();
+  selectedDirectories.clear();
+  selectedKeys.clear();
+  loadDangerZone();
+  loadAdminFiles();
+  loadKeys();
 });
 document.getElementById("key-filter").addEventListener("input", loadKeys);
 document.getElementById("key-status-filter").addEventListener("change", loadKeys);

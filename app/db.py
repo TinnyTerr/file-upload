@@ -183,6 +183,8 @@ _ADDED_COLUMNS = [
     ("permissions", "can_manage_users", "BOOLEAN NOT NULL DEFAULT 0"),
     ("permissions", "can_manage_storage", "BOOLEAN NOT NULL DEFAULT 0"),
     ("permissions", "can_manage_api_keys", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("dropbox_upload_links", "token", "TEXT"),
+    ("dropbox_upload_links", "token_enc", "BLOB"),
 ]
 
 

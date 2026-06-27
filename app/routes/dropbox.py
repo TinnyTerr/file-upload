@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -26,6 +27,22 @@ from app.storage.paths import storage_root
 router = APIRouter(tags=["dropbox"])
 _log = logging.getLogger(__name__)
 _CHUNK = 256 * 1024
+_STATIC = Path(__file__).parent.parent / "static"
+
+_DROPBOX_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "object-src 'none'"
+)
+_DROPBOX_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": _DROPBOX_CSP,
+}
 
 
 class DropboxLinkBody(BaseModel):
@@ -37,6 +54,11 @@ def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _master_key(request: Request) -> bytes:
+    from app.config import get_master_key
+    return get_master_key(request.app.state.app_state.settings)
+
+
 def _can_edit_directory(db: Session, d: Directory, user: User) -> bool:
     if user.role == "master" or d.owner_id == user.id:
         return True
@@ -46,6 +68,40 @@ def _can_edit_directory(db: Session, d: Directory, user: User) -> bool:
         .first()
         is not None
     )
+
+
+@router.get("/dropbox-links/active")
+def get_active_dropbox_link(
+    request: Request,
+    user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    now = datetime.now(timezone.utc)
+    row = (
+        db.query(DropboxUploadLink)
+        .filter(
+            DropboxUploadLink.owner_id == user.id,
+            DropboxUploadLink.active == True,  # noqa: E712
+            DropboxUploadLink.used_at == None,  # noqa: E711
+        )
+        .filter(
+            (DropboxUploadLink.expires_at == None) |  # noqa: E711
+            (DropboxUploadLink.expires_at > now)
+        )
+        .order_by(DropboxUploadLink.created_at.desc())
+        .first()
+    )
+    if row is None or row.token_enc is None:
+        raise HTTPException(404, detail="no active dropbox link")
+    from app.security.secretbox import open_box
+    token = open_box(_master_key(request), row.token_enc).decode()
+    base = str(request.base_url).rstrip("/")
+    return {
+        "id": row.id,
+        "url": f"{base}/dropbox/{token}",
+        "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+        "target_directory_id": row.target_directory_id,
+    }
 
 
 @router.post("/dropbox-links")
@@ -66,11 +122,31 @@ def create_dropbox_link(
             raise HTTPException(403, detail="not your directory")
         owner_id = directory.owner_id
 
+    # Revoke any existing active unused link for this owner before creating a new one.
+    now = datetime.now(timezone.utc)
+    existing = (
+        db.query(DropboxUploadLink)
+        .filter(
+            DropboxUploadLink.owner_id == owner_id,
+            DropboxUploadLink.active == True,  # noqa: E712
+            DropboxUploadLink.used_at == None,  # noqa: E711
+        )
+        .filter(
+            (DropboxUploadLink.expires_at == None) |  # noqa: E711
+            (DropboxUploadLink.expires_at > now)
+        )
+        .all()
+    )
+    for old in existing:
+        old.active = False
+
     token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=body.expires_in_seconds)
+    from app.security.secretbox import seal
     row = DropboxUploadLink(
         owner_id=owner_id,
         target_directory_id=body.target_directory_id,
+        token_enc=seal(_master_key(request), token.encode()),
         token_hash=_token_hash(token),
         expires_at=expires_at,
     )
@@ -97,6 +173,23 @@ def create_dropbox_link(
     }
 
 
+@router.delete("/dropbox-links/{link_id}", status_code=204)
+def revoke_dropbox_link(
+    link_id: int,
+    request: Request,
+    _csrf: SessionRow = Depends(require_csrf),
+    user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+) -> None:
+    row = db.get(DropboxUploadLink, link_id)
+    if row is None or (row.owner_id != user.id and user.role != "master"):
+        raise HTTPException(404, detail="not found")
+    row.active = False
+    record(db, actor=user.username, action="dropbox_link.revoked",
+           target=f"dropbox:{row.id}", ip=client_ip(request))
+    db.commit()
+
+
 def _resolve_dropbox(db: Session, token: str) -> DropboxUploadLink:
     row = db.query(DropboxUploadLink).filter_by(token_hash=_token_hash(token)).first()
     if row is None:
@@ -109,6 +202,12 @@ def _resolve_dropbox(db: Session, token: str) -> DropboxUploadLink:
 
 
 @router.get("/dropbox/{token}")
+def dropbox_page(token: str) -> HTMLResponse:
+    content = (_STATIC / "dropbox.html").read_text("utf-8")
+    return HTMLResponse(content, headers=_DROPBOX_HEADERS)
+
+
+@router.get("/dropbox/{token}/info")
 def dropbox_info(token: str, db: Session = Depends(get_db)) -> dict:
     row = _resolve_dropbox(db, token)
     return {
@@ -187,4 +286,3 @@ async def upload_to_dropbox(
         work.unlink(missing_ok=True)
         _log.exception("dropbox upload failed id=%s owner_id=%s bytes=%s", row.id, owner.id, written)
         raise
-

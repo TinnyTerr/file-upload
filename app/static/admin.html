@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title>Admin — Oxymoron</title>
   <link rel="stylesheet" href="/static/css/theme.css">
   <style>
@@ -32,31 +33,38 @@
     .file-expand-body.open { display: block; }
     .admin-dashboard { display: grid; gap: 16px; }
     .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
-    .dashboard-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
-    .dashboard-card-title { display:flex; align-items:center; gap:8px; font-family:var(--font-mono); font-size:11px; letter-spacing:0.1em; text-transform:uppercase; color:var(--text-muted); margin-bottom:12px; }
-    .dashboard-card-title::before { content:''; width:5px; height:5px; background:var(--accent); border-radius:1px; transform:rotate(45deg); box-shadow:0 0 6px var(--accent-glow); flex-shrink:0; }
+    .dashboard-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; position:relative; overflow:hidden; }
+    .dashboard-card::after { content:''; position:absolute; inset:0; pointer-events:none; background:radial-gradient(400px 220px at 50% 0%, rgba(242,183,92,0.04) 0%, transparent 70%); }
+    .dashboard-card-title { display:flex; align-items:center; gap:8px; font-family:var(--font-mono); font-size:11px; letter-spacing:0.1em; text-transform:uppercase; color:var(--text-muted); margin-bottom:14px; }
+    .dashboard-card-title::before { content:'◆'; font-size:7px; color:var(--accent); opacity:0.7; flex-shrink:0; }
     .storage-cap-row { display:grid; grid-template-columns:minmax(220px, 1fr) auto; gap:12px; align-items:end; }
     .storage-cap-row .form-group { margin-bottom:0; }
-    .storage-hero { display:grid; grid-template-columns:180px minmax(0, 1fr); gap:20px; align-items:center; }
-    .storage-ring { width:160px; height:160px; position:relative; display:grid; place-items:center; }
-    .storage-ring svg { width:160px; height:160px; transform:rotate(-90deg); }
-    .storage-ring-track { fill:none; stroke:var(--surface-3); stroke-width:14; }
-    .storage-ring-fill { fill:none; stroke:var(--accent); stroke-width:14; stroke-linecap:round; transition:stroke-dasharray .3s ease; }
+    .storage-hero { display:grid; grid-template-columns:190px minmax(0, 1fr); gap:24px; align-items:center; }
+    .storage-ring { width:170px; height:170px; position:relative; display:grid; place-items:center; }
+    .storage-ring svg { width:170px; height:170px; transform:rotate(-90deg); }
+    .storage-ring-track { fill:none; stroke:var(--surface-3); stroke-width:13; }
+    .storage-ring-fill { fill:none; stroke:var(--accent); stroke-width:13; stroke-linecap:round;
+      filter:drop-shadow(0 0 6px rgba(242,183,92,0.5));
+      transition:stroke-dasharray .8s cubic-bezier(0.16,1,0.3,1); }
+    .storage-ring-glow { fill:none; stroke:rgba(242,183,92,0.1); stroke-width:26; stroke-linecap:round;
+      transition:stroke-dasharray .8s cubic-bezier(0.16,1,0.3,1); }
     .storage-ring-label { position:absolute; text-align:center; }
-    .storage-ring-main { font-family:var(--font-display); font-size:24px; font-weight:600; }
-    .storage-ring-sub { font-size:11px; color:var(--text-muted); margin-top:2px; }
+    .storage-ring-main { font-family:var(--font-display); font-size:26px; font-weight:600; letter-spacing:-.02em; }
+    .storage-ring-sub { font-size:11px; color:var(--text-muted); margin-top:2px; font-family:var(--font-mono); letter-spacing:.04em; }
     .metric-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:10px; }
-    .metric-tile { border:1px solid var(--border); background:var(--surface-2); border-radius:var(--radius-sm); padding:12px; min-height:78px; }
-    .metric-tile-label { font-family:var(--font-mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--text-muted); margin-bottom:6px; }
-    .metric-tile-value { font-family:var(--font-display); font-size:22px; font-weight:600; letter-spacing:-.01em; }
-    .metric-tile-sub { color:var(--text-muted); font-size:11px; margin-top:4px; }
-    .chart-list { display:grid; gap:10px; }
-    .chart-row-head { display:flex; justify-content:space-between; gap:10px; font-size:12px; color:var(--text-dim); }
+    .metric-tile { border:1px solid var(--border); background:var(--surface-2); border-radius:var(--radius-sm); padding:14px; min-height:80px; position:relative; overflow:hidden; transition:border-color .15s ease, transform .15s ease; }
+    .metric-tile:hover { border-color:var(--border-strong); transform:translateY(-1px); }
+    .metric-tile-label { font-family:var(--font-mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--text-muted); margin-bottom:7px; }
+    .metric-tile-value { font-family:var(--font-display); font-size:24px; font-weight:600; letter-spacing:-.02em; line-height:1; }
+    .metric-tile-sub { color:var(--text-muted); font-size:11px; margin-top:5px; }
+    .chart-list { display:grid; gap:12px; }
+    .chart-row-head { display:flex; justify-content:space-between; gap:10px; font-size:12px; color:var(--text-dim); margin-bottom:5px; }
     .chart-row-label { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text); }
     .chart-row-value { font-family:var(--font-mono); color:var(--text-dim); white-space:nowrap; }
-    .status-stack { display:flex; flex-wrap:wrap; gap:8px; }
-    .status-pill { border:1px solid var(--border); background:var(--surface-2); border-radius:var(--radius-sm); padding:8px 10px; min-width:86px; }
-    .status-pill strong { display:block; font-family:var(--font-display); font-size:20px; line-height:1; margin-bottom:4px; }
+    .status-stack { display:flex; flex-wrap:wrap; gap:10px; }
+    .status-pill { border:1px solid var(--border); border-left-width:2px; background:var(--surface-2); border-radius:var(--radius-sm); padding:10px 13px; min-width:90px; transition:transform .15s ease, box-shadow .15s ease; }
+    .status-pill:hover { transform:translateY(-1px); box-shadow:var(--shadow-sm); }
+    .status-pill strong { display:block; font-family:var(--font-display); font-size:22px; line-height:1; margin-bottom:5px; }
     .status-pill span { font-family:var(--font-mono); font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-muted); }
     .quota-bar-fill.info { background:linear-gradient(90deg, #4f9cff, #7dd3fc); }
     .quota-bar-fill.capacity { background:linear-gradient(90deg, var(--success), #6ee7c0); }
@@ -307,10 +315,13 @@
             <option value="ERROR">Error</option>
             <option value="CRITICAL">Critical</option>
           </select>
-          <label class="backend-autorefresh" data-tooltip="Refresh the log list every few seconds while this tab is open.">
-            <input type="checkbox" id="backend-auto-refresh" checked>
+          <div class="backend-autorefresh" data-tooltip="Refresh the log list every few seconds while this tab is open.">
+            <label class="toggle" style="flex-shrink:0">
+              <input type="checkbox" id="backend-auto-refresh" checked>
+              <span class="toggle-track"></span>
+            </label>
             Auto refresh
-          </label>
+          </div>
           <button class="btn btn-ghost btn-sm" id="backend-refresh" data-tooltip="Reload the backend log buffer now.">Refresh</button>
           <button class="btn btn-danger btn-sm" id="backend-restart-workers" data-tooltip="Restart the app background scheduler jobs: archive scan, idle delete, temp expiry, link expiry, and stale upload cleanup.">Restart workers</button>
         </div>
@@ -348,41 +359,42 @@
 
     <!-- Danger Zone tab -->
     <div class="tab-panel" id="tab-danger">
-      <div class="alert alert-error">
-        Bulk actions are intentionally noisy: each action previews its affected count and requires the exact confirmation phrase before it runs.
-      </div>
-      <div class="danger-grid">
+      <div class="section-label" style="margin-bottom:10px">Global actions</div>
+      <div class="danger-grid" style="margin-bottom:24px">
         <button class="action-card danger-card" data-bulk-action="delete_inactive_links" data-tooltip="Permanently delete every link that is inactive, expired, or used up. Files remain stored.">
           <div class="action-card-title">Delete inactive links</div>
-          <div class="action-card-sub">Cleans inactive, expired, and used-up share links.</div>
+          <div class="action-card-sub">Inactive, expired, and used-up links.</div>
         </button>
-        <button class="action-card danger-card" data-bulk-action="revoke_api_keys" data-tooltip="Revoke active API keys. Integrations using those keys stop immediately.">
+        <button class="action-card danger-card" data-bulk-action="revoke_api_keys" data-tooltip="Revoke active API keys.">
           <div class="action-card-title">Revoke API keys</div>
-          <div class="action-card-sub">Uses selected keys when checked; otherwise previews all active keys.</div>
+          <div class="action-card-sub">All active keys, or selected keys from the API Keys tab.</div>
         </button>
         <button class="action-card danger-card" data-bulk-action="reset_api_key_ips" data-tooltip="Clear API key IP bindings so keys bind again on next use.">
-          <div class="action-card-title">Reset key IP bindings</div>
-          <div class="action-card-sub">Uses selected keys when checked; otherwise previews all bound keys.</div>
+          <div class="action-card-title">Reset key IPs</div>
+          <div class="action-card-sub">All bound keys, or selected keys from the API Keys tab.</div>
         </button>
-        <button class="action-card danger-card" data-bulk-action="archive_files" data-selected-kind="files" data-tooltip="Archive selected files using the server-side archive path. Client-side encrypted files are skipped by the backend.">
-          <div class="action-card-title">Archive selected files</div>
-          <div class="action-card-sub">Requires checked files in the Files tab.</div>
+        <button class="action-card" data-bulk-action="run_cleanup_jobs" data-tooltip="Run temp expiry, idle deletion, link expiry, and lifecycle reconciliation together.">
+          <div class="action-card-title">Run cleanup jobs</div>
+          <div class="action-card-sub">Temp expiry, idle delete, link expiry, lifecycle.</div>
         </button>
-        <button class="action-card danger-card" data-bulk-action="unarchive_files" data-selected-kind="files" data-tooltip="Unarchive selected archived files after quota and disk-space checks.">
-          <div class="action-card-title">Unarchive selected files</div>
-          <div class="action-card-sub">Requires checked files in the Files tab.</div>
+      </div>
+      <div class="section-label" style="margin-bottom:10px">Selection actions <span class="text-muted" style="font-size:11px;font-family:var(--font-mono);font-weight:400;letter-spacing:0">— check items in Files tab, then use the bar below</span></div>
+      <div class="danger-grid">
+        <button class="action-card danger-card" data-bulk-action="archive_files" data-selected-kind="files" data-tooltip="Archive selected files.">
+          <div class="action-card-title">Archive files</div>
+          <div class="action-card-sub" id="ds-archive-sub">No files selected.</div>
+        </button>
+        <button class="action-card danger-card" data-bulk-action="unarchive_files" data-selected-kind="files" data-tooltip="Unarchive selected files.">
+          <div class="action-card-title">Unarchive files</div>
+          <div class="action-card-sub" id="ds-unarchive-sub">No files selected.</div>
         </button>
         <button class="action-card danger-card" data-bulk-action="delete_files" data-selected-kind="files" data-tooltip="Permanently delete selected files and their links.">
-          <div class="action-card-title">Delete selected files</div>
-          <div class="action-card-sub">Requires checked files in the Files tab.</div>
+          <div class="action-card-title">Delete files</div>
+          <div class="action-card-sub" id="ds-delfiles-sub">No files selected.</div>
         </button>
         <button class="action-card danger-card" data-bulk-action="delete_directories" data-selected-kind="directories" data-tooltip="Permanently delete selected folders and every file inside them.">
-          <div class="action-card-title">Delete selected folders</div>
-          <div class="action-card-sub">Requires checked folders in the Files tab.</div>
-        </button>
-        <button class="action-card danger-card" data-bulk-action="run_cleanup_jobs" data-tooltip="Run temp expiry, idle deletion, link expiry, and lifecycle reconciliation together.">
-          <div class="action-card-title">Run cleanup jobs</div>
-          <div class="action-card-sub">Runs all cleanup scanners immediately.</div>
+          <div class="action-card-title">Delete folders</div>
+          <div class="action-card-sub" id="ds-deldirs-sub">No folders selected.</div>
         </button>
       </div>
       <div id="danger-result" class="dashboard-card mt-16 hidden"></div>
@@ -589,6 +601,16 @@
         <button class="btn btn-primary" id="reset-ip-confirm">Reset IP</button>
       </div>
     </div>
+  </div>
+
+  <!-- Bulk action bar — slides up when items are selected -->
+  <div id="bulk-action-bar" class="bulk-bar" role="toolbar" aria-label="Selection actions">
+    <span class="bulk-bar-count" id="bulk-bar-count">0</span>
+    <span class="bulk-bar-label">selected</span>
+    <div class="bulk-bar-spacer"></div>
+    <div id="bulk-bar-actions" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+    <div style="width:1px;height:20px;background:var(--border-strong);margin:0 6px;flex-shrink:0"></div>
+    <button class="bulk-bar-clear" id="bulk-bar-clear" aria-label="Clear selection">Clear</button>
   </div>
 
   <script type="module" src="/static/js/admin.js"></script>
