@@ -5,7 +5,7 @@ import type { Directory, DirectoryLink, DirectoryMember, CreateDirectoryResult }
 export const dirService = {
   list: () => api.get<{ directories: Directory[] }>("/directories/").then((r) => r.directories),
 
-  create: (body: { title: string; encryption_mode: EncryptionMode; expires_in_seconds?: number | null }) =>
+  create: (body: { title: string; encryption_mode: EncryptionMode; expires_in_seconds?: number | null; key_check_blob?: string | null }) =>
     api.post<CreateDirectoryResult>("/directories", { json: body }),
 
   members: (dirId: number) =>

@@ -7,22 +7,22 @@ import { dirKeys } from "./queryKeys";
 import { errorMessage } from "@/config/api";
 import type { EncryptionMode } from "@/features/files/types";
 
-/**
- * Append files to an existing folder. Only supported for `none`-mode folders:
- * server/client folders need their original wrapping key, which the browser
- * doesn't retain after upload.
- */
 export function useAddFiles(dirId: number, mode: EncryptionMode) {
   const qc = useQueryClient();
   const [busy, setBusy] = useState(false);
 
   const addFiles = useCallback(
-    async (files: File[]) => {
-      if (!files.length || mode !== "none") return;
+    async (files: File[], presetKey?: Uint8Array) => {
+      if (!files.length) return;
+      if (mode === "client" && !presetKey) return;
       setBusy(true);
       try {
         for (const file of files) {
-          await performUpload({ file, options: { encryption_mode: "none", directory_id: dirId } });
+          await performUpload({
+            file,
+            options: { encryption_mode: mode, directory_id: dirId },
+            presetKey,
+          });
         }
         toast.success(`Added ${files.length} file${files.length === 1 ? "" : "s"}`);
         qc.invalidateQueries({ queryKey: dirKeys.members(dirId) });

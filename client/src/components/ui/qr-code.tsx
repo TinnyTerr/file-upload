@@ -17,14 +17,24 @@ export function QRCode({
   React.useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !value) return;
-    QRCodeLib.toCanvas(canvas, value, {
-      width: size,
-      margin: 1,
-      color: { dark: "#0a0a0f", light: "#ffffff" },
-      errorCorrectionLevel: "M",
-    }).catch(() => {
-      /* ignore render errors (e.g. value too long) */
+    if (value.length > 1200) return;
+    let cancelled = false;
+    const handle = window.requestAnimationFrame(() => {
+      if (cancelled) return;
+      QRCodeLib.toCanvas(canvas, value, {
+        width: size,
+        margin: 1,
+        color: { dark: "#0a0a0f", light: "#ffffff" },
+        errorCorrectionLevel: "M",
+      }).catch(() => {
+        /* ignore render errors (e.g. value too long) */
+      });
     });
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(handle);
+      canvas.getContext("2d")?.clearRect(0, 0, size, size);
+    };
   }, [value, size]);
 
   return (

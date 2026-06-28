@@ -20,6 +20,7 @@ export interface Directory {
   title: string;
   url: string;
   encryption_mode: EncryptionMode;
+  key_check_blob: string | null;
   access_key: string | null;
   file_count: number;
   total_bytes: number;
@@ -43,5 +44,6 @@ export interface CreateDirectoryResult {
   slug: string;
   url: string;
   encryption_mode: EncryptionMode;
+  key_check_blob: string | null;
   access_key: string | null;
 }

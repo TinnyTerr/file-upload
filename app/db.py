@@ -192,6 +192,7 @@ _ADDED_COLUMNS = [
     ("files", "saved_from_directory_id", "INTEGER"),
     ("directories", "hide_uploader", "BOOLEAN NOT NULL DEFAULT 0"),
     ("directories", "saved_from_directory_id", "INTEGER"),
+    ("directories", "key_check_blob", "TEXT"),
     ("links", "hide_uploader", "BOOLEAN NOT NULL DEFAULT 0"),
 ]
 

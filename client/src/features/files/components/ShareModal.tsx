@@ -58,7 +58,7 @@ function UrlRow({ label, value, icon }: { label: string; value: string; icon: Re
       <div className="flex min-w-0 items-center gap-2 rounded-md border border-border bg-background/40 px-2.5 py-1.5">
         <span className="text-muted-foreground">{icon}</span>
         <code className="flex-1 truncate font-mono text-xs">{value}</code>
-        <CopyButton value={value} />
+        <CopyButton value={value} className="shrink-0" />
       </div>
     </div>
   );
@@ -128,13 +128,13 @@ export function ShareModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl">
+      <DialogContent className="max-h-[85vh] w-[min(calc(100vw-2rem),48rem)] max-w-none overflow-hidden">
         <DialogHeader>
           <DialogTitle>{title ?? `Share ${entries.length > 1 ? `${entries.length} files` : "your file"}`}</DialogTitle>
           <DialogDescription>{description ?? "Copy a link or scan the code to share."}</DialogDescription>
         </DialogHeader>
 
-        {single && singleUrl && (
+        {single && singleUrl && singleUrl.length <= 1200 && (
           <div className="flex justify-center pb-1">
             <QRCode value={singleUrl} size={168} />
           </div>

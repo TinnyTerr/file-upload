@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, LargeBinary, String
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, LargeBinary, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base, UTCDateTime
@@ -34,6 +34,7 @@ class Directory(Base):
     # Server mode: the shared access credential (the ?ek= value), sealed so the
     # owner/master can rebuild the share URL later.
     enc_access_blob: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    key_check_blob: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     total_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)

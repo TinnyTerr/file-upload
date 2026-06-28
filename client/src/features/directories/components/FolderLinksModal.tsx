@@ -57,7 +57,7 @@ export function FolderLinksModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[80vh] max-w-lg overflow-x-hidden overflow-y-auto">
+      <DialogContent className="max-h-[85vh] w-[min(calc(100vw-2rem),48rem)] max-w-none overflow-x-hidden overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Link2 className="size-4 text-primary" /> Links · {dirTitle}
@@ -77,7 +77,7 @@ export function FolderLinksModal({
                 const url = buildUrl(link);
                 return (
                   <li key={link.id} className="rounded-md border border-border bg-background/30 p-2.5">
-                    <div className="flex items-center gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
                       <code className="flex-1 truncate font-mono text-xs">{url}</code>
                       <Badge variant={status.variant}>{status.label}</Badge>
                     </div>

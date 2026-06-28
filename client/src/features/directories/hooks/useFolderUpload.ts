@@ -3,11 +3,11 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { dirService } from "../services/dirService";
 import { performUpload } from "@/features/files/lib/uploadCore";
-import { randomKey, bytesToBase64Url } from "@/lib/base64url";
 import { folderUrl } from "@/features/files/lib/shareUrl";
 import { filesKeys } from "@/features/files/hooks/queryKeys";
 import { dirKeys } from "./queryKeys";
 import { errorMessage } from "@/config/api";
+import { createFolderKeyMaterial } from "../lib/folderKey";
 import type { ShareEntry } from "@/features/files/components/ShareModal";
 import type { EncryptionMode } from "@/features/files/types";
 
@@ -29,16 +29,19 @@ export function useFolderUpload() {
       setBusy(true);
       setProgress({ total: files.length, completed: 0, percent: 0 });
       try {
-        const dir = await dirService.create({ title, encryption_mode: mode });
-        // One shared key unlocks the whole client-encrypted bundle.
-        const sharedKey = mode === "client" ? randomKey() : undefined;
+        const keyMaterial = mode === "client" ? await createFolderKeyMaterial() : null;
+        const dir = await dirService.create({
+          title,
+          encryption_mode: mode,
+          key_check_blob: keyMaterial?.keyCheckBlob ?? null,
+        });
 
         for (let i = 0; i < files.length; i++) {
           setProgress({ total: files.length, completed: i, current: files[i].name, percent: 0 });
           await performUpload({
             file: files[i],
             options: { encryption_mode: mode, directory_id: dir.id },
-            presetKey: sharedKey,
+            presetKey: keyMaterial?.key,
             onProgress: ({ percent }) =>
               setProgress((p) => (p ? { ...p, percent } : p)),
           });
@@ -54,7 +57,7 @@ export function useFolderUpload() {
           mode,
           baseUrl: folderUrl(dir.slug),
           accessKey: dir.access_key,
-          clientKeyB64: sharedKey ? bytesToBase64Url(sharedKey) : null,
+          clientKeyB64: keyMaterial?.clientKeyB64 ?? null,
         };
       } catch (err) {
         toast.error("Folder upload failed", { description: errorMessage(err) });

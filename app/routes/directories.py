@@ -124,6 +124,7 @@ class CreateDirBody(BaseModel):
     title: str = "Untitled folder"
     encryption_mode: str = "none"
     expires_in_seconds: int | None = None
+    key_check_blob: str | None = None
 
 
 @router.post("/directories")
@@ -145,6 +146,8 @@ def create_directory(
     if body.encryption_mode == "client":
         if not perm.can_upload_client_encrypted:
             raise HTTPException(403, detail="client-side encryption not permitted")
+        if not body.key_check_blob:
+            raise HTTPException(400, detail="client directories require key_check_blob")
 
     title = (body.title or "Untitled folder").strip()[:512] or "Untitled folder"
     expires_at = None
@@ -173,6 +176,7 @@ def create_directory(
         encryption_mode=body.encryption_mode,
         enc_key_blob=enc_key_blob,
         enc_access_blob=enc_access_blob,
+        key_check_blob=body.key_check_blob if body.encryption_mode == "client" else None,
         expires_at=expires_at,
     )
     db.add(d)
@@ -189,6 +193,7 @@ def create_directory(
         "slug": slug,
         "url": _dir_url(request, slug),
         "encryption_mode": d.encryption_mode,
+        "key_check_blob": d.key_check_blob,
         # client-side keys are generated in the browser and never sent here.
         "access_key": access_key,
     }
@@ -245,6 +250,7 @@ def _serialize_directories(
             "title": d.title,
             "url": _dir_url(request, d.slug),
             "encryption_mode": d.encryption_mode,
+            "key_check_blob": d.key_check_blob,
             "access_key": _recover_access_key(request, d),
             "file_count": file_count,
             "total_bytes": d.total_bytes,
@@ -614,6 +620,7 @@ def directory_info(slug: str, request: Request, db: Session = Depends(get_db)) -
     return {
         "title": d.title,
         "encryption_mode": d.encryption_mode,
+        "key_check_blob": d.key_check_blob,
         "file_count": len(pairs),
         "total_bytes": sum(f.size_bytes for f, _ in pairs),
         "uploader": uploader,
@@ -740,6 +747,7 @@ def save_directory(
         encryption_mode=source_dir.encryption_mode,
         enc_key_blob=source_dir.enc_key_blob,
         enc_access_blob=source_dir.enc_access_blob,
+        key_check_blob=source_dir.key_check_blob,
         total_bytes=logical_bytes,
         saved_from_directory_id=source_dir.id,
     )

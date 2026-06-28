@@ -1,24 +1,45 @@
 import { useRef, useState } from "react";
-import { ChevronDown, Folder, Trash2, ExternalLink, X, FilePlus, Link2 } from "lucide-react";
+import { ChevronDown, Folder, Trash2, ExternalLink, X, FilePlus, Link2, Info, KeyRound } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
 import { Tooltip } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { EncryptionBadge, iconForType } from "@/features/files/lib/fileMeta";
 import { useDirMembers, useDeleteDirectory, useRemoveMember } from "../hooks/useDirectories";
 import { useAddFiles } from "../hooks/useAddFiles";
 import { useDialogs } from "@/providers/DialogProvider";
 import { useAuth } from "@/features/auth/hooks/auth";
 import { folderUrl, shareUrl } from "@/features/files/lib/shareUrl";
+import { ShareModal, type ShareEntry } from "@/features/files/components/ShareModal";
+import { verifyFolderKey } from "../lib/folderKey";
 import { formatBytes } from "@/lib/bytes";
 import { cn } from "@/lib/cn";
 import type { Directory } from "../types";
 import { FolderLinksModal } from "./FolderLinksModal";
 
+function extractClientKey(value: string): string {
+  const trimmed = value.trim();
+  const marker = "#ek=";
+  const idx = trimmed.indexOf(marker);
+  if (idx === -1) return trimmed;
+  return trimmed.slice(idx + marker.length).split(/[?&#]/)[0];
+}
+
 export function FolderRow({ dir }: { dir: Directory }) {
   const [expanded, setExpanded] = useState(false);
   const [linksOpen, setLinksOpen] = useState(false);
+  const [infoEntry, setInfoEntry] = useState<ShareEntry | null>(null);
+  const [unlockOpen, setUnlockOpen] = useState(false);
+  const [keyInput, setKeyInput] = useState("");
+  const [keyError, setKeyError] = useState<string | null>(null);
+  const [unlocking, setUnlocking] = useState(false);
+  const [clientKey, setClientKey] = useState<Uint8Array | null>(null);
+  const [clientKeyB64, setClientKeyB64] = useState<string | null>(null);
+  const [pendingFiles, setPendingFiles] = useState<File[] | null>(null);
   const { data: members, isLoading } = useDirMembers(dir.id, expanded);
   const del = useDeleteDirectory();
   const removeMember = useRemoveMember(dir.id);
@@ -29,9 +50,16 @@ export function FolderRow({ dir }: { dir: Directory }) {
 
   const canDelete = can("can_delete") || dir.role === "owner";
   const canManageLinks = can("can_regenerate_links") || dir.role === "owner";
-  // Adding files to a folder is only safe for unencrypted folders (no stored key).
-  const canAddFiles = can("can_upload") && dir.encryption_mode === "none";
-  const url = shareUrl(folderUrl(dir.slug), dir.encryption_mode, { accessKey: dir.access_key, clientKeyB64: null });
+  const canAddFiles = can("can_upload");
+  const url = shareUrl(folderUrl(dir.slug), dir.encryption_mode, { accessKey: dir.access_key, clientKeyB64 });
+
+  const shareEntry = (): ShareEntry => ({
+    filename: dir.title,
+    mode: dir.encryption_mode,
+    baseUrl: folderUrl(dir.slug),
+    accessKey: dir.access_key,
+    clientKeyB64,
+  });
 
   const onDelete = async () => {
     const ok = await confirm({
@@ -41,6 +69,51 @@ export function FolderRow({ dir }: { dir: Directory }) {
       destructive: true,
     });
     if (ok) del.mutate(dir.id);
+  };
+
+  const openAddFiles = () => {
+    if (dir.encryption_mode === "client" && !clientKey) {
+      setPendingFiles(null);
+      setUnlockOpen(true);
+      return;
+    }
+    fileInputRef.current?.click();
+  };
+
+  const onFilesSelected = (files: File[]) => {
+    if (!files.length) return;
+    if (dir.encryption_mode === "client" && !clientKey) {
+      setPendingFiles(files);
+      setUnlockOpen(true);
+      return;
+    }
+    addFiles(files, clientKey ?? undefined);
+  };
+
+  const unlockFolder = async () => {
+    setKeyError(null);
+    if (!dir.key_check_blob) {
+      setKeyError("This folder was created before key checks existed. Recreate it to add encrypted files later.");
+      return;
+    }
+    setUnlocking(true);
+    try {
+      const normalized = extractClientKey(keyInput);
+      const key = await verifyFolderKey(normalized, dir.key_check_blob);
+      setClientKey(key);
+      setClientKeyB64(normalized);
+      setKeyInput("");
+      setUnlockOpen(false);
+      if (pendingFiles?.length) {
+        const files = pendingFiles;
+        setPendingFiles(null);
+        addFiles(files, key);
+      }
+    } catch (err) {
+      setKeyError(err instanceof Error ? err.message : "Invalid folder key.");
+    } finally {
+      setUnlocking(false);
+    }
   };
 
   return (
@@ -63,6 +136,11 @@ export function FolderRow({ dir }: { dir: Directory }) {
         </div>
         <div className="flex items-center gap-1.5">
           <CopyButton value={url} tooltip="Copy folder URL" />
+          <Tooltip content="Folder info & share">
+            <Button variant="ghost" size="sm" onClick={() => setInfoEntry(shareEntry())} className="gap-1.5">
+              <Info /> Info
+            </Button>
+          </Tooltip>
           <Tooltip content="Open folder">
             <Button variant="ghost" size="icon" asChild>
               <a href={url} target="_blank" rel="noreferrer">
@@ -79,7 +157,7 @@ export function FolderRow({ dir }: { dir: Directory }) {
           )}
           {canAddFiles && (
             <Tooltip content="Add files">
-              <Button variant="ghost" size="icon" loading={adding} onClick={() => fileInputRef.current?.click()}>
+              <Button variant="ghost" size="icon" loading={adding} onClick={openAddFiles}>
                 <FilePlus />
               </Button>
             </Tooltip>
@@ -100,7 +178,7 @@ export function FolderRow({ dir }: { dir: Directory }) {
             multiple
             hidden
             onChange={(e) => {
-              if (e.target.files?.length) addFiles(Array.from(e.target.files));
+              if (e.target.files?.length) onFilesSelected(Array.from(e.target.files));
               e.target.value = "";
             }}
           />
@@ -115,6 +193,45 @@ export function FolderRow({ dir }: { dir: Directory }) {
         encryptionMode={dir.encryption_mode}
         accessKey={dir.access_key}
       />
+
+      <ShareModal
+        entries={infoEntry ? [infoEntry] : []}
+        open={!!infoEntry}
+        onOpenChange={(o) => !o && setInfoEntry(null)}
+        title="Folder info"
+        description="Share links, key and download details for this folder."
+      />
+
+      <Dialog open={unlockOpen} onOpenChange={(o) => {
+        setUnlockOpen(o);
+        if (!o) {
+          setPendingFiles(null);
+          setKeyError(null);
+        }
+      }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <KeyRound className="size-4 text-primary" /> Unlock folder
+            </DialogTitle>
+            <DialogDescription>Paste the folder key or full #ek= URL before adding end-to-end encrypted files.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor={`folder-key-${dir.id}`}>Folder key</Label>
+            <Input
+              id={`folder-key-${dir.id}`}
+              value={keyInput}
+              onChange={(e) => setKeyInput(e.target.value)}
+              placeholder="Paste key or full folder URL"
+            />
+            {keyError && <p className="text-sm font-medium text-destructive">{keyError}</p>}
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setUnlockOpen(false)}>Cancel</Button>
+            <Button onClick={unlockFolder} loading={unlocking}>Unlock</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {expanded && (
         <div className="space-y-1.5 border-t border-border px-3 py-2.5">
