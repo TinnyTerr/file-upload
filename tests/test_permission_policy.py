@@ -32,7 +32,7 @@ def test_ensure_master_enables_everything():
     p = ensure_permissions(s, u.id, master=True)
     assert p.can_use_api_keys is True
     assert p.can_upload_client_encrypted is True
-    assert p.can_use_p2p is True
+    assert p.can_view_admin is True
 
 
 def test_ensure_is_idempotent():
@@ -57,7 +57,7 @@ def test_has_permission_reads_flag():
     u = _user(s)
     p = ensure_permissions(s, u.id)
     assert has_permission(p, "can_upload") is True
-    assert has_permission(p, "can_use_p2p") is False
+    assert has_permission(p, "can_use_api_keys") is False
 
 
 def test_has_permission_unknown_name_raises():

@@ -39,7 +39,7 @@ def test_login_and_me_contract(master_session):
             "id", "username", "role", "quota_bytes", "max_file_bytes", "used_bytes",
             "can_upload", "can_upload_client_encrypted", "can_delete", "can_regenerate_links",
             "can_delete_links", "can_create_directories", "can_manage_lifecycle", "can_use_api_keys",
-            "can_use_p2p", "can_view_admin", "can_manage_users", "can_manage_storage", "can_manage_api_keys",
+            "can_view_admin", "can_manage_users", "can_manage_storage", "can_manage_api_keys",
         },
         body,
         "/account/me",

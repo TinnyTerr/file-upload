@@ -430,6 +430,7 @@ def delete_directory(
     from app.models.dropbox_link import DropboxUploadLink
     db.query(DropboxUploadLink).filter_by(target_directory_id=d.id).delete()
     db.query(DirectoryCollaborator).filter_by(directory_id=d.id).delete()
+    db.query(DirectoryLink).filter_by(directory_id=d.id).delete()
     db.delete(d)
     record(db, actor=user.username, action="directory.deleted",
            target=f"directory:{dir_id}", ip=client_ip(request))

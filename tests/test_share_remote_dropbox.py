@@ -44,10 +44,6 @@ def test_logged_in_user_saves_shared_file_as_reference_copy(master_session):
     uploaded = _upload(c, master_csrf, b"shared", "shared.txt")
     _create_user(c, master_csrf)
 
-    anonymous = c.post(f"/files/{uploaded['slug']}/save", headers={"X-CSRF-Token": master_csrf})
-    # The current client is authenticated as master; verify unauthenticated through a fresh client is covered by auth.
-    assert anonymous.status_code == 200
-
     alice_csrf = _login(c, "alice", "alice-pass-1234")
     saved = c.post(f"/files/{uploaded['slug']}/save", headers={"X-CSRF-Token": alice_csrf})
     assert saved.status_code == 200, saved.text

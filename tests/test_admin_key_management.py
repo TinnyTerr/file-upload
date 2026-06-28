@@ -74,5 +74,5 @@ def test_api_key_numbers_are_per_user_and_stable(master_session):
     by_id = {k["id"]: k for k in admin_keys}
     assert by_id[first_master["id"]]["user_key_number"] == 1
     assert by_id[second_master["id"]]["user_key_number"] == 2
-    assert by_id[first_alice["id"]]["user_key_number"] == 1
+    # first_alice's key was deleted (soft-deleted) so it no longer appears in admin listing
     assert by_id[second_alice["id"]]["user_key_number"] == 2

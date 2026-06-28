@@ -111,7 +111,7 @@ def delete_key(
         raise HTTPException(403, detail="not your key")
     record(db, actor=user.username, action="apikey.deleted",
            target=f"apikey:{key_id}", ip=client_ip(request))
-    db.delete(key)
+    key.active = False
     db.commit()
     return {"status": "deleted"}
 

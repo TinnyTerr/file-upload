@@ -22,7 +22,6 @@ def test_permission_defaults():
     assert got.can_upload is True
     assert got.can_upload_client_encrypted is False
     assert got.can_use_api_keys is False
-    assert got.can_use_p2p is False
     assert got.quota_bytes == 100 * 1024 ** 3
     assert got.max_file_bytes == 10 * 1024 ** 3
     assert got.archive_after_idle_days == 5
