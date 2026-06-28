@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
+from starlette.requests import ClientDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -714,6 +715,9 @@ async def upload_chunk(
         if written != expected:
             raise HTTPException(400, detail="incomplete chunk")
         os.replace(tmp, parts / str(index))
+    except ClientDisconnect:
+        tmp.unlink(missing_ok=True)
+        raise
     except BaseException:
         tmp.unlink(missing_ok=True)
         _log.exception("chunked upload chunk failed user_id=%s index=%s expected_bytes=%s written_bytes=%s", user.id, index, expected, written)
