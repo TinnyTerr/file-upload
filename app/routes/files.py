@@ -957,44 +957,20 @@ def list_admin_files(
     return {"files": _serialize_files(request, db, files)}
 
 
-def _parse_byte_range(header: str, file_size: int) -> tuple[int, int] | None:
-    if not header.startswith("bytes="):
-        return None
-    parts = header[6:].split("-")
-    if len(parts) != 2:
-        return None
-    try:
-        start_s, end_s = parts
-        start = int(start_s) if start_s else None
-        end = int(end_s) if end_s else None
-    except ValueError:
-        return None
-    if start is None:
-        start = file_size - (end or 0)
-        end = file_size - 1
-    if end is None or end >= file_size:
-        end = file_size - 1
-    if start > end or start < 0:
-        return None
-    return start, end
-
-
 def _serialize_files(request: Request, db: Session, files: list[FileObject]) -> list[dict]:
-    # Build a user info lookup to avoid N+1 queries
+    # Build a username lookup to avoid N+1 queries
     owner_ids = {f.owner_id for f in files}
-    user_map = {
-        u.id: u
+    username_map = {
+        u.id: u.username
         for u in db.query(User).filter(User.id.in_(owner_ids)).all()
     } if owner_ids else {}
     result = []
     for f in files:
-        owner = user_map.get(f.owner_id)
         links = db.query(Link).filter_by(file_id=f.id).all()
         result.append({
             "id": f.id,
             "owner_id": f.owner_id,
-            "owner_username": owner.username if owner else f"user:{f.owner_id}",
-            "has_avatar": (owner.avatar_data is not None) if owner else False,
+            "owner_username": username_map.get(f.owner_id, f"user:{f.owner_id}"),
             "blob_id": f.blob_id,
             "original_filename": f.original_filename,
             "source_type": f.source_type,
@@ -1179,210 +1155,6 @@ def edit_link(
            target=f"link:{link_id}", ip=client_ip(request))
     db.commit()
     return {"status": "updated"}
-
-
-@router.get("/files/{file_id}/raw")
-def stream_file_owner(
-    file_id: int,
-    request: Request,
-    user: User = Depends(require_active_user),
-    db: Session = Depends(get_db),
-):
-    """Stream a file's decrypted content to its owner or admin (no link/use-count required)."""
-    import tempfile as _tempfile
-    from pathlib import Path as _Path
-    from app.storage.paths import safe_join
-
-    f = db.get(FileObject, file_id)
-    if f is None or (f.owner_id != user.id and user.role != "master"):
-        raise HTTPException(404, detail="not found")
-    if f.encryption_mode == "client":
-        raise HTTPException(403, detail="client-side encrypted file cannot be streamed server-side")
-
-    try:
-        full_path = safe_join(storage_root(), f.storage_path)
-    except ValueError:
-        raise HTTPException(500, detail="invalid storage path")
-    if not full_path.exists():
-        raise HTTPException(500, detail="file missing from storage")
-
-    needs_decrypt = f.encryption_mode == "server"
-    needs_decompress = f.compressed or f.archived
-
-    media_type = f.content_type or "application/octet-stream"
-    base_headers = {
-        "Content-Disposition": f'inline; filename="{f.original_filename}"',
-        **({"Accept-Ranges": "bytes"} if not needs_decrypt and not needs_decompress else {}),
-    }
-
-    if needs_decrypt:
-        from app.crypto.aead import decrypt_stream as _decrypt_stream
-        from app.security.secretbox import open_box
-        from app.config import get_master_key
-
-        if not f.enc_key_blob:
-            raise HTTPException(500, detail="encryption key not stored")
-        try:
-            per_file_key = open_box(get_master_key(request.app.state.app_state.settings), f.enc_key_blob)
-        except Exception:
-            raise HTTPException(500, detail="failed to recover encryption key")
-
-        if needs_decompress:
-            from app.storage.compress import decompress_stream as _dec
-            import os as _os
-            fd1, tmp1_path = _tempfile.mkstemp(suffix=".s1")
-            tmp1 = _Path(tmp1_path)
-            _os.close(fd1)
-            fd2, tmp2_path = _tempfile.mkstemp(suffix=".plain")
-            tmp2 = _Path(tmp2_path)
-            _os.close(fd2)
-            try:
-                if f.archived and not f.compressed:
-                    with open(tmp1, "wb") as fh:
-                        for chunk in _dec(full_path, f.size_bytes):
-                            fh.write(chunk)
-                    with open(tmp2, "wb") as fh:
-                        for chunk in _decrypt_stream(per_file_key, tmp1):
-                            fh.write(chunk)
-                else:
-                    with open(tmp1, "wb") as fh:
-                        for chunk in _decrypt_stream(per_file_key, full_path):
-                            fh.write(chunk)
-                    with open(tmp2, "wb") as fh:
-                        for chunk in _dec(tmp1, f.size_bytes):
-                            fh.write(chunk)
-            except Exception:
-                tmp1.unlink(missing_ok=True)
-                tmp2.unlink(missing_ok=True)
-                raise HTTPException(500, detail="failed to recover file contents")
-            tmp1.unlink(missing_ok=True)
-            from starlette.background import BackgroundTask
-            from fastapi.responses import FileResponse as _FileResponse
-            return _FileResponse(str(tmp2), media_type=media_type, headers=base_headers,
-                                 background=BackgroundTask(lambda p=tmp2: p.unlink(missing_ok=True)))
-
-        import os as _os
-        fd, tmp_path = _tempfile.mkstemp(suffix=".dec")
-        tmp = _Path(tmp_path)
-        _os.close(fd)
-        try:
-            with open(tmp, "wb") as fh:
-                for chunk in _decrypt_stream(per_file_key, full_path):
-                    fh.write(chunk)
-        except Exception:
-            tmp.unlink(missing_ok=True)
-            raise HTTPException(500, detail="decryption failed")
-        from starlette.background import BackgroundTask
-        from fastapi.responses import FileResponse as _FileResponse
-        return _FileResponse(str(tmp), media_type=media_type, headers={**base_headers, "Accept-Ranges": "bytes"},
-                             background=BackgroundTask(lambda p=tmp: p.unlink(missing_ok=True)))
-
-    if needs_decompress:
-        from app.storage.compress import decompress_stream
-        from starlette.responses import StreamingResponse
-        return StreamingResponse(
-            decompress_stream(full_path, f.size_bytes),
-            media_type=media_type,
-            headers={**base_headers, "Content-Length": str(f.size_bytes)},
-        )
-
-    # Plain, uncompressed — full range support
-    from starlette.responses import StreamingResponse, Response
-    file_size = f.stored_size_bytes
-    range_header = request.headers.get("range")
-    if range_header:
-        parsed = _parse_byte_range(range_header, file_size)
-        if parsed is None:
-            return Response(status_code=416, headers={"Accept-Ranges": "bytes", "Content-Range": f"bytes */{file_size}"})
-        start, end = parsed
-        length = end - start + 1
-
-        def _range_stream():
-            with open(full_path, "rb") as fh:
-                fh.seek(start)
-                remaining = length
-                while remaining > 0:
-                    chunk = fh.read(min(_CHUNK, remaining))
-                    if not chunk:
-                        break
-                    remaining -= len(chunk)
-                    yield chunk
-
-        return StreamingResponse(_range_stream(), status_code=206, media_type=media_type, headers={
-            **base_headers,
-            "Content-Range": f"bytes {start}-{end}/{file_size}",
-            "Content-Length": str(length),
-        })
-
-    def _stream():
-        with open(full_path, "rb") as fh:
-            while True:
-                chunk = fh.read(_CHUNK)
-                if not chunk:
-                    break
-                yield chunk
-
-    return StreamingResponse(_stream(), media_type=media_type,
-                             headers={**base_headers, "Content-Length": str(file_size)})
-
-
-@router.get("/files/{file_id}/thumb")
-def file_thumbnail(
-    file_id: int,
-    request: Request,
-    user: User = Depends(require_active_user),
-    db: Session = Depends(get_db),
-):
-    """Return a small JPEG thumbnail for an image file (owner/admin only)."""
-    import io
-    from PIL import Image
-    from app.storage.paths import safe_join
-    from starlette.responses import Response as _Response
-
-    f = db.get(FileObject, file_id)
-    if f is None or (f.owner_id != user.id and user.role != "master"):
-        raise HTTPException(404, detail="not found")
-    if not (f.content_type or "").startswith("image/"):
-        raise HTTPException(404, detail="not an image")
-    if f.encryption_mode == "client" or f.compressed or f.archived:
-        raise HTTPException(403, detail="preview unavailable")
-
-    try:
-        full_path = safe_join(storage_root(), f.storage_path)
-    except ValueError:
-        raise HTTPException(500, detail="invalid storage path")
-    if not full_path.exists():
-        raise HTTPException(500, detail="file missing from storage")
-
-    if f.encryption_mode == "server":
-        import io as _io
-        from app.crypto.aead import decrypt_stream as _decrypt_stream
-        from app.security.secretbox import open_box
-        from app.config import get_master_key
-        if not f.enc_key_blob:
-            raise HTTPException(500, detail="encryption key not stored")
-        try:
-            per_file_key = open_box(get_master_key(request.app.state.app_state.settings), f.enc_key_blob)
-            raw = _io.BytesIO()
-            for chunk in _decrypt_stream(per_file_key, full_path):
-                raw.write(chunk)
-            raw.seek(0)
-            img_src = raw
-        except Exception:
-            raise HTTPException(500, detail="failed to decrypt image")
-    else:
-        img_src = full_path
-
-    try:
-        with Image.open(img_src) as img:
-            img.thumbnail((400, 400))
-            buf = io.BytesIO()
-            img.convert("RGB").save(buf, format="JPEG", quality=75, optimize=True)
-            buf.seek(0)
-            return _Response(content=buf.read(), media_type="image/jpeg",
-                             headers={"Cache-Control": "private, max-age=3600"})
-    except Exception:
-        raise HTTPException(500, detail="failed to generate thumbnail")
 
 
 @router.get("/files/disk-stats")

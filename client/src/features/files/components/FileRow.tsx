@@ -14,30 +14,6 @@ import { formatDate } from "@/lib/time";
 import { cn } from "@/lib/cn";
 import type { FileObject } from "../types";
 
-function UploaderAvatar({ ownerId, ownerUsername, hasAvatar }: {
-  ownerId: number;
-  ownerUsername: string;
-  hasAvatar: boolean;
-}) {
-  const cls = "flex size-6 shrink-0 items-center justify-center rounded-full overflow-hidden";
-  if (hasAvatar) {
-    return (
-      <span className={cls}>
-        <img
-          src={`/account/avatar/${ownerId}`}
-          alt={ownerUsername}
-          className="size-full object-cover"
-        />
-      </span>
-    );
-  }
-  return (
-    <span className={cn(cls, "bg-brand-gradient text-[9px] font-semibold text-white")}>
-      {ownerUsername.slice(0, 2).toUpperCase()}
-    </span>
-  );
-}
-
 export function FileRow({ file }: { file: FileObject }) {
   const [expanded, setExpanded] = useState(false);
   const del = useDeleteFile();
@@ -48,17 +24,10 @@ export function FileRow({ file }: { file: FileObject }) {
   const canLinks = can("can_regenerate_links");
   const Icon = iconForType(file.content_type);
 
-  const isImage = (file.content_type ?? "").startsWith("image/");
-  const isVideo = (file.content_type ?? "").startsWith("video/");
-  const canPreview = file.encryption_mode !== "client" && !file.compressed && !file.archived;
-
-  const ownerUsername = file.owner_username ?? "unknown";
-  const hasAvatar = file.has_avatar ?? false;
-
   const onDelete = async () => {
     const ok = await confirm({
       title: "Delete file?",
-      description: `"${file.original_filename}" and all its links will be removed.`,
+      description: `“${file.original_filename}” and all its links will be removed.`,
       confirmText: "Delete",
       destructive: true,
     });
@@ -68,18 +37,8 @@ export function FileRow({ file }: { file: FileObject }) {
   return (
     <div className="rounded-lg border border-border bg-secondary/20 transition-colors hover:bg-secondary/30">
       <div className="flex items-center gap-3 p-3">
-        {/* Icon slot — replaced by thumbnail for previewable images */}
-        <div className="flex size-10 shrink-0 items-center justify-center rounded-md bg-background/50 overflow-hidden">
-          {isImage && canPreview ? (
-            <img
-              src={`/files/${file.id}/thumb`}
-              alt={file.original_filename}
-              className="size-full object-cover"
-              loading="lazy"
-            />
-          ) : (
-            <Icon className="size-4 text-muted-foreground" />
-          )}
+        <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-background/50">
+          <Icon className="size-4 text-muted-foreground" />
         </div>
 
         <div className="min-w-0 flex-1">
@@ -99,15 +58,9 @@ export function FileRow({ file }: { file: FileObject }) {
               </Badge>
             )}
           </div>
-          {/* Uploader + meta */}
-          <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
-            <UploaderAvatar ownerId={file.owner_id} ownerUsername={ownerUsername} hasAvatar={hasAvatar} />
-            <span className="font-medium text-foreground/70">{ownerUsername}</span>
-            <span>·</span>
-            <span>{formatBytes(file.size_bytes)}</span>
-            <span>·</span>
-            <span>{formatDate(file.created_at)}</span>
-          </div>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            {formatBytes(file.size_bytes)} · {formatDate(file.created_at)}
+          </p>
         </div>
 
         <div className="flex items-center gap-1.5">
@@ -146,16 +99,7 @@ export function FileRow({ file }: { file: FileObject }) {
       </div>
 
       {expanded && (
-        <div className="border-t border-border px-3 py-2.5 space-y-2.5">
-          {/* Inline video player for video files */}
-          {isVideo && canPreview && (
-            <video
-              controls
-              preload="none"
-              className="w-full rounded-md max-h-72 bg-black"
-              src={`/files/${file.id}/raw`}
-            />
-          )}
+        <div className="border-t border-border px-3 py-2.5">
           <LinkList file={file} />
         </div>
       )}
