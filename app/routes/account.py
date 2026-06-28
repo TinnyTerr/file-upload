@@ -94,7 +94,6 @@ def me(user: User = Depends(require_active_user), db: Session = Depends(get_db))
         "can_delete_links": perm.can_delete_links,
         "can_create_directories": perm.can_create_directories,
         "can_manage_lifecycle": perm.can_manage_lifecycle,
-        "can_use_p2p": perm.can_use_p2p,
         "can_view_admin": perm.can_view_admin,
         "can_manage_users": perm.can_manage_users,
         "can_manage_storage": perm.can_manage_storage,

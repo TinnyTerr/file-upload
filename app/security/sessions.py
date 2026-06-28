@@ -21,12 +21,25 @@ class SessionManager:
         self._serializer = URLSafeSerializer(secret_key, salt="session")
         self._secure = secure
 
-    def create(self, session: Session, user_id: int) -> tuple[str, str]:
+    def create(
+        self,
+        session: Session,
+        user_id: int,
+        *,
+        ip: str | None = None,
+        user_agent: str | None = None,
+    ) -> tuple[str, str]:
         sid = secrets.token_urlsafe(32)
         csrf = secrets.token_urlsafe(32)
+        now = _utcnow()
         row = SessionRow(
-            id=sid, user_id=user_id, csrf_token=csrf,
-            expires_at=_utcnow() + timedelta(seconds=SESSION_TTL_SECONDS),
+            id=sid,
+            user_id=user_id,
+            csrf_token=csrf,
+            expires_at=now + timedelta(seconds=SESSION_TTL_SECONDS),
+            ip_address=(ip or "")[:64] or None,
+            user_agent=(user_agent or "")[:512] or None,
+            last_seen_at=now,
         )
         session.add(row)
         session.flush()

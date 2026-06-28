@@ -54,3 +54,48 @@ export function useRemoveMember(dirId: number) {
     onError: (err) => toast.error("Couldn't remove file", { description: errorMessage(err) }),
   });
 }
+
+export function useDirLinks(dirId: number, enabled = true) {
+  return useQuery({
+    queryKey: dirKeys.links(dirId),
+    queryFn: () => dirService.listLinks(dirId),
+    enabled,
+  });
+}
+
+export function useCreateDirLink(dirId: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Parameters<typeof dirService.createLink>[1]) => dirService.createLink(dirId, body),
+    onSuccess: () => {
+      toast.success("Link created");
+      qc.invalidateQueries({ queryKey: dirKeys.links(dirId) });
+    },
+    onError: (err) => toast.error("Couldn't create link", { description: errorMessage(err) }),
+  });
+}
+
+export function useUpdateDirLink(dirId: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ linkId, ...body }: { linkId: number } & Parameters<typeof dirService.updateLink>[2]) =>
+      dirService.updateLink(dirId, linkId, body),
+    onSuccess: () => {
+      toast.success("Link updated");
+      qc.invalidateQueries({ queryKey: dirKeys.links(dirId) });
+    },
+    onError: (err) => toast.error("Couldn't update link", { description: errorMessage(err) }),
+  });
+}
+
+export function useDeleteDirLink(dirId: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (linkId: number) => dirService.deleteLink(dirId, linkId),
+    onSuccess: () => {
+      toast.success("Link deleted");
+      qc.invalidateQueries({ queryKey: dirKeys.links(dirId) });
+    },
+    onError: (err) => toast.error("Couldn't delete link", { description: errorMessage(err) }),
+  });
+}

@@ -87,10 +87,10 @@ export const filesService = {
     }),
 
   // --- links ---
-  mintLink: (fileId: number, body: { max_uses?: number | null; expires_in_seconds?: number | null }) =>
+  mintLink: (fileId: number, body: { max_uses?: number | null; expires_in_seconds?: number | null; hide_uploader?: boolean }) =>
     api.post<MintLinkResult>(`/files/${fileId}/links`, { json: body }),
 
-  editLink: (linkId: number, body: { max_uses?: number | null; expires_in_seconds?: number | null; active?: boolean }) =>
+  editLink: (linkId: number, body: { max_uses?: number | null; expires_in_seconds?: number | null; active?: boolean; hide_uploader?: boolean }) =>
     api.patch<{ status: string }>(`/links/${linkId}`, { json: body }),
 
   deleteLink: (linkId: number) => api.delete(`/links/${linkId}`),

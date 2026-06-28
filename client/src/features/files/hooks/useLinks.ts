@@ -12,8 +12,8 @@ export function useLinks() {
   };
 
   const mint = useMutation({
-    mutationFn: (vars: { fileId: number; max_uses?: number | null; expires_in_seconds?: number | null }) =>
-      filesService.mintLink(vars.fileId, { max_uses: vars.max_uses, expires_in_seconds: vars.expires_in_seconds }),
+    mutationFn: (vars: { fileId: number; max_uses?: number | null; expires_in_seconds?: number | null; hide_uploader?: boolean }) =>
+      filesService.mintLink(vars.fileId, { max_uses: vars.max_uses, expires_in_seconds: vars.expires_in_seconds, hide_uploader: vars.hide_uploader }),
     onSuccess: () => {
       toast.success("Link created");
       invalidate();
@@ -22,7 +22,7 @@ export function useLinks() {
   });
 
   const edit = useMutation({
-    mutationFn: (vars: { linkId: number; max_uses?: number | null; expires_in_seconds?: number | null; active?: boolean }) =>
+    mutationFn: (vars: { linkId: number; max_uses?: number | null; expires_in_seconds?: number | null; active?: boolean; hide_uploader?: boolean }) =>
       filesService.editLink(vars.linkId, vars),
     onSuccess: () => invalidate(),
     onError: (err) => toast.error("Couldn't update link", { description: errorMessage(err) }),

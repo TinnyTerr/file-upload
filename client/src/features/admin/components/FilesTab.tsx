@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { ChevronDown, Search, FileQuestion, Archive, ArchiveRestore, Trash2, Link2 } from "lucide-react";
+import { ChevronDown, Search, FileQuestion, Archive, ArchiveRestore, Trash2, Link2, User } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -60,7 +60,7 @@ function AdminFileRow({
               {file.archived && <Badge variant="secondary">archived</Badge>}
             </div>
             <p className="text-xs text-muted-foreground">
-              owner #{file.owner_id} · {formatBytes(file.size_bytes)} · {formatDate(file.created_at)}
+              {formatBytes(file.size_bytes)} · {formatDate(file.created_at)}
             </p>
           </div>
           <div className="flex items-center gap-1">
@@ -99,6 +99,45 @@ function AdminFileRow({
   );
 }
 
+function UserSection({
+  username,
+  files,
+  selection,
+}: {
+  username: string;
+  files: FileObject[];
+  selection: ReturnType<typeof useSelection>;
+}) {
+  const [collapsed, setCollapsed] = useState(false);
+  const allSelected = files.every((f) => selection.has(f.id));
+
+  return (
+    <div className="space-y-2">
+      <div
+        className="flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-secondary/30 px-3 py-2 hover:bg-secondary/50"
+        onClick={() => setCollapsed((c) => !c)}
+      >
+        <Checkbox
+          checked={allSelected}
+          onCheckedChange={(v) => selection.set(files.map((f) => f.id), !!v)}
+          onClick={(e) => e.stopPropagation()}
+        />
+        <User className="size-4 shrink-0 text-muted-foreground" />
+        <span className="flex-1 text-sm font-semibold">{username}</span>
+        <span className="text-xs text-muted-foreground">{files.length} file{files.length !== 1 ? "s" : ""}</span>
+        <ChevronDown className={cn("size-4 shrink-0 text-muted-foreground transition-transform", collapsed && "rotate-180")} />
+      </div>
+      {!collapsed && (
+        <div className="space-y-2 pl-2">
+          {files.map((f) => (
+            <AdminFileRow key={f.id} file={f} selected={selection.has(f.id)} onToggle={() => selection.toggle(f.id)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function FilesTab() {
   const { list } = useAdminFiles();
   const [filter, setFilter] = useState("");
@@ -112,12 +151,21 @@ export function FilesTab() {
       (f) =>
         f.original_filename.toLowerCase().includes(q) ||
         (f.content_type ?? "").toLowerCase().includes(q) ||
+        (f.owner_username ?? "").toLowerCase().includes(q) ||
         String(f.owner_id) === q ||
         String(f.id) === q,
     );
   }, [list.data, filter]);
 
-  const allSelected = filtered.length > 0 && filtered.every((f) => selection.has(f.id));
+  const groupedByUser = useMemo(() => {
+    const map = new Map<string, FileObject[]>();
+    for (const f of filtered) {
+      const name = f.owner_username ?? `user:${f.owner_id}`;
+      if (!map.has(name)) map.set(name, []);
+      map.get(name)!.push(f);
+    }
+    return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }, [filtered]);
 
   return (
     <div className="space-y-4">
@@ -126,15 +174,6 @@ export function FilesTab() {
           <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input className="pl-8" placeholder="Filter by filename, type, owner or id…" value={filter} onChange={(e) => setFilter(e.target.value)} />
         </div>
-        {filtered.length > 0 && (
-          <label className="flex shrink-0 items-center gap-2 text-sm text-muted-foreground">
-            <Checkbox
-              checked={allSelected}
-              onCheckedChange={(v) => selection.set(filtered.map((f) => f.id), !!v)}
-            />
-            Select all
-          </label>
-        )}
       </div>
 
       {list.isLoading ? (
@@ -146,9 +185,9 @@ export function FilesTab() {
       ) : filtered.length === 0 ? (
         <EmptyState icon={FileQuestion} title="No files" />
       ) : (
-        <div className="space-y-2 pb-16">
-          {filtered.map((f) => (
-            <AdminFileRow key={f.id} file={f} selected={selection.has(f.id)} onToggle={() => selection.toggle(f.id)} />
+        <div className="space-y-4 pb-16">
+          {groupedByUser.map(([username, files]) => (
+            <UserSection key={username} username={username} files={files} selection={selection} />
           ))}
         </div>
       )}

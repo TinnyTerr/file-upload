@@ -98,6 +98,24 @@ export function DownloadPage() {
 
           <EncryptionBanner mode={info.encryption_mode} hasKey={hasKey} />
 
+          {/* Uploader info */}
+          {info.uploader && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              {info.uploader.has_avatar ? (
+                <img
+                  src={`/account/avatar/${info.uploader.user_id}`}
+                  alt={info.uploader.username}
+                  className="size-6 rounded-full object-cover"
+                />
+              ) : (
+                <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-brand-gradient text-xs font-semibold text-white">
+                  {info.uploader.username.slice(0, 2).toUpperCase()}
+                </span>
+              )}
+              <span>Uploaded by <strong>{info.uploader.username}</strong></span>
+            </div>
+          )}
+
           {/* Download */}
           <div className="space-y-2">
             <Button
@@ -113,8 +131,14 @@ export function DownloadPage() {
             {busy && <Progress value={percent} />}
             {error && <p className="text-sm text-destructive">{error}</p>}
             {user && (
-              <Button variant="secondary" className="w-full" loading={save.isPending} onClick={() => save.mutate(slug)}>
-                <Save /> Save to my files
+              <Button
+                variant="secondary"
+                className="w-full"
+                loading={save.isPending}
+                disabled={info.already_saved}
+                onClick={() => save.mutate(slug)}
+              >
+                <Save /> {info.already_saved ? "Already saved" : "Save to my files"}
               </Button>
             )}
           </div>

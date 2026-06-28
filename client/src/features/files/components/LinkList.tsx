@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Info, Power, PowerOff, Trash2 } from "lucide-react";
+import { Eye, EyeOff, Info, Power, PowerOff, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -62,15 +62,27 @@ export function LinkList({ file }: { file: FileObject }) {
                 <Badge variant={status.variant}>{status.label}</Badge>
               </div>
               <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs text-muted-foreground">
-                  {link.use_count}
-                  {link.max_uses != null ? ` / ${link.max_uses}` : " / ∞"} downloads
-                  {link.expires_at ? ` · expires ${formatDateTime(link.expires_at)}` : ""}
-                </span>
+                <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                  <span>
+                    {link.use_count}
+                    {link.max_uses != null ? ` / ${link.max_uses}` : " / ∞"} downloads
+                    {link.expires_at ? ` · expires ${formatDateTime(link.expires_at)}` : ""}
+                  </span>
+                  {link.hide_uploader && (
+                    <span className="flex items-center gap-1">
+                      <EyeOff className="size-3" /> anon
+                    </span>
+                  )}
+                </div>
                 <div className="flex items-center gap-0.5">
                   <Tooltip content="File info & share">
                     <Button variant="ghost" size="sm" onClick={() => openInfo(link)} className="gap-1.5">
                       <Info /> Info
+                    </Button>
+                  </Tooltip>
+                  <Tooltip content={link.hide_uploader ? "Show uploader" : "Hide uploader"}>
+                    <Button variant="ghost" size="icon" onClick={() => edit.mutate({ linkId: link.id, hide_uploader: !link.hide_uploader })}>
+                      {link.hide_uploader ? <Eye /> : <EyeOff />}
                     </Button>
                   </Tooltip>
                   <Tooltip content={link.active ? "Deactivate" : "Reactivate"}>

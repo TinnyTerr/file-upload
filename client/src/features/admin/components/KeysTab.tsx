@@ -1,9 +1,8 @@
 import { useState, useMemo } from "react";
-import { Search, KeyRound, Plus, Lock, Globe, RotateCcw, Trash2 } from "lucide-react";
+import { Search, KeyRound, ChevronDown, Plus, Lock, Globe, RotateCcw, Trash2, User } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -17,9 +16,77 @@ import { useBulk } from "../hooks/useBulk";
 import { useSelection } from "../hooks/useSelection";
 import { formatDate, relativeTime } from "@/lib/time";
 import { cn } from "@/lib/cn";
-import type { NewApiKey } from "@/features/apikeys/types";
+import type { NewApiKey, AdminApiKey } from "@/features/apikeys/types";
 
 type StatusFilter = "all" | "active" | "inactive" | "bound" | "unbound";
+
+function UserSection({ username, keys, selection }: { username: string; keys: AdminApiKey[]; selection: ReturnType<typeof useSelection> }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const allSelected = keys.every((k) => selection.has(k.id));
+  const someSelected = keys.some((k) => selection.has(k.id));
+
+  const toggleAll = () => {
+    if (allSelected) keys.forEach((k) => selection.has(k.id) && selection.toggle(k.id));
+    else keys.forEach((k) => !selection.has(k.id) && selection.toggle(k.id));
+  };
+
+  return (
+    <div className="rounded-lg border border-border bg-secondary/10">
+      <div
+        className="flex cursor-pointer items-center gap-3 px-3 py-2.5 hover:bg-secondary/20"
+        onClick={() => setCollapsed((c) => !c)}
+      >
+        <Checkbox
+          checked={allSelected ? true : someSelected ? "indeterminate" : false}
+          onCheckedChange={toggleAll}
+          onClick={(e) => e.stopPropagation()}
+          aria-label={`Select all keys for ${username}`}
+        />
+        <div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted">
+          <User className="size-3.5 text-muted-foreground" />
+        </div>
+        <span className="flex-1 text-sm font-semibold">{username}</span>
+        <span className="text-xs text-muted-foreground">{keys.length} {keys.length === 1 ? "key" : "keys"}</span>
+        <ChevronDown className={cn("size-4 text-muted-foreground transition-transform", collapsed && "-rotate-90")} />
+      </div>
+
+      {!collapsed && (
+        <div className="border-t border-border px-3 py-2 space-y-1.5">
+          {keys.map((k) => (
+            <div
+              key={k.id}
+              className={cn(
+                "flex items-center gap-3 rounded-md border border-border bg-background/30 px-3 py-2",
+                selection.has(k.id) && "ring-1 ring-primary/50"
+              )}
+            >
+              <Checkbox checked={selection.has(k.id)} onCheckedChange={() => selection.toggle(k.id)} aria-label="Select key" />
+              <KeyRound className="size-4 shrink-0 text-muted-foreground" />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="truncate text-sm font-medium">Key #{k.user_key_number}</span>
+                  {k.active ? <Badge variant="success">active</Badge> : <Badge variant="secondary">inactive</Badge>}
+                  {k.bound_ip ? (
+                    <Badge variant="accent">
+                      <Lock className="size-3" /> {k.bound_ip}
+                    </Badge>
+                  ) : (
+                    <Badge variant="secondary">
+                      <Globe className="size-3" /> unbound
+                    </Badge>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  created {formatDate(k.created_at)} · last used {relativeTime(k.last_used_at)}
+                </p>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function KeysTab() {
   const keys = useAdminKeys();
@@ -30,9 +97,9 @@ export function KeysTab() {
   const selection = useSelection();
   const bulk = useBulk(selection.clear);
 
-  const filtered = useMemo(() => {
+  const grouped = useMemo(() => {
     const q = filter.trim().toLowerCase();
-    return (keys.data ?? []).filter((k) => {
+    const filtered = (keys.data ?? []).filter((k) => {
       if (q && !k.owner_username.toLowerCase().includes(q) && String(k.owner_id) !== q && String(k.id) !== q) return false;
       if (status === "active" && !k.active) return false;
       if (status === "inactive" && k.active) return false;
@@ -40,6 +107,14 @@ export function KeysTab() {
       if (status === "unbound" && k.bound_ip) return false;
       return true;
     });
+
+    const map = new Map<string, AdminApiKey[]>();
+    for (const k of filtered) {
+      const u = k.owner_username;
+      if (!map.has(u)) map.set(u, []);
+      map.get(u)!.push(k);
+    }
+    return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
   }, [keys.data, filter, status]);
 
   const onCreate = async () => setNewKey(await create.mutateAsync());
@@ -73,37 +148,12 @@ export function KeysTab() {
           <Skeleton className="h-16 w-full" />
           <Skeleton className="h-16 w-full" />
         </div>
-      ) : filtered.length === 0 ? (
+      ) : grouped.length === 0 ? (
         <EmptyState icon={KeyRound} title="No API keys" />
       ) : (
         <div className="space-y-2 pb-16">
-          {filtered.map((k) => (
-            <Card key={k.id} className={cn(selection.has(k.id) && "ring-1 ring-primary/50")}>
-              <CardContent className="flex items-center gap-3 p-3">
-                <Checkbox checked={selection.has(k.id)} onCheckedChange={() => selection.toggle(k.id)} aria-label="Select key" />
-                <KeyRound className="size-4 shrink-0 text-muted-foreground" />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="truncate text-sm font-medium">
-                      {k.owner_username} · key #{k.user_key_number}
-                    </span>
-                    {k.active ? <Badge variant="success">active</Badge> : <Badge variant="secondary">inactive</Badge>}
-                    {k.bound_ip ? (
-                      <Badge variant="accent">
-                        <Lock /> {k.bound_ip}
-                      </Badge>
-                    ) : (
-                      <Badge variant="secondary">
-                        <Globe /> unbound
-                      </Badge>
-                    )}
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    created {formatDate(k.created_at)} · last used {relativeTime(k.last_used_at)}
-                  </p>
-                </div>
-              </CardContent>
-            </Card>
+          {grouped.map(([username, userKeys]) => (
+            <UserSection key={username} username={username} keys={userKeys} selection={selection} />
           ))}
         </div>
       )}

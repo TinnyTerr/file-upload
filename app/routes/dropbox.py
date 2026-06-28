@@ -417,6 +417,15 @@ async def upload_to_dropbox(
         raise HTTPException(404, detail="directory not found")
     perm = ensure_permissions(db, owner.id, master=(owner.role == "master"))
 
+    # Pre-check against Content-Length if the client declares it — rejects
+    # obviously oversized uploads before any bytes are streamed to disk.
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            _precheck_declared_size(db, owner, perm, int(declared))
+        except Exception:
+            pass  # Ignore if content-length is unreliable; per-chunk cap still applies.
+
     rand = secrets.token_hex(32)
     rel_path = f"{rand[:2]}/{rand[2:4]}/{rand[4:]}"
     base_path = storage_root() / rel_path

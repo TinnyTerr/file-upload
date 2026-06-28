@@ -50,8 +50,8 @@ export function Dropzone({
           : "border-border bg-secondary/20 hover:border-primary/50 hover:bg-secondary/40",
       )}
     >
-      <div className="flex size-12 items-center justify-center rounded-xl bg-brand-gradient/90 shadow-lg shadow-primary/20">
-        <UploadCloud className="size-6 text-primary-foreground" />
+      <div className="flex size-12 items-center justify-center rounded-xl bg-brand-gradient shadow-lg shadow-primary/20">
+        <UploadCloud className="size-6 text-white" />
       </div>
       <p className="text-sm font-medium">
         {directory ? "Drop a folder or click to choose" : "Drop files or click to browse"}

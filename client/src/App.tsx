@@ -25,6 +25,9 @@ const DropboxUploadPage = lazy(() =>
 const AdminPage = lazy(() =>
   import("@/features/admin/components/AdminPage").then((m) => ({ default: m.AdminPage })),
 );
+const ApiKeysPage = lazy(() =>
+  import("@/features/apikeys/components/ApiKeysPage").then((m) => ({ default: m.ApiKeysPage })),
+);
 
 function IndexRoute() {
   const [params] = useSearchParams();
@@ -81,8 +84,9 @@ export default function App() {
           <Route element={<RequireAuth />}>
             <Route path="/files" element={<FilesPage />} />
             <Route path="/account/change" element={<ChangePage />} />
-            {/* API docs gated behind the API-keys permission */}
+            {/* API keys + docs gated behind the API-keys permission */}
             <Route element={<RequirePermission flag="can_use_api_keys" />}>
+              <Route path="/api-keys" element={<ApiKeysPage />} />
               <Route path="/api-docs" element={<ApiDocsPage />} />
             </Route>
             <Route element={<RequireMaster />}>

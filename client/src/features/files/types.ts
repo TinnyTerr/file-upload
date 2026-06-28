@@ -7,12 +7,14 @@ export interface FileLink {
   use_count: number;
   expires_at: string | null;
   active: boolean;
+  hide_uploader: boolean;
 }
 
 /** A loose file as returned by GET /files/ (and /admin/files). */
 export interface FileObject {
   id: number;
   owner_id: number;
+  owner_username?: string;
   original_filename: string;
   source_type: string;
   saved_from_file_id: number | null;

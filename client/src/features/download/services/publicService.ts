@@ -1,6 +1,12 @@
 import { api } from "@/config/api";
 import type { EncryptionMode } from "@/features/files/types";
 
+export interface UploaderInfo {
+  username: string;
+  has_avatar: boolean;
+  user_id: number;
+}
+
 export interface PublicFileInfo {
   filename: string;
   size_bytes: number;
@@ -13,6 +19,8 @@ export interface PublicFileInfo {
   use_count: number;
   expires_at: string | null;
   hashes: Record<string, string> | null;
+  uploader: UploaderInfo | null;
+  already_saved: boolean;
 }
 
 export const publicService = {

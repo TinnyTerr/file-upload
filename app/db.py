@@ -152,6 +152,7 @@ def init_db(engine: Engine) -> None:
     from app.models import directory_collaborator as _directory_collaborator  # noqa: F401
     from app.models import dropbox_link as _dropbox_link  # noqa: F401
     from app.models import remote_upload_job as _remote_upload_job  # noqa: F401
+    from app.models import directory_link as _directory_link  # noqa: F401
 
     # create_all() does a non-atomic check-then-create: it inspects existing
     # tables, then issues bare CREATE TABLE. When multiple worker processes call
@@ -185,6 +186,13 @@ _ADDED_COLUMNS = [
     ("permissions", "can_manage_api_keys", "BOOLEAN NOT NULL DEFAULT 0"),
     ("users", "avatar_data", "BLOB"),
     ("users", "avatar_content_type", "TEXT"),
+    ("sessions", "ip_address", "TEXT"),
+    ("sessions", "user_agent", "TEXT"),
+    ("sessions", "last_seen_at", "DATETIME"),
+    ("files", "saved_from_directory_id", "INTEGER"),
+    ("directories", "hide_uploader", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("directories", "saved_from_directory_id", "INTEGER"),
+    ("links", "hide_uploader", "BOOLEAN NOT NULL DEFAULT 0"),
 ]
 
 

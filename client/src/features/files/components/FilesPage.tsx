@@ -2,7 +2,6 @@ import { UsageMeter } from "./UsageMeter";
 import { UploadPanel } from "./UploadPanel";
 import { FilesList } from "./FilesList";
 import { FoldersList } from "@/features/directories/components/FoldersList";
-import { ApiKeysSection } from "@/features/apikeys/components/ApiKeysSection";
 import { useAuth } from "@/features/auth/hooks/auth";
 
 export function FilesPage() {
@@ -21,7 +20,6 @@ export function FilesPage() {
           {canUpload && <UploadPanel />}
           <FoldersList />
           <FilesList />
-          <ApiKeysSection />
         </div>
         <div className="order-1 min-w-0 space-y-6 lg:order-2">
           <UsageMeter />

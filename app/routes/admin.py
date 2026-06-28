@@ -65,7 +65,7 @@ def _pct(part: int, total: int | None) -> float:
 def _link_status(link: Link, now: datetime) -> str:
     if not link.active:
         return "inactive"
-    if link.expires_at is not None and link.expires_at < now:
+    if link.expires_at is not None and link.expires_at <= now:
         return "expired"
     if link.max_uses is not None and link.use_count >= link.max_uses:
         return "used_up"

@@ -12,11 +12,11 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class Link(Base):
-    __tablename__ = "links"
+class DirectoryLink(Base):
+    __tablename__ = "directory_links"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    file_id: Mapped[int] = mapped_column(Integer, ForeignKey("files.id"), nullable=False)
+    directory_id: Mapped[int] = mapped_column(Integer, ForeignKey("directories.id"), nullable=False)
     slug: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     max_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
     use_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

@@ -1,5 +1,18 @@
 import type { EncryptionMode } from "@/features/files/types";
 
+export interface DirectoryLink {
+  id: number;
+  directory_id: number;
+  slug: string;
+  max_uses: number | null;
+  use_count: number;
+  expires_at: string | null;
+  active: boolean;
+  hide_uploader: boolean;
+  created_at: string;
+  url: string;
+}
+
 export interface Directory {
   id: number;
   owner_id: number;

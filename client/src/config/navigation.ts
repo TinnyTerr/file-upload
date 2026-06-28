@@ -1,4 +1,4 @@
-import { FolderUp, BookText, ShieldCheck, type LucideIcon } from "lucide-react";
+import { FolderUp, BookText, ShieldCheck, KeyRound, type LucideIcon } from "lucide-react";
 import type { PermissionFlag } from "./permissions";
 
 export interface NavItem {
@@ -16,6 +16,13 @@ export const NAV_ITEMS: NavItem[] = [
     to: "/files",
     icon: FolderUp,
     description: "Upload, share and manage your files",
+  },
+  {
+    label: "Keys",
+    to: "/api-keys",
+    icon: KeyRound,
+    description: "Manage your API keys",
+    requires: "can_use_api_keys",
   },
   {
     label: "API",

@@ -52,16 +52,14 @@ export function UserMenu({ collapsed = false }: { collapsed?: boolean }) {
 
 
   const trigger = collapsed ? (
-    <Tooltip content={user.username} side="right">
-      <Button
-        variant="ghost"
-        size="icon"
-        className="w-full justify-center"
-        aria-label={`User menu for ${user.username}`}
-      >
-        <Avatar user={user} />
-      </Button>
-    </Tooltip>
+    <Button
+      variant="ghost"
+      size="icon"
+      className="w-full justify-center"
+      aria-label={`User menu for ${user.username}`}
+    >
+      <Avatar user={user} />
+    </Button>
   ) : (
     <Button
       variant="ghost"

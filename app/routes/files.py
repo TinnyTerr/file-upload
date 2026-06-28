@@ -847,6 +847,13 @@ def save_shared_file(
     source = db.get(FileObject, link.file_id)
     if source is None:
         raise HTTPException(404, detail="not found")
+    # Prevent owner from saving their own file.
+    if source.owner_id == user.id:
+        raise HTTPException(409, detail="you own this file")
+    # Prevent saving the same file more than once.
+    already = db.query(FileObject).filter_by(owner_id=user.id, saved_from_file_id=source.id).first()
+    if already is not None:
+        raise HTTPException(409, detail="already saved")
     # Server-mode files require the ?ek= access credential before we copy bytes or
     # hand back the recovered key — verify BEFORE consuming a use so a wrong key
     # never burns a limited-use link.
@@ -947,12 +954,19 @@ def list_admin_files(
 
 
 def _serialize_files(request: Request, db: Session, files: list[FileObject]) -> list[dict]:
+    # Build a username lookup to avoid N+1 queries
+    owner_ids = {f.owner_id for f in files}
+    username_map = {
+        u.id: u.username
+        for u in db.query(User).filter(User.id.in_(owner_ids)).all()
+    } if owner_ids else {}
     result = []
     for f in files:
         links = db.query(Link).filter_by(file_id=f.id).all()
         result.append({
             "id": f.id,
             "owner_id": f.owner_id,
+            "owner_username": username_map.get(f.owner_id, f"user:{f.owner_id}"),
             "blob_id": f.blob_id,
             "original_filename": f.original_filename,
             "source_type": f.source_type,
@@ -982,6 +996,7 @@ def _serialize_files(request: Request, db: Session, files: list[FileObject]) -> 
                     "use_count": lk.use_count,
                     "expires_at": lk.expires_at.isoformat() if lk.expires_at else None,
                     "active": lk.active,
+                    "hide_uploader": lk.hide_uploader,
                 }
                 for lk in links
             ],
@@ -1022,6 +1037,7 @@ def delete_file(
 class MintLinkBody(BaseModel):
     max_uses: int | None = None
     expires_in_seconds: int | None = None
+    hide_uploader: bool = False
 
     from pydantic import field_validator
     @field_validator("max_uses", "expires_in_seconds", mode="before")
@@ -1036,6 +1052,7 @@ class EditLinkBody(BaseModel):
     max_uses: int | None = None
     expires_in_seconds: int | None = None
     active: bool | None = None
+    hide_uploader: bool | None = None
 
 
 @router.post("/files/{file_id}/links")
@@ -1061,7 +1078,7 @@ def mint_link(
             raise HTTPException(400, detail="expires_in_seconds is too large")
 
     slug = new_slug()
-    link = Link(file_id=file_id, slug=slug, max_uses=body.max_uses, expires_at=expires_at)
+    link = Link(file_id=file_id, slug=slug, max_uses=body.max_uses, expires_at=expires_at, hide_uploader=body.hide_uploader)
     db.add(link)
     db.flush()
 
@@ -1127,6 +1144,8 @@ def edit_link(
             raise HTTPException(400, detail="expires_in_seconds is too large")
     if body.active is not None:
         link.active = body.active
+    if body.hide_uploader is not None:
+        link.hide_uploader = body.hide_uploader
 
     record(db, actor=user.username, action="link.edited",
            target=f"link:{link_id}", ip=client_ip(request))

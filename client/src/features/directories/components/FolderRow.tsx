@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { ChevronDown, Folder, Trash2, ExternalLink, X, FilePlus } from "lucide-react";
+import { ChevronDown, Folder, Trash2, ExternalLink, X, FilePlus, Link2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -14,9 +14,11 @@ import { folderUrl, shareUrl } from "@/features/files/lib/shareUrl";
 import { formatBytes } from "@/lib/bytes";
 import { cn } from "@/lib/cn";
 import type { Directory } from "../types";
+import { FolderLinksModal } from "./FolderLinksModal";
 
 export function FolderRow({ dir }: { dir: Directory }) {
   const [expanded, setExpanded] = useState(false);
+  const [linksOpen, setLinksOpen] = useState(false);
   const { data: members, isLoading } = useDirMembers(dir.id, expanded);
   const del = useDeleteDirectory();
   const removeMember = useRemoveMember(dir.id);
@@ -26,6 +28,7 @@ export function FolderRow({ dir }: { dir: Directory }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const canDelete = can("can_delete") || dir.role === "owner";
+  const canManageLinks = can("can_regenerate_links") || dir.role === "owner";
   // Adding files to a folder is only safe for unencrypted folders (no stored key).
   const canAddFiles = can("can_upload") && dir.encryption_mode === "none";
   const url = shareUrl(folderUrl(dir.slug), dir.encryption_mode, { accessKey: dir.access_key, clientKeyB64: null });
@@ -67,6 +70,13 @@ export function FolderRow({ dir }: { dir: Directory }) {
               </a>
             </Button>
           </Tooltip>
+          {canManageLinks && (
+            <Tooltip content="Manage links">
+              <Button variant="ghost" size="icon" onClick={() => setLinksOpen(true)}>
+                <Link2 />
+              </Button>
+            </Tooltip>
+          )}
           {canAddFiles && (
             <Tooltip content="Add files">
               <Button variant="ghost" size="icon" loading={adding} onClick={() => fileInputRef.current?.click()}>
@@ -96,6 +106,15 @@ export function FolderRow({ dir }: { dir: Directory }) {
           />
         </div>
       </div>
+
+      <FolderLinksModal
+        open={linksOpen}
+        onOpenChange={setLinksOpen}
+        dirId={dir.id}
+        dirTitle={dir.title}
+        encryptionMode={dir.encryption_mode}
+        accessKey={dir.access_key}
+      />
 
       {expanded && (
         <div className="space-y-1.5 border-t border-border px-3 py-2.5">

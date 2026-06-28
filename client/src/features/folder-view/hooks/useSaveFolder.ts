@@ -4,7 +4,7 @@ import { api, errorMessage } from "@/config/api";
 
 export function useSaveFolder() {
   return useMutation({
-    mutationFn: (slug: string) => api.post<{ directory_id: number }>(`/d/${slug}/save`),
+    mutationFn: (slug: string) => api.post<{ id: number; slug: string }>(`/d/${slug}/save`),
     onSuccess: () => toast.success("Folder saved to your files"),
     onError: (err) => toast.error("Couldn't save folder", { description: errorMessage(err) }),
   });

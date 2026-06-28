@@ -1,5 +1,6 @@
 import { api } from "@/config/api";
 import type { EncryptionMode } from "@/features/files/types";
+import type { UploaderInfo } from "@/features/download/services/publicService";
 
 export interface PublicDirMember {
   slug: string;
@@ -14,6 +15,8 @@ export interface PublicDirInfo {
   file_count: number;
   total_bytes: number;
   files: PublicDirMember[];
+  uploader: UploaderInfo | null;
+  already_saved: boolean;
 }
 
 export const publicDirService = {

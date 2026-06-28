@@ -84,9 +84,17 @@ export function UsersTab() {
               <Card key={u.id}>
                 <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center">
                   <div className="flex min-w-0 flex-1 items-center gap-3">
-                    <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-brand-gradient text-xs font-semibold text-primary-foreground">
-                      {u.username.slice(0, 2).toUpperCase()}
-                    </span>
+                    {u.has_avatar ? (
+                      <img
+                        src={`/account/avatar/${u.id}`}
+                        alt={u.username}
+                        className="size-9 shrink-0 rounded-full object-cover"
+                      />
+                    ) : (
+                      <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-brand-gradient text-xs font-semibold text-white">
+                        {u.username.slice(0, 2).toUpperCase()}
+                      </span>
+                    )}
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="truncate font-medium">{u.username}</span>

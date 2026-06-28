@@ -66,6 +66,7 @@ export interface AdminUser {
   id: number;
   username: string;
   role: Role;
+  has_avatar: boolean;
   must_change_credentials: boolean;
   created_at: string;
   permissions: UserPermissions | null;

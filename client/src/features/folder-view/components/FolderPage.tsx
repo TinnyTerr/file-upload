@@ -63,6 +63,24 @@ export function FolderPage() {
 
           <EncryptionBanner mode={info.encryption_mode} hasKey={hasKey} />
 
+          {/* Uploader info */}
+          {info.uploader && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              {info.uploader.has_avatar ? (
+                <img
+                  src={`/account/avatar/${info.uploader.user_id}`}
+                  alt={info.uploader.username}
+                  className="size-6 rounded-full object-cover"
+                />
+              ) : (
+                <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-brand-gradient text-xs font-semibold text-white">
+                  {info.uploader.username.slice(0, 2).toUpperCase()}
+                </span>
+              )}
+              <span>Shared by <strong>{info.uploader.username}</strong></span>
+            </div>
+          )}
+
           <div className="space-y-2">
             <Button
               size="lg"
@@ -75,8 +93,14 @@ export function FolderPage() {
             </Button>
             {zipping && <Progress value={progress.total ? Math.round((progress.done / progress.total) * 100) : 0} />}
             {user && (
-              <Button variant="secondary" className="w-full" loading={saveFolder.isPending} onClick={() => saveFolder.mutate(slug)}>
-                <Save /> Save folder to my files
+              <Button
+                variant="secondary"
+                className="w-full"
+                loading={saveFolder.isPending}
+                disabled={info.already_saved}
+                onClick={() => saveFolder.mutate(slug)}
+              >
+                <Save /> {info.already_saved ? "Already saved" : "Save folder to my files"}
               </Button>
             )}
           </div>

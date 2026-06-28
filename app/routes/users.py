@@ -39,7 +39,6 @@ class CreateUserBody(BaseModel):
     can_create_directories: bool | None = None
     can_manage_lifecycle: bool | None = None
     can_use_api_keys: bool | None = None
-    can_use_p2p: bool | None = None
     quota_bytes: int | None = None
     max_file_bytes: int | None = None
 
@@ -53,7 +52,6 @@ class UpdatePermissionsBody(BaseModel):
     can_create_directories: bool | None = None
     can_manage_lifecycle: bool | None = None
     can_use_api_keys: bool | None = None
-    can_use_p2p: bool | None = None
     can_view_admin: bool | None = None
     can_manage_users: bool | None = None
     can_manage_storage: bool | None = None
@@ -81,6 +79,7 @@ def list_users(
             "id": u.id,
             "username": u.username,
             "role": u.role,
+            "has_avatar": u.avatar_data is not None,
             "must_change_credentials": u.must_change_credentials,
             "created_at": u.created_at.isoformat(),
             "permissions": {
@@ -92,7 +91,6 @@ def list_users(
                 "can_create_directories": perm.can_create_directories,
                 "can_manage_lifecycle": perm.can_manage_lifecycle,
                 "can_use_api_keys": perm.can_use_api_keys,
-                "can_use_p2p": perm.can_use_p2p,
                 "can_view_admin": perm.can_view_admin,
                 "can_manage_users": perm.can_manage_users,
                 "can_manage_storage": perm.can_manage_storage,
@@ -137,7 +135,7 @@ def create_user(
         for field in (
             "can_upload", "can_upload_client_encrypted", "can_delete",
             "can_regenerate_links", "can_delete_links", "can_create_directories",
-            "can_manage_lifecycle", "can_use_api_keys", "can_use_p2p",
+            "can_manage_lifecycle", "can_use_api_keys",
             "can_view_admin", "can_manage_users", "can_manage_storage",
             "can_manage_api_keys",
         ):
@@ -214,7 +212,7 @@ def patch_user(
             for field in (
                 "can_upload", "can_upload_client_encrypted", "can_delete",
                 "can_regenerate_links", "can_delete_links", "can_create_directories",
-                "can_manage_lifecycle", "can_use_api_keys", "can_use_p2p",
+                "can_manage_lifecycle", "can_use_api_keys",
                 "can_view_admin", "can_manage_users", "can_manage_storage",
                 "can_manage_api_keys",
             ):

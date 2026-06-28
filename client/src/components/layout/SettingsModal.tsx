@@ -18,7 +18,11 @@ import {
   Sun,
   Moon,
   Camera,
+  Laptop,
+  LogOut,
 } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api } from "@/config/api";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import Cropper from "react-easy-crop";
 import type { Area } from "react-easy-crop";
@@ -787,14 +791,159 @@ function DangerZoneTab() {
 }
 
 // ---------------------------------------------------------------------------
+// Sessions tab
+// ---------------------------------------------------------------------------
+
+interface SessionInfo {
+  id: string;
+  ip_address: string | null;
+  user_agent: string | null;
+  created_at: string;
+  last_seen_at: string;
+  expires_at: string;
+  is_current: boolean;
+}
+
+const SESSIONS_KEY = ["auth", "sessions"];
+
+function SessionsTab() {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const { logout } = useAuth();
+  const { data: sessions, isLoading } = useQuery({
+    queryKey: SESSIONS_KEY,
+    queryFn: () => api.get<{ sessions: SessionInfo[] }>("/auth/sessions").then((r) => r.sessions),
+  });
+  const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
+  const [revokeAllOpen, setRevokeAllOpen] = useState(false);
+  const [pw, setPw] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleRevokeOne = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!revokeTarget || !pw) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.delete(`/auth/sessions/${revokeTarget}`, { json: { current_password: pw } });
+      toast.success("Session revoked");
+      setRevokeTarget(null);
+      setPw("");
+      qc.invalidateQueries({ queryKey: SESSIONS_KEY });
+    } catch (err) { setError(errorMessage(err)); }
+    finally { setSubmitting(false); }
+  };
+
+  const handleRevokeAll = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pw) { setError("Password is required."); return; }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.delete("/auth/sessions", { json: { current_password: pw } });
+      toast.success("All sessions revoked");
+      await logout();
+      navigate("/login", { replace: true });
+    } catch (err) { setError(errorMessage(err)); }
+    finally { setSubmitting(false); }
+  };
+
+  function shortUA(ua: string | null) {
+    if (!ua) return "Unknown browser";
+    if (ua.includes("Firefox")) return "Firefox";
+    if (ua.includes("Edg")) return "Edge";
+    if (ua.includes("Chrome")) return "Chrome";
+    if (ua.includes("Safari")) return "Safari";
+    return ua.slice(0, 40);
+  }
+
+  const closeRevoke = () => { setRevokeTarget(null); setRevokeAllOpen(false); setPw(""); setError(null); };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <div className="mb-1 flex items-center gap-2">
+          <Laptop className="size-4 text-primary" />
+          <h2 className="text-sm font-semibold text-foreground">Active sessions</h2>
+        </div>
+        <p className="text-xs text-muted-foreground">Devices currently signed in to your account.</p>
+      </div>
+
+      {isLoading ? (
+        <div className="space-y-2">
+          <div className="h-14 w-full animate-pulse rounded-lg bg-secondary/40" />
+          <div className="h-14 w-full animate-pulse rounded-lg bg-secondary/40" />
+        </div>
+      ) : !sessions?.length ? (
+        <p className="text-sm text-muted-foreground">No active sessions.</p>
+      ) : (
+        <div className="space-y-2">
+          {sessions.map((s) => (
+            <div key={s.id} className={cn("flex items-center gap-3 rounded-lg border px-3 py-2.5", s.is_current ? "border-primary/40 bg-primary/5" : "border-border bg-card/30")}>
+              <Laptop className="size-4 shrink-0 text-muted-foreground" />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium">
+                  {shortUA(s.user_agent)}
+                  {s.is_current && <span className="ml-2 rounded-full bg-primary/15 px-1.5 py-0.5 text-xs text-primary">current</span>}
+                </p>
+                <p className="text-xs text-muted-foreground">{s.ip_address || "unknown IP"} · last active {new Date(s.last_seen_at).toLocaleString()}</p>
+              </div>
+              {!s.is_current && (
+                <Button variant="ghost" size="icon" className="shrink-0 text-destructive" onClick={() => { setRevokeTarget(s.id); setError(null); setPw(""); }}>
+                  <LogOut className="size-4" />
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Revoke one session */}
+      <SubModal open={!!revokeTarget} onOpenChange={(o) => !o && closeRevoke()} title="Revoke session">
+        <form onSubmit={handleRevokeOne} className="space-y-4">
+          <p className="text-sm text-muted-foreground">Enter your password to sign out this session.</p>
+          <div className="space-y-1.5"><Label>Current password</Label><PasswordInput value={pw} onChange={(e) => setPw(e.target.value)} autoComplete="current-password" required /></div>
+          {error && <ErrorMsg message={error} />}
+          <div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={closeRevoke}>Cancel</Button><Button type="submit" loading={submitting}>Revoke</Button></div>
+        </form>
+      </SubModal>
+
+      {/* Revoke all sessions */}
+      <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3">
+        {revokeAllOpen ? (
+          <form onSubmit={handleRevokeAll} className="space-y-3">
+            <p className="text-sm font-medium text-foreground">Sign out of all sessions</p>
+            <div className="space-y-1.5"><Label>Current password</Label><PasswordInput value={pw} onChange={(e) => setPw(e.target.value)} autoComplete="current-password" required /></div>
+            {error && <ErrorMsg message={error} />}
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="ghost" size="sm" onClick={closeRevoke}>Cancel</Button>
+              <Button type="submit" size="sm" loading={submitting} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">Sign out all</Button>
+            </div>
+          </form>
+        ) : (
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm text-muted-foreground">Sign out everywhere, including this session.</p>
+            <Button variant="outline" size="sm" className="shrink-0 border-destructive/40 text-destructive hover:bg-destructive/10" onClick={() => { setRevokeAllOpen(true); setError(null); setPw(""); }}>
+              <LogOut className="size-3.5" /> Sign out all
+            </Button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Settings sidebar nav
 // ---------------------------------------------------------------------------
 
-type SettingsTab = "profile" | "account" | "preferences" | "danger";
+type SettingsTab = "profile" | "account" | "sessions" | "preferences" | "danger";
 
 const SETTINGS_TABS: { id: SettingsTab; label: string; icon: React.ElementType; danger?: boolean }[] = [
   { id: "profile", label: "Profile", icon: Camera },
   { id: "account", label: "Account", icon: UserIcon },
+  { id: "sessions", label: "Sessions", icon: Laptop },
   { id: "preferences", label: "Preferences", icon: SlidersHorizontal },
   { id: "danger", label: "Danger Zone", icon: TriangleAlert, danger: true },
 ];
@@ -871,6 +1020,7 @@ export function SettingsModal({
             <div className="flex-1 overflow-y-auto p-6">
               {activeTab === "profile" && <ProfileTab />}
               {activeTab === "account" && <AccountTab />}
+              {activeTab === "sessions" && <SessionsTab />}
               {activeTab === "preferences" && <PreferencesTab />}
               {activeTab === "danger" && <DangerZoneTab />}
             </div>
