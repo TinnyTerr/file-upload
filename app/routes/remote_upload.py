@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import logging
 import mimetypes
 import os
 import secrets
 import socket
+import ssl
 import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -61,56 +62,97 @@ def validate_public_http_url(url: str) -> urllib.parse.ParseResult:
     return parsed
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
-        return None
-
-
 def _filename_from_url(parsed: urllib.parse.ParseResult, fallback: str) -> str:
     name = os.path.basename(urllib.parse.unquote(parsed.path or "")) or fallback
     return name[:1024] or fallback
 
 
+def _open_pinned(parsed: urllib.parse.ParseResult, *, timeout: float) -> tuple[http.client.HTTPConnection, str]:
+    """Resolve + validate the host, then connect to the *exact* validated IP.
+
+    Pinning the connection to the address we just checked closes the DNS-rebinding
+    TOCTOU: urllib re-resolves the hostname at connect time, so an attacker could
+    flip the record to an internal/metadata address between validation and fetch.
+    Here the socket is bound to the validated IP while the original hostname is kept
+    for the Host header and TLS SNI/certificate verification.
+    """
+    host = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        raise HTTPException(400, detail="could not resolve remote host")
+    if not infos:
+        raise HTTPException(400, detail="could not resolve remote host")
+    for info in infos:
+        if not _is_public_ip(info[4][0]):
+            raise HTTPException(400, detail="remote host resolves to a private or local address")
+    ip = infos[0][4][0]
+    sock = socket.create_connection((ip, port), timeout=timeout)
+    if parsed.scheme == "https":
+        ctx = ssl.create_default_context()
+        sock = ctx.wrap_socket(sock, server_hostname=host)
+        conn: http.client.HTTPConnection = http.client.HTTPSConnection(host, port, timeout=timeout)
+    else:
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    # Pre-bind the validated socket so http.client never re-resolves/reconnects.
+    conn.sock = sock
+    return conn, host
+
+
 def download_remote_url(url: str, destination: Path, *, max_bytes: int) -> dict:
     current = url
-    opener = urllib.request.build_opener(_NoRedirect)
     for _ in range(6):
-        parsed = validate_public_http_url(current)
-        req = urllib.request.Request(current, headers={"User-Agent": "fileupload-remote-fetch/1.0"})
+        parsed = urllib.parse.urlparse(current)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise HTTPException(400, detail="only public http/https URLs are allowed")
+        conn, _host = _open_pinned(parsed, timeout=15)
         try:
-            with opener.open(req, timeout=15) as response:
-                length = response.headers.get("content-length")
-                if length is not None and int(length) > max_bytes:
-                    raise HTTPException(413, detail="remote file exceeds max file size")
-                written = 0
-                with open(destination, "wb") as out:
-                    while True:
-                        chunk = response.read(_CHUNK)
-                        if not chunk:
-                            break
-                        written += len(chunk)
-                        if written > max_bytes:
-                            raise HTTPException(413, detail="remote file exceeds max file size")
-                        out.write(chunk)
-                content_type = response.headers.get_content_type() or mimetypes.guess_type(parsed.path)[0]
-                return {
-                    "filename": _filename_from_url(parsed, "remote-upload"),
-                    "content_type": content_type or "application/octet-stream",
-                    "size_bytes": written,
-                }
-        except urllib.error.HTTPError as exc:
-            if exc.code in {301, 302, 303, 307, 308}:
-                location = exc.headers.get("location")
+            target = parsed.path or "/"
+            if parsed.query:
+                target += "?" + parsed.query
+            conn.request("GET", target, headers={"User-Agent": "fileupload-remote-fetch/1.0", "Accept": "*/*"})
+            response = conn.getresponse()
+            status = response.status
+            if status in {301, 302, 303, 307, 308}:
+                location = response.getheader("location")
                 if not location:
                     raise HTTPException(400, detail="remote redirect missing location")
+                # Re-validate (and re-pin) the redirect target on the next iteration.
                 current = urllib.parse.urljoin(current, location)
-                validate_public_http_url(current)
                 continue
-            raise HTTPException(400, detail=f"remote download failed with HTTP {exc.code}")
+            if status >= 400:
+                raise HTTPException(400, detail=f"remote download failed with HTTP {status}")
+            length = response.getheader("content-length")
+            if length is not None:
+                try:
+                    if int(length) > max_bytes:
+                        raise HTTPException(413, detail="remote file exceeds max file size")
+                except ValueError:
+                    pass
+            written = 0
+            with open(destination, "wb") as out:
+                while True:
+                    chunk = response.read(_CHUNK)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise HTTPException(413, detail="remote file exceeds max file size")
+                    out.write(chunk)
+            ctype = response.getheader("content-type")
+            content_type = (ctype.split(";")[0].strip() if ctype else None) or mimetypes.guess_type(parsed.path)[0]
+            return {
+                "filename": _filename_from_url(parsed, "remote-upload"),
+                "content_type": content_type or "application/octet-stream",
+                "size_bytes": written,
+            }
         except HTTPException:
             raise
         except Exception as exc:
             raise HTTPException(400, detail=f"remote download failed: {exc}")
+        finally:
+            conn.close()
     raise HTTPException(400, detail="too many remote redirects")
 
 

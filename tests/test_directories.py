@@ -11,9 +11,12 @@ B = b"second member, different bytes " * 200
 
 
 def _create_dir(c, csrf, mode="none", title="My folder"):
+    body = {"title": title, "encryption_mode": mode}
+    if mode == "client":
+        body["key_check_blob"] = "test-key-check"
     r = c.post(
         "/directories",
-        json={"title": title, "encryption_mode": mode},
+        json=body,
         headers={"X-CSRF-Token": csrf},
     )
     assert r.status_code == 200, r.text
@@ -41,6 +44,44 @@ def test_create_plain_directory_and_list(master_session):
     listing = c.get("/directories/").json()["directories"]
     match = next(x for x in listing if x["id"] == d["id"])
     assert match["file_count"] == 0
+
+
+def test_client_directory_persists_key_check_blob(master_session):
+    c, csrf, _ = master_session
+
+    created = c.post(
+        "/directories",
+        json={
+            "title": "Locked folder",
+            "encryption_mode": "client",
+            "key_check_blob": "fupl-check-ciphertext",
+        },
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["key_check_blob"] == "fupl-check-ciphertext"
+
+    listing = c.get("/directories/").json()["directories"]
+    match = next(x for x in listing if x["id"] == body["id"])
+    assert match["key_check_blob"] == "fupl-check-ciphertext"
+
+    info = c.get(f"/d/{body['slug']}/info").json()
+    assert info["key_check_blob"] == "fupl-check-ciphertext"
+
+
+def test_client_directory_requires_key_check_blob(master_session):
+    c, csrf, _ = master_session
+
+    created = c.post(
+        "/directories",
+        json={"title": "Locked folder", "encryption_mode": "client"},
+        headers={"X-CSRF-Token": csrf},
+    )
+
+    assert created.status_code == 400
+    assert created.json()["detail"] == "client directories require key_check_blob"
 
 
 def test_directory_info_and_zip_plain(master_session):

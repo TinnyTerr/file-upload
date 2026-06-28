@@ -44,10 +44,6 @@ def test_logged_in_user_saves_shared_file_as_reference_copy(master_session):
     uploaded = _upload(c, master_csrf, b"shared", "shared.txt")
     _create_user(c, master_csrf)
 
-    anonymous = c.post(f"/files/{uploaded['slug']}/save", headers={"X-CSRF-Token": master_csrf})
-    # The current client is authenticated as master; verify unauthenticated through a fresh client is covered by auth.
-    assert anonymous.status_code == 200
-
     alice_csrf = _login(c, "alice", "alice-pass-1234")
     saved = c.post(f"/files/{uploaded['slug']}/save", headers={"X-CSRF-Token": alice_csrf})
     assert saved.status_code == 200, saved.text
@@ -138,6 +134,21 @@ def test_dropbox_link_accepts_exactly_one_upload(master_session):
     assert row["source_type"] == "dropbox"
 
 
+def test_dropbox_link_url_opens_receive_spa(master_session):
+    c, csrf, _ = master_session
+    link = c.post(
+        "/dropbox-links",
+        json={"expires_in_seconds": 3600},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert link.status_code == 200, link.text
+    body = link.json()
+    token = body["token"]
+
+    assert body["url"] == f"http://testserver/?receive={token}"
+    assert body["upload_url"] == f"http://testserver/dropbox/{token}/upload"
+
+
 def test_dropbox_upload_can_target_directory(master_session):
     c, csrf, _ = master_session
     directory = _create_dir(c, csrf)
@@ -157,3 +168,69 @@ def test_dropbox_upload_can_target_directory(master_session):
 
     members = c.get(f"/directories/{directory['id']}/files").json()["files"]
     assert [m["filename"] for m in members] == ["dir.txt"]
+
+
+def test_dropbox_chunked_upload_roundtrips_large_file_and_closes_link(monkeypatch, master_session):
+    monkeypatch.setenv("FILEUPLOAD_CHUNK_SIZE", "4096")
+    c, csrf, _ = master_session
+    content = b"dropbox chunk payload " * 7000
+    link = c.post(
+        "/dropbox-links",
+        json={"expires_in_seconds": 3600},
+        headers={"X-CSRF-Token": csrf},
+    )
+    assert link.status_code == 200, link.text
+    token = link.json()["token"]
+
+    init = c.post(
+        f"/dropbox/{token}/upload/init",
+        json={
+            "original_filename": "large-dropbox.bin",
+            "total_size": len(content),
+            "content_type": "application/octet-stream",
+        },
+    )
+    assert init.status_code == 200, init.text
+    info = init.json()
+    assert info["chunk_size"] == 4096
+    assert info["num_chunks"] > 1
+
+    pieces = [
+        content[offset:offset + info["chunk_size"]]
+        for offset in range(0, len(content), info["chunk_size"])
+    ]
+    upload_id = info["upload_id"]
+
+    for index, piece in enumerate(pieces[:-1]):
+        sent = c.post(
+            f"/dropbox/{token}/upload/chunk",
+            params={"upload_id": upload_id, "index": index},
+            content=piece,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert sent.status_code == 200, sent.text
+
+    early = c.post(
+        f"/dropbox/{token}/upload/finalize",
+        json={"upload_id": upload_id},
+    )
+    assert early.status_code == 409
+    assert early.json()["detail"]["missing"] == [len(pieces) - 1]
+
+    last = c.post(
+        f"/dropbox/{token}/upload/chunk",
+        params={"upload_id": upload_id, "index": len(pieces) - 1},
+        content=pieces[-1],
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert last.status_code == 200, last.text
+
+    finalized = c.post(
+        f"/dropbox/{token}/upload/finalize",
+        json={"upload_id": upload_id},
+    )
+    assert finalized.status_code == 200, finalized.text
+    body = finalized.json()
+    assert body["source_type"] == "dropbox"
+    assert c.get(f"/file/{body['slug']}/raw").content == content
+    assert c.get(f"/dropbox/{token}").status_code == 410

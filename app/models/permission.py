@@ -39,7 +39,8 @@ class Permission(Base):
     can_use_api_keys: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
-    can_use_p2p: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # can_use_p2p column intentionally removed from the model; the column may
+    # still exist in old SQLite DBs and is simply ignored by SQLAlchemy.
     can_view_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     can_manage_users: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     can_manage_storage: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

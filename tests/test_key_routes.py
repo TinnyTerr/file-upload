@@ -24,14 +24,14 @@ def test_list_keys_no_raw_key(master_session):
         assert "key_hash" not in k
 
 
-def test_deactivate_key(master_session):
+def test_delete_key_removes_it_from_owner_list(master_session):
     c, csrf, _ = master_session
     key_id = _create_key(c, csrf).json()["id"]
     r = c.delete(f"/keys/{key_id}", headers={"X-CSRF-Token": csrf})
     assert r.status_code == 200
+    assert r.json()["status"] == "deleted"
     keys = c.get("/keys/").json()["keys"]
-    k = next(x for x in keys if x["id"] == key_id)
-    assert k["active"] is False
+    assert all(k["id"] != key_id for k in keys)
 
 
 def test_reset_ip_success(master_session):

@@ -65,7 +65,7 @@ def _pct(part: int, total: int | None) -> float:
 def _link_status(link: Link, now: datetime) -> str:
     if not link.active:
         return "inactive"
-    if link.expires_at is not None and link.expires_at < now:
+    if link.expires_at is not None and link.expires_at <= now:
         return "expired"
     if link.max_uses is not None and link.use_count >= link.max_uses:
         return "used_up"
@@ -132,11 +132,15 @@ def storage_details(
     for link in db.query(Link).all():
         link_status_counts[_link_status(link, now)] += 1
 
+    # Deleted keys are soft-deleted (active=False) so their per-user numbers stay
+    # stable, but a revoked key isn't an operational "inactive" key — count the
+    # live-key breakdown and surface revoked keys separately.
     api_key_status_counts = {
         "active": db.query(func.count(ApiKey.id)).filter_by(active=True).scalar() or 0,
-        "inactive": db.query(func.count(ApiKey.id)).filter_by(active=False).scalar() or 0,
-        "bound": db.query(func.count(ApiKey.id)).filter(ApiKey.bound_ip.is_not(None)).scalar() or 0,
-        "unbound": db.query(func.count(ApiKey.id)).filter(ApiKey.bound_ip.is_(None)).scalar() or 0,
+        "inactive": 0,
+        "revoked": db.query(func.count(ApiKey.id)).filter_by(active=False).scalar() or 0,
+        "bound": db.query(func.count(ApiKey.id)).filter(ApiKey.active.is_(True), ApiKey.bound_ip.is_not(None)).scalar() or 0,
+        "unbound": db.query(func.count(ApiKey.id)).filter(ApiKey.active.is_(True), ApiKey.bound_ip.is_(None)).scalar() or 0,
     }
     recent_audit_counts = [
         {"action": action, "count": count}
@@ -334,7 +338,7 @@ def _serialize_file_lifecycle(f: FileObject) -> dict:
 
 def _bulk_action_permission(action: str) -> str:
     permissions = {
-        "revoke_api_keys": "can_manage_api_keys",
+        "delete_api_keys": "can_manage_api_keys",
         "reset_api_key_ips": "can_manage_api_keys",
         "delete_inactive_links": "can_delete_links",
         "delete_files": "can_manage_storage",
@@ -383,8 +387,8 @@ def _bulk_candidates(action: str, body: BulkActionBody, db: Session) -> list:
     _bulk_action_permission(action)
     ids = _dedupe_ids(body.ids)
 
-    if action == "revoke_api_keys":
-        q = db.query(ApiKey).filter_by(active=True)
+    if action == "delete_api_keys":
+        q = db.query(ApiKey)
         if ids:
             q = q.filter(ApiKey.id.in_(ids))
         if body.owner_id is not None:
@@ -475,28 +479,43 @@ def _unlink_queued(paths: list[str | None]) -> None:
             pass
 
 
-@router.post("/files/{file_id}/archive")
-def archive_file(
-    file_id: int,
-    request: Request,
-    _csrf: SessionRow = Depends(require_csrf),
-    master: User = Depends(require_master),
-    db: Session = Depends(get_db),
-) -> dict:
+def _shared_blob(db: Session, f: FileObject):
+    """Return the file's ContentBlob iff its physical bytes are shared (ref>1).
+
+    Archiving/unarchiving rewrites bytes in place; doing so on a deduplicated blob
+    would corrupt every other file that points at it, so those operations must
+    refuse shared blobs.
+    """
+    from app.models.content_blob import ContentBlob
+
+    if not f.blob_id:
+        return None
+    blob = db.get(ContentBlob, f.blob_id)
+    if blob is not None and (blob.ref_count or 1) > 1:
+        return blob
+    return None
+
+
+def _archive_file_core(db: Session, request: Request, actor: str, f: FileObject) -> dict:
+    """Archive one file. Shared by the master-only route and the bulk runner;
+    authorization is enforced by each caller's own dependency."""
+    from app.models.content_blob import ContentBlob
     from app.storage.compress import compress_file, should_compress
 
-    f = _get_file(db, file_id)
-    _log.info("manual archive requested file_id=%s owner_id=%s actor_id=%s", f.id, f.owner_id, master.id)
+    _log.info("archive requested file_id=%s owner_id=%s actor=%s", f.id, f.owner_id, actor)
     if f.archived:
         return _serialize_file_lifecycle(f)
     if f.encryption_mode == "client":
         raise HTTPException(400, detail="client-side encrypted files cannot be archived server-side")
-    if f.compressed or not should_compress(f.content_type):
+    if f.compressed or not should_compress(f.content_type) or _shared_blob(db, f) is not None:
+        # Already compact, incompressible, or backed by deduplicated bytes we must
+        # not rewrite — retire it from the active scan set without touching bytes.
         f.lifecycle_state = "archived"
         db.commit()
-        _log.info("manual archive marked file archived without recompressing file_id=%s", f.id)
+        _log.info("archive marked file archived without recompressing file_id=%s", f.id)
         return _serialize_file_lifecycle(f)
 
+    blob = db.get(ContentBlob, f.blob_id) if f.blob_id else None
     src = safe_join(storage_root(), f.storage_path)
     if not src.exists():
         raise HTTPException(500, detail="file missing from storage")
@@ -514,11 +533,16 @@ def archive_file(
         f.archived = True
         f.archive_codec = "zstd"
         f.lifecycle_state = "archived"
-        record(db, actor=master.username, action="file.archived",
-               target=f"file:{file_id}", ip=client_ip(request))
+        # Keep global storage accounting (sum of ContentBlob.stored_size_bytes) in
+        # step with the now-compressed bytes on disk.
+        if blob is not None:
+            blob.stored_size_bytes = stored
+            blob.transform_key = f"{blob.transform_key}|archived"[:64]
+        record(db, actor=actor, action="file.archived",
+               target=f"file:{f.id}", ip=client_ip(request))
         db.commit()
         _log.info(
-            "manual archive completed file_id=%s original_bytes=%s stored_bytes=%s saved_bytes=%s",
+            "archive completed file_id=%s original_bytes=%s stored_bytes=%s saved_bytes=%s",
             f.id,
             original,
             stored,
@@ -529,24 +553,20 @@ def archive_file(
         tmp.unlink(missing_ok=True)
         f.lifecycle_state = "active"
         db.commit()
-        _log.exception("manual archive failed file_id=%s", file_id)
+        _log.exception("archive failed file_id=%s", f.id)
         raise
 
 
-@router.post("/files/{file_id}/unarchive")
-def unarchive_file(
-    file_id: int,
-    request: Request,
-    _csrf: SessionRow = Depends(require_csrf),
-    master: User = Depends(require_master),
-    db: Session = Depends(get_db),
-) -> dict:
+def _unarchive_file_core(db: Session, request: Request, actor: str, f: FileObject) -> dict:
+    from app.models.content_blob import ContentBlob
     from app.storage.compress import decompress_stream
 
-    f = _get_file(db, file_id)
-    _log.info("manual unarchive requested file_id=%s owner_id=%s actor_id=%s", f.id, f.owner_id, master.id)
+    _log.info("unarchive requested file_id=%s owner_id=%s actor=%s", f.id, f.owner_id, actor)
     if not f.archived:
         return _serialize_file_lifecycle(f)
+    if _shared_blob(db, f) is not None:
+        raise HTTPException(409, detail="file shares deduplicated storage with other files and cannot be unarchived")
+    blob = db.get(ContentBlob, f.blob_id) if f.blob_id else None
     src = safe_join(storage_root(), f.storage_path)
     if not src.exists():
         raise HTTPException(500, detail="file missing from storage")
@@ -578,17 +598,43 @@ def unarchive_file(
         f.archive_saved_bytes = 0
         f.lifecycle_state = "active"
         f.last_downloaded_at = datetime.now(timezone.utc)
-        record(db, actor=master.username, action="file.unarchived",
-               target=f"file:{file_id}", ip=client_ip(request))
+        if blob is not None:
+            blob.stored_size_bytes = f.stored_size_bytes
+        record(db, actor=actor, action="file.unarchived",
+               target=f"file:{f.id}", ip=client_ip(request))
         db.commit()
-        _log.info("manual unarchive completed file_id=%s restored_bytes=%s", f.id, f.stored_size_bytes)
+        _log.info("unarchive completed file_id=%s restored_bytes=%s", f.id, f.stored_size_bytes)
         return _serialize_file_lifecycle(f)
     except Exception:
         tmp.unlink(missing_ok=True)
         f.lifecycle_state = "archived"
         db.commit()
-        _log.exception("manual unarchive failed file_id=%s", file_id)
+        _log.exception("unarchive failed file_id=%s", f.id)
         raise
+
+
+@router.post("/files/{file_id}/archive")
+def archive_file(
+    file_id: int,
+    request: Request,
+    _csrf: SessionRow = Depends(require_csrf),
+    master: User = Depends(require_master),
+    db: Session = Depends(get_db),
+) -> dict:
+    f = _get_file(db, file_id)
+    return _archive_file_core(db, request, master.username, f)
+
+
+@router.post("/files/{file_id}/unarchive")
+def unarchive_file(
+    file_id: int,
+    request: Request,
+    _csrf: SessionRow = Depends(require_csrf),
+    master: User = Depends(require_master),
+    db: Session = Depends(get_db),
+) -> dict:
+    f = _get_file(db, file_id)
+    return _unarchive_file_core(db, request, master.username, f)
 
 
 @router.post("/lifecycle/temp-expiry")
@@ -685,12 +731,12 @@ def bulk_run(
     processed = 0
     unlink_after_commit: list[str | None] = []
 
-    if body.action == "revoke_api_keys":
+    if body.action == "delete_api_keys":
         for key in candidates:
-            key.active = False
+            db.delete(key)
             processed += 1
         if processed:
-            record(db, actor=user.username, action="bulk.apikeys_revoked",
+            record(db, actor=user.username, action="bulk.apikeys_deleted",
                    target=f"api_keys:{processed}", ip=client_ip(request))
         db.commit()
 
@@ -723,11 +769,16 @@ def bulk_run(
         _unlink_queued(unlink_after_commit)
 
     elif body.action == "delete_directories":
+        from app.models.dropbox_link import DropboxUploadLink
         for directory in candidates:
             members = db.query(FileObject).filter_by(directory_id=directory.id).all()
             for member in members:
                 unlink_after_commit.append(_queue_file_delete(db, member))
             db.flush()
+            # Clear rows that FK-reference the directory before deleting it, or the
+            # commit fails with an IntegrityError (FKs are enforced).
+            db.query(DropboxUploadLink).filter_by(target_directory_id=directory.id).delete()
+            db.query(DirectoryCollaborator).filter_by(directory_id=directory.id).delete()
             db.delete(directory)
             processed += 1
         if processed:
@@ -738,7 +789,7 @@ def bulk_run(
 
     elif body.action == "archive_files":
         for file_obj in candidates:
-            archive_file(file_obj.id, request, _csrf, user, db)
+            _archive_file_core(db, request, user.username, file_obj)
             processed += 1
         if processed:
             record(db, actor=user.username, action="bulk.files_archived",
@@ -747,7 +798,12 @@ def bulk_run(
 
     elif body.action == "unarchive_files":
         for file_obj in candidates:
-            unarchive_file(file_obj.id, request, _csrf, user, db)
+            try:
+                _unarchive_file_core(db, request, user.username, file_obj)
+            except HTTPException:
+                # Skip files that can't be unarchived in bulk (e.g. shared
+                # deduplicated storage) rather than aborting the whole batch.
+                continue
             processed += 1
         if processed:
             record(db, actor=user.username, action="bulk.files_unarchived",

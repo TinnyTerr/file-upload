@@ -17,8 +17,8 @@ def client(tmp_path):
     def _master(u: User = Depends(require_master)):
         return {"u": u.username}
 
-    @app.get("/_t/p2p")
-    def _p2p(u: User = Depends(require_permission("can_use_p2p"))):
+    @app.get("/_t/ece")
+    def _ece(u: User = Depends(require_permission("can_upload_client_encrypted"))):
         return {"u": u.username}
 
     with TestClient(app) as c:
@@ -47,9 +47,9 @@ def test_permission_denied_when_flag_false(client):
     with state.session_factory() as s:
         u = s.query(User).filter_by(username="boss").one()
         p = ensure_permissions(s, u.id)
-        p.can_use_p2p = False
+        p.can_upload_client_encrypted = False
         s.commit()
-    assert c.get("/_t/p2p").status_code == 403
+    assert c.get("/_t/ece").status_code == 403
 
 
 def test_permission_allows_when_flag_true(client):
@@ -58,6 +58,6 @@ def test_permission_allows_when_flag_true(client):
     with state.session_factory() as s:
         u = s.query(User).filter_by(username="boss").one()
         p = ensure_permissions(s, u.id)
-        p.can_use_p2p = True
+        p.can_upload_client_encrypted = True
         s.commit()
-    assert c.get("/_t/p2p").status_code == 200
+    assert c.get("/_t/ece").status_code == 200

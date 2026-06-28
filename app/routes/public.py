@@ -17,11 +17,10 @@ from app.audit.log import record
 from app.deps import client_ip, get_db
 from app.links.consume import consume_use, resolve_active_link
 from app.models.file import FileObject
+from app.spa import render_spa
 from app.storage.blobs import file_hashes
 
 router = APIRouter(tags=["public"])
-
-_STATIC = Path(__file__).parent.parent / "static"
 
 # CSP for the download experience. The page decrypts in a Web Worker and renders
 # image/video/audio/pdf previews, so worker-src/media-src/img-src/frame-src must
@@ -100,13 +99,42 @@ def _parse_range(header: str, file_size: int) -> tuple[int, int] | None:
 
 
 @router.get("/file/{slug}/info")
-def file_info(slug: str, db: Session = Depends(get_db)) -> dict:
+def file_info(slug: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    from app.deps import require_active_user, current_session
     link = resolve_active_link(db, slug)
     if link is None:
         raise HTTPException(404, detail="not found")
     f = db.get(FileObject, link.file_id)
     if f is None:
         raise HTTPException(404, detail="not found")
+
+    # Uploader info — only exposed when link.hide_uploader is False
+    uploader = None
+    if not link.hide_uploader:
+        from app.models.user import User
+        owner = db.get(User, f.owner_id)
+        if owner is not None:
+            uploader = {
+                "username": owner.username,
+                "has_avatar": owner.avatar_data is not None,
+                "user_id": owner.id,
+            }
+
+    # Whether the authenticated viewer has already saved this file
+    already_saved = False
+    from app.security.sessions import COOKIE_NAME
+    from app.security.sessions import SessionManager
+    cookie = request.cookies.get(COOKIE_NAME)
+    if cookie:
+        state = request.app.state.app_state
+        session_row = state.session_manager.resolve(db, cookie)
+        if session_row is not None:
+            from app.models.file import FileObject as FO
+            already_saved = (
+                db.query(FO).filter_by(owner_id=session_row.user_id, saved_from_file_id=f.id).first()
+                is not None
+            ) or f.owner_id == session_row.user_id
+
     return {
         "filename": f.original_filename,
         "size_bytes": f.size_bytes,
@@ -119,6 +147,8 @@ def file_info(slug: str, db: Session = Depends(get_db)) -> dict:
         "use_count": link.use_count,
         "expires_at": link.expires_at.isoformat() if link.expires_at else None,
         "hashes": file_hashes(db, f),
+        "uploader": uploader,
+        "already_saved": already_saved,
     }
 
 
@@ -160,14 +190,17 @@ def download_raw(slug: str, request: Request, ek: str | None = None, db: Session
     if not full_path.exists():
         raise HTTPException(500, detail="file missing from storage")
 
+    needs_decrypt = f.encryption_mode == "server"
+    needs_decompress = f.compressed or f.archived
+
+    # Range is only honoured for the plaintext-uncompressed path below; omit
+    # Accept-Ranges from transformed responses so clients don't issue fruitless
+    # Range requests expecting 206 and get a full 200 instead.
     base_headers = {
         **_SECURITY,
         "Content-Disposition": _content_disposition(f.original_filename),
-        "Accept-Ranges": "bytes",
+        **({"Accept-Ranges": "bytes"} if not needs_decrypt and not needs_decompress else {}),
     }
-
-    needs_decrypt = f.encryption_mode == "server"
-    needs_decompress = f.compressed or f.archived
 
     if needs_decrypt:
         import os as _os
@@ -435,9 +468,7 @@ def _file_meta_tags(request: Request, slug: str, db: Session) -> str:
 def download_page(slug: str, request: Request, db: Session = Depends(get_db)):
     # Always serve the page — the client JS checks /info and shows the same
     # "not found" state for both inactive and nonexistent slugs, so callers
-    # cannot distinguish the two.
-    content = (_STATIC / "download.html").read_text("utf-8")
-    meta = _file_meta_tags(request, slug, db)
-    if meta:
-        content = content.replace("</head>", meta + "\n</head>")
+    # cannot distinguish the two. We serve the React SPA shell; the OG meta tags
+    # are injected server-side so link unfurlers (which don't run JS) see them.
+    content = render_spa(_file_meta_tags(request, slug, db))
     return HTMLResponse(content, headers=_SECURITY)

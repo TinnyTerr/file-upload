@@ -20,19 +20,19 @@ from app.deps import client_ip, get_db, require_active_user, require_master, req
 from app.links.slugs import new_slug
 from app.security.csrf import require_csrf
 from app.models.directory import Directory
+from app.models.directory_link import DirectoryLink
 from app.models.content_blob import ContentBlob
 from app.models.directory_collaborator import DirectoryCollaborator
 from app.models.file import FileObject
 from app.models.link import Link
 from app.models.session import SessionRow
 from app.models.user import User
+from app.spa import render_spa
 from app.storage.blobs import release_blob, unlink_queued
 from app.storage.accounting import used_storage_bytes_for_user
 from app.storage.paths import safe_join, storage_root
 
 router = APIRouter(tags=["directories"])
-
-_STATIC = Path(__file__).parent.parent / "static"
 
 # Same hardened headers as the single-file download page: the directory page
 # decrypts end-to-end bundles in a Web Worker and zips them in the browser.
@@ -85,13 +85,17 @@ def _verify_access_key(request: Request, d: Directory, ek: str | None) -> bool:
     return _secrets.compare_digest(ek, expected)
 
 
-def _resolve(db: Session, slug: str) -> Directory:
-    d = db.query(Directory).filter_by(slug=slug).first()
+def _resolve(db: Session, slug: str) -> tuple["Directory", "DirectoryLink"]:
+    # Resolve via DirectoryLink so each link has its own independent slug.
+    link = db.query(DirectoryLink).filter_by(slug=slug, active=True).first()
+    if link is None:
+        raise HTTPException(404, detail="not found")
+    d = db.get(Directory, link.directory_id)
     if d is None:
         raise HTTPException(404, detail="not found")
-    if d.expires_at is not None and d.expires_at < datetime.now(timezone.utc):
+    if d.expires_at is not None and d.expires_at <= datetime.now(timezone.utc):
         raise HTTPException(404, detail="directory expired")
-    return d
+    return d, link
 
 
 def _is_editor(db: Session, d: Directory, user: User) -> bool:
@@ -120,6 +124,7 @@ class CreateDirBody(BaseModel):
     title: str = "Untitled folder"
     encryption_mode: str = "none"
     expires_in_seconds: int | None = None
+    key_check_blob: str | None = None
 
 
 @router.post("/directories")
@@ -141,6 +146,8 @@ def create_directory(
     if body.encryption_mode == "client":
         if not perm.can_upload_client_encrypted:
             raise HTTPException(403, detail="client-side encryption not permitted")
+        if not body.key_check_blob:
+            raise HTTPException(400, detail="client directories require key_check_blob")
 
     title = (body.title or "Untitled folder").strip()[:512] or "Untitled folder"
     expires_at = None
@@ -169,10 +176,14 @@ def create_directory(
         encryption_mode=body.encryption_mode,
         enc_key_blob=enc_key_blob,
         enc_access_blob=enc_access_blob,
+        key_check_blob=body.key_check_blob if body.encryption_mode == "client" else None,
         expires_at=expires_at,
     )
     db.add(d)
     db.flush()
+    # Create a default DirectoryLink so /d/{slug} resolves via the link system.
+    default_link = DirectoryLink(directory_id=d.id, slug=slug)
+    db.add(default_link)
     record(db, actor=user.username, action="directory.created",
            target=f"directory:{d.id}", ip=client_ip(request))
     db.commit()
@@ -182,6 +193,7 @@ def create_directory(
         "slug": slug,
         "url": _dir_url(request, slug),
         "encryption_mode": d.encryption_mode,
+        "key_check_blob": d.key_check_blob,
         # client-side keys are generated in the browser and never sent here.
         "access_key": access_key,
     }
@@ -238,6 +250,7 @@ def _serialize_directories(
             "title": d.title,
             "url": _dir_url(request, d.slug),
             "encryption_mode": d.encryption_mode,
+            "key_check_blob": d.key_check_blob,
             "access_key": _recover_access_key(request, d),
             "file_count": file_count,
             "total_bytes": d.total_bytes,
@@ -420,13 +433,138 @@ def delete_directory(
     # before the parent — flush the member removals first so the directory's
     # foreign keys are clear before we drop it.
     db.flush()
+    from app.models.dropbox_link import DropboxUploadLink
+    db.query(DropboxUploadLink).filter_by(target_directory_id=d.id).delete()
     db.query(DirectoryCollaborator).filter_by(directory_id=d.id).delete()
+    db.query(DirectoryLink).filter_by(directory_id=d.id).delete()
     db.delete(d)
     record(db, actor=user.username, action="directory.deleted",
            target=f"directory:{dir_id}", ip=client_ip(request))
     db.commit()
     unlink_queued(unlink_after_commit)
     return {"status": "deleted", "files_removed": len(members)}
+
+
+class CreateDirLinkBody(BaseModel):
+    max_uses: int | None = None
+    expires_in_seconds: int | None = None
+    hide_uploader: bool = False
+
+
+class UpdateDirLinkBody(BaseModel):
+    max_uses: int | None = None
+    expires_in_seconds: int | None = None
+    active: bool | None = None
+    hide_uploader: bool | None = None
+
+
+def _serialize_dir_link(lk: DirectoryLink, request: Request, d: Directory) -> dict:
+    return {
+        "id": lk.id,
+        "slug": lk.slug,
+        "url": _dir_url(request, lk.slug),
+        "max_uses": lk.max_uses,
+        "use_count": lk.use_count,
+        "expires_at": lk.expires_at.isoformat() if lk.expires_at else None,
+        "active": lk.active,
+        "hide_uploader": lk.hide_uploader,
+        "created_at": lk.created_at.isoformat(),
+    }
+
+
+@router.get("/directories/{dir_id}/links")
+def list_directory_links_req(
+    dir_id: int,
+    request: Request,
+    user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    d = _get_owned_directory(db, dir_id, user)
+    links = db.query(DirectoryLink).filter_by(directory_id=d.id).order_by(DirectoryLink.created_at.asc()).all()
+    return {"links": [_serialize_dir_link(lk, request, d) for lk in links]}
+
+
+@router.post("/directories/{dir_id}/links")
+def create_directory_link(
+    dir_id: int,
+    body: CreateDirLinkBody,
+    request: Request,
+    _csrf: SessionRow = Depends(require_csrf),
+    user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.permissions.policy import ensure_permissions
+    perm = ensure_permissions(db, user.id, master=(user.role == "master"))
+    if not perm.can_regenerate_links:
+        raise HTTPException(403, detail="link creation not permitted")
+    d = _get_owned_directory(db, dir_id, user)
+    expires_at = None
+    if body.expires_in_seconds is not None and body.expires_in_seconds >= 1:
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=body.expires_in_seconds)
+    lk = DirectoryLink(
+        directory_id=d.id,
+        slug=new_slug(),
+        max_uses=body.max_uses,
+        expires_at=expires_at,
+        hide_uploader=body.hide_uploader,
+    )
+    db.add(lk)
+    record(db, actor=user.username, action="directory_link.created",
+           target=f"directory:{d.id}", ip=client_ip(request))
+    db.commit()
+    return _serialize_dir_link(lk, request, d)
+
+
+@router.patch("/directories/{dir_id}/links/{link_id}")
+def update_directory_link(
+    dir_id: int,
+    link_id: int,
+    body: UpdateDirLinkBody,
+    request: Request,
+    _csrf: SessionRow = Depends(require_csrf),
+    user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    d = _get_owned_directory(db, dir_id, user)
+    lk = db.get(DirectoryLink, link_id)
+    if lk is None or lk.directory_id != d.id:
+        raise HTTPException(404, detail="link not found")
+    if body.max_uses is not None:
+        lk.max_uses = body.max_uses if body.max_uses > 0 else None
+    if body.active is not None:
+        lk.active = body.active
+    if body.hide_uploader is not None:
+        lk.hide_uploader = body.hide_uploader
+    if body.expires_in_seconds is not None:
+        lk.expires_at = datetime.now(timezone.utc) + timedelta(seconds=body.expires_in_seconds) if body.expires_in_seconds >= 1 else None
+    record(db, actor=user.username, action="directory_link.updated",
+           target=f"directory_link:{link_id}", ip=client_ip(request))
+    db.commit()
+    return _serialize_dir_link(lk, request, d)
+
+
+@router.delete("/directories/{dir_id}/links/{link_id}")
+def delete_directory_link(
+    dir_id: int,
+    link_id: int,
+    request: Request,
+    _csrf: SessionRow = Depends(require_csrf),
+    user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    from app.permissions.policy import ensure_permissions
+    perm = ensure_permissions(db, user.id, master=(user.role == "master"))
+    if not perm.can_delete_links:
+        raise HTTPException(403, detail="link deletion not permitted")
+    d = _get_owned_directory(db, dir_id, user)
+    lk = db.get(DirectoryLink, link_id)
+    if lk is None or lk.directory_id != d.id:
+        raise HTTPException(404, detail="link not found")
+    db.delete(lk)
+    record(db, actor=user.username, action="directory_link.deleted",
+           target=f"directory_link:{link_id}", ip=client_ip(request))
+    db.commit()
+    return {"status": "deleted"}
 
 
 def _public_files(db: Session, d: Directory) -> list[tuple[FileObject, Link]]:
@@ -451,14 +589,42 @@ def _public_files(db: Session, d: Directory) -> list[tuple[FileObject, Link]]:
 
 
 @router.get("/d/{slug}/info")
-def directory_info(slug: str, db: Session = Depends(get_db)) -> dict:
-    d = _resolve(db, slug)
+def directory_info(slug: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    d, resolved_link = _resolve(db, slug)
     pairs = _public_files(db, d)
+
+    uploader = None
+    if not resolved_link.hide_uploader:
+        owner = db.get(User, d.owner_id)
+        if owner is not None:
+            uploader = {
+                "username": owner.username,
+                "has_avatar": owner.avatar_data is not None,
+                "user_id": owner.id,
+            }
+
+    already_saved = False
+    from app.security.sessions import COOKIE_NAME
+    cookie = request.cookies.get(COOKIE_NAME)
+    if cookie:
+        state = request.app.state.app_state
+        session_row = state.session_manager.resolve(db, cookie)
+        if session_row is not None:
+            already_saved = (
+                db.query(Directory).filter_by(
+                    owner_id=session_row.user_id,
+                    saved_from_directory_id=d.id,
+                ).first() is not None
+            ) or d.owner_id == session_row.user_id
+
     return {
         "title": d.title,
         "encryption_mode": d.encryption_mode,
+        "key_check_blob": d.key_check_blob,
         "file_count": len(pairs),
         "total_bytes": sum(f.size_bytes for f, _ in pairs),
+        "uploader": uploader,
+        "already_saved": already_saved,
         "files": [
             {
                 "slug": lk.slug,
@@ -509,7 +675,7 @@ def _archive_preview(f: FileObject) -> dict:
 
 @router.get("/d/{slug}/preview-manifest")
 def directory_preview_manifest(slug: str, db: Session = Depends(get_db)) -> dict:
-    d = _resolve(db, slug)
+    d, _ = _resolve(db, slug)
     groups = {
         "images": [],
         "videos": [],
@@ -548,13 +714,26 @@ def directory_preview_manifest(slug: str, db: Session = Depends(get_db)) -> dict
 def save_directory(
     slug: str,
     request: Request,
+    ek: str | None = None,
     _csrf: SessionRow = Depends(require_csrf),
     user: User = Depends(require_active_user),
     db: Session = Depends(get_db),
 ) -> dict:
     from app.permissions.policy import ensure_permissions
 
-    source_dir = _resolve(db, slug)
+    source_dir, _ = _resolve(db, slug)
+    # Prevent owner from saving their own directory.
+    if source_dir.owner_id == user.id:
+        raise HTTPException(409, detail="you own this directory")
+    # Prevent saving the same directory more than once.
+    already = db.query(Directory).filter_by(owner_id=user.id, saved_from_directory_id=source_dir.id).first()
+    if already is not None:
+        raise HTTPException(409, detail="already saved")
+    # Server-mode bundles are gated by the ?ek= access credential exactly like the
+    # zip download — without it, saving would mint a decryptable copy and leak the
+    # recovered access key, fully bypassing the gate.
+    if not _verify_access_key(request, source_dir, ek):
+        raise HTTPException(401, detail="missing or invalid access key (?ek=)")
     pairs = _public_files(db, source_dir)
     logical_bytes = sum(f.size_bytes for f, _ in pairs)
     perm = ensure_permissions(db, user.id, master=(user.role == "master"))
@@ -568,7 +747,9 @@ def save_directory(
         encryption_mode=source_dir.encryption_mode,
         enc_key_blob=source_dir.enc_key_blob,
         enc_access_blob=source_dir.enc_access_blob,
+        key_check_blob=source_dir.key_check_blob,
         total_bytes=logical_bytes,
+        saved_from_directory_id=source_dir.id,
     )
     db.add(new_dir)
     db.flush()
@@ -682,7 +863,7 @@ def _member_source(request: Request, f: FileObject) -> tuple[Path, bool]:
 
 @router.get("/d/{slug}/zip")
 def directory_zip(slug: str, request: Request, ek: str | None = None, db: Session = Depends(get_db)):
-    d = _resolve(db, slug)
+    d, _ = _resolve(db, slug)
     if d.encryption_mode == "client":
         # End-to-end bundles can only be assembled in the browser (the server
         # never holds the key). The directory page zips them client-side.
@@ -715,12 +896,14 @@ def directory_zip(slug: str, request: Request, ek: str | None = None, db: Sessio
         tmp.unlink(missing_ok=True)
         raise
 
+    record(db, actor="anonymous", action="directory.downloaded",
+           target=f"directory:{d.id}", ip=client_ip(request))
     try:
-        record(db, actor="anonymous", action="directory.downloaded",
-               target=f"directory:{d.id}", ip=client_ip(request))
         db.commit()
     except Exception:
         db.rollback()
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(500, detail="could not record download")
 
     zip_name = (d.title or "bundle").strip().replace('"', "") or "bundle"
     return FileResponse(
@@ -742,10 +925,16 @@ def _safe_arcname(name: str, seen: set[str]) -> str:
     base = os.path.basename(name.replace("\\", "/")).strip() or "file"
     base = "".join(c for c in base if ord(c) >= 0x20)
     stem, dot, ext = base.partition(".")
+    # Dotfiles like ".env" produce an empty stem — fall back to the full name so
+    # collision renames become ".env (1)" instead of " (1).env" (leading space).
+    if not stem:
+        stem = base
+        dot = ""
+        ext = ""
     candidate = base
     counter = 1
     while candidate in seen:
-        candidate = f"{stem} ({counter}){dot}{ext}" if dot else f"{base} ({counter})"
+        candidate = f"{stem} ({counter}){dot}{ext}" if dot else f"{stem} ({counter})"
         counter += 1
     seen.add(candidate)
     return candidate
@@ -773,7 +962,8 @@ def _directory_page_meta(request: Request, d: Directory, db: Session) -> str:
 
 @router.get("/d/{slug}")
 def directory_page(slug: str, request: Request, db: Session = Depends(get_db)):
-    d = _resolve(db, slug)
-    content = (_STATIC / "directory.html").read_text("utf-8")
-    content = content.replace("</head>", _directory_page_meta(request, d, db) + "\n</head>")
+    d, _ = _resolve(db, slug)
+    # Serve the React SPA shell with server-rendered OG meta tags injected (link
+    # unfurlers don't run JS); the client renders the directory view.
+    content = render_spa(_directory_page_meta(request, d, db))
     return HTMLResponse(content, headers=_SECURITY)

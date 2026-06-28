@@ -12,13 +12,14 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
+from starlette.requests import ClientDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.audit.log import record
 from app.deps import client_ip, get_db, get_upload_user, require_active_user, require_master, require_permission
-from app.links.consume import resolve_active_link
+from app.links.consume import consume_use, resolve_active_link
 from app.links.slugs import new_slug
 from app.models.content_blob import ContentBlob
 from app.models.file import FileObject
@@ -188,6 +189,8 @@ def _finalize_stored_file(
         work_path.unlink(missing_ok=True)
         _log.warning("upload finalize rejected user_id=%s reason=global_storage stored_bytes=%s", user.id, stored)
         raise
+    # Lock the user row to serialize concurrent quota evaluations
+    db.query(User).filter_by(id=user.id).with_for_update().first()
     if _used_bytes(db, user.id) + stored > perm.quota_bytes:
         work_path.unlink(missing_ok=True)
         _log.warning("upload finalize rejected user_id=%s reason=user_quota stored_bytes=%s", user.id, stored)
@@ -712,6 +715,9 @@ async def upload_chunk(
         if written != expected:
             raise HTTPException(400, detail="incomplete chunk")
         os.replace(tmp, parts / str(index))
+    except ClientDisconnect:
+        tmp.unlink(missing_ok=True)
+        raise
     except BaseException:
         tmp.unlink(missing_ok=True)
         _log.exception("chunked upload chunk failed user_id=%s index=%s expected_bytes=%s written_bytes=%s", user.id, index, expected, written)
@@ -820,10 +826,21 @@ def _recover_access_key(request: Request, f: FileObject) -> str | None:
         return None
 
 
+def _verify_file_access_key(request: Request, f: FileObject, ek: str | None) -> bool:
+    """Server-mode ?ek= gate for a standalone file (mirrors the /raw download)."""
+    if f.encryption_mode != "server":
+        return True
+    expected = _recover_access_key(request, f)
+    if expected is None or not ek:
+        return False
+    return _secrets.compare_digest(ek, expected)
+
+
 @router.post("/files/{slug}/save")
 def save_shared_file(
     slug: str,
     request: Request,
+    ek: str | None = None,
     _csrf: SessionRow = Depends(require_csrf),
     user: User = Depends(require_active_user),
     db: Session = Depends(get_db),
@@ -834,9 +851,25 @@ def save_shared_file(
     source = db.get(FileObject, link.file_id)
     if source is None:
         raise HTTPException(404, detail="not found")
+    # Prevent owner from saving their own file.
+    if source.owner_id == user.id:
+        raise HTTPException(409, detail="you own this file")
+    # Prevent saving the same file more than once.
+    already = db.query(FileObject).filter_by(owner_id=user.id, saved_from_file_id=source.id).first()
+    if already is not None:
+        raise HTTPException(409, detail="already saved")
+    # Server-mode files require the ?ek= access credential before we copy bytes or
+    # hand back the recovered key — verify BEFORE consuming a use so a wrong key
+    # never burns a limited-use link.
+    if not _verify_file_access_key(request, source, ek):
+        raise HTTPException(401, detail="missing or invalid access key (?ek=)")
     perm = ensure_permissions(db, user.id, master=(user.role == "master"))
     if _used_bytes(db, user.id) + source.size_bytes > perm.quota_bytes:
         raise HTTPException(413, detail="save would exceed your quota")
+    # Saving a copy counts as a download against the link's limit; otherwise a
+    # single-use link could be turned into an unlimited redistributable copy.
+    if not consume_use(db, slug):
+        raise HTTPException(404, detail="not found")
     blob = db.get(ContentBlob, source.blob_id) if source.blob_id else None
     if blob is not None:
         blob.ref_count = (blob.ref_count or 0) + 1
@@ -925,12 +958,19 @@ def list_admin_files(
 
 
 def _serialize_files(request: Request, db: Session, files: list[FileObject]) -> list[dict]:
+    # Build a username lookup to avoid N+1 queries
+    owner_ids = {f.owner_id for f in files}
+    username_map = {
+        u.id: u.username
+        for u in db.query(User).filter(User.id.in_(owner_ids)).all()
+    } if owner_ids else {}
     result = []
     for f in files:
         links = db.query(Link).filter_by(file_id=f.id).all()
         result.append({
             "id": f.id,
             "owner_id": f.owner_id,
+            "owner_username": username_map.get(f.owner_id, f"user:{f.owner_id}"),
             "blob_id": f.blob_id,
             "original_filename": f.original_filename,
             "source_type": f.source_type,
@@ -960,6 +1000,7 @@ def _serialize_files(request: Request, db: Session, files: list[FileObject]) -> 
                     "use_count": lk.use_count,
                     "expires_at": lk.expires_at.isoformat() if lk.expires_at else None,
                     "active": lk.active,
+                    "hide_uploader": lk.hide_uploader,
                 }
                 for lk in links
             ],
@@ -1000,6 +1041,7 @@ def delete_file(
 class MintLinkBody(BaseModel):
     max_uses: int | None = None
     expires_in_seconds: int | None = None
+    hide_uploader: bool = False
 
     from pydantic import field_validator
     @field_validator("max_uses", "expires_in_seconds", mode="before")
@@ -1014,6 +1056,7 @@ class EditLinkBody(BaseModel):
     max_uses: int | None = None
     expires_in_seconds: int | None = None
     active: bool | None = None
+    hide_uploader: bool | None = None
 
 
 @router.post("/files/{file_id}/links")
@@ -1039,7 +1082,7 @@ def mint_link(
             raise HTTPException(400, detail="expires_in_seconds is too large")
 
     slug = new_slug()
-    link = Link(file_id=file_id, slug=slug, max_uses=body.max_uses, expires_at=expires_at)
+    link = Link(file_id=file_id, slug=slug, max_uses=body.max_uses, expires_at=expires_at, hide_uploader=body.hide_uploader)
     db.add(link)
     db.flush()
 
@@ -1105,6 +1148,8 @@ def edit_link(
             raise HTTPException(400, detail="expires_in_seconds is too large")
     if body.active is not None:
         link.active = body.active
+    if body.hide_uploader is not None:
+        link.hide_uploader = body.hide_uploader
 
     record(db, actor=user.username, action="link.edited",
            target=f"link:{link_id}", ip=client_ip(request))

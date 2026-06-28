@@ -6,7 +6,7 @@ from pathlib import Path
 import time
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 import rjsmin
 import rcssmin
@@ -43,6 +43,18 @@ class _RevalidatingStatic(StaticFiles):
         response.headers["Cache-Control"] = "no-cache"
         return response
 
+
+class _ImmutableStatic(StaticFiles):
+    """Serve Vite's content-hashed bundle assets with a long immutable cache.
+    The filenames change whenever the contents do, so the browser can keep them
+    forever — no revalidation round-trip on every page load."""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
 from app.audit.log import install_append_only_triggers
 from app.bootstrap import ensure_master
 from app.config import load_settings
@@ -67,11 +79,23 @@ from app.routes.users import router as users_router
 from app.routes.audit_view import router as audit_router
 from app.routes.keys import admin_router as admin_keys_router
 from app.routes.keys import router as keys_router
+from app.spa import SPA_ASSETS, render_spa
 from app.storage.paths import storage_root
 
 _STATIC = Path(__file__).parent / "static"
 _log = logging.getLogger(__name__)
 _request_log = logging.getLogger("app.request")
+
+# Paths that are routine browser/infrastructure noise (favicon probes, health
+# checks, crawler files). Requests to these are logged at DEBUG regardless of
+# status so an unauthenticated favicon 404 doesn't clutter the INFO log.
+_QUIET_PATHS = frozenset({
+    "/favicon.ico",
+    "/health",
+    "/robots.txt",
+    "/apple-touch-icon.png",
+    "/apple-touch-icon-precomposed.png",
+})
 
 
 def create_app(config_path: str | None = None, database_url: str | None = None) -> FastAPI:
@@ -249,7 +273,19 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
                 method = scope.get("method", "")
                 client = scope.get("client") or ("unknown", 0)
                 duration_ms = (time.perf_counter() - started) * 1000
-                level = logging.DEBUG if path.startswith("/static") else logging.INFO
+                # Pick a level proportional to how noteworthy the request is so
+                # the default INFO log isn't drowned out by routine traffic.
+                is_noise = path.startswith("/static") or path in _QUIET_PATHS
+                if status >= 500:
+                    level = logging.ERROR
+                elif status >= 400:
+                    # Expected probes (e.g. favicon 404) stay quiet; other
+                    # client errors are worth a WARNING.
+                    level = logging.DEBUG if is_noise else logging.WARNING
+                elif is_noise:
+                    level = logging.DEBUG
+                else:
+                    level = logging.INFO
                 _request_log.log(
                     level,
                     "http request method=%s path=%s status=%s duration_ms=%.1f client=%s",
@@ -271,29 +307,37 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    # SPA shell routes. Each of these paths is also a client-side route in the
+    # React app (see client/src/App.tsx); we serve the same built index.html and
+    # let react-router render the right page. `no-cache` so a redeploy's new
+    # hashed asset references are always picked up. The share pages (/file/{slug},
+    # /d/{slug}) are served by their routers, which additionally inject OG meta.
+    def _spa_shell() -> HTMLResponse:
+        return HTMLResponse(render_spa(), headers={"Cache-Control": "no-cache"})
+
     @app.get("/")
     def root():
-        return RedirectResponse("/login")
+        return _spa_shell()
 
     @app.get("/login")
     def login_page():
-        return FileResponse(str(_STATIC / "login.html"))
+        return _spa_shell()
 
     @app.get("/account/change")
     def change_page():
-        return FileResponse(str(_STATIC / "change.html"))
+        return _spa_shell()
 
     @app.get("/files")
     def files_page():
-        return FileResponse(str(_STATIC / "files.html"))
+        return _spa_shell()
 
     @app.get("/admin")
     def admin_page():
-        return FileResponse(str(_STATIC / "admin.html"))
+        return _spa_shell()
 
     @app.get("/api-docs")
     def api_docs_page():
-        return FileResponse(str(_STATIC / "api-docs.html"))
+        return _spa_shell()
 
     app.include_router(auth_router)
     app.include_router(account_router)
@@ -309,5 +353,13 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
     app.include_router(admin_keys_router)
 
     app.mount("/static", _RevalidatingStatic(directory=str(_STATIC)), name="static")
+
+    # Vite's hashed bundle (JS/CSS/workers) referenced by the SPA shell. Mounted
+    # only if the client has been built; in that case the app still boots so the
+    # API works, but SPA routes will 500 until `bun run build` populates ./public.
+    if SPA_ASSETS.is_dir():
+        app.mount("/assets", _ImmutableStatic(directory=str(SPA_ASSETS)), name="assets")
+    else:
+        _log.warning("SPA assets dir %s missing — run `bun run build` in client/", SPA_ASSETS)
 
     return app

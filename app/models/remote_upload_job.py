@@ -17,7 +17,9 @@ class RemoteUploadJob(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     owner_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    file_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("files.id"), nullable=True)
+    file_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("files.id", ondelete="SET NULL"), nullable=True
+    )
     url: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(24), nullable=False, default="queued")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

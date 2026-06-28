@@ -19,4 +19,7 @@ class SessionRow(Base):
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     csrf_token: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_utcnow)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)

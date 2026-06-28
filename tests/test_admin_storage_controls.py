@@ -58,11 +58,11 @@ def test_storage_details_returns_chart_ready_aggregates(master_session):
 
     key = c.post("/keys/", headers={"X-CSRF-Token": csrf})
     assert key.status_code == 200, key.text
-    revoked = c.delete(
+    deleted = c.delete(
         f"/keys/{key.json()['id']}",
         headers={"X-CSRF-Token": csrf},
     )
-    assert revoked.status_code == 200, revoked.text
+    assert deleted.status_code == 200, deleted.text
 
     body = c.get("/admin/storage").json()
 
@@ -71,7 +71,7 @@ def test_storage_details_returns_chart_ready_aggregates(master_session):
     assert body["storage_summary"]["free_under_cap_bytes"] >= 0
     assert body["disk"]["free_bytes"] >= 0
     assert body["link_status_counts"]["inactive"] == 1
-    assert body["api_key_status_counts"]["inactive"] == 1
+    assert body["api_key_status_counts"]["inactive"] == 0
     assert body["content_type_counts"][0]["stored_bytes"] >= len(b"png-bytes")
     assert any(row["action"] == "file.uploaded" for row in body["recent_audit_counts"])
     owner = next(u for u in body["users"] if u["username"] == "admin")

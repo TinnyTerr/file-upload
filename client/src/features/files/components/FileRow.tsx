@@ -1,0 +1,108 @@
+import { useState } from "react";
+import { ChevronDown, Trash2, Link2, Archive } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Tooltip } from "@/components/ui/tooltip";
+import { LinkList } from "./LinkList";
+import { CreateLinkDialog } from "./CreateLinkDialog";
+import { iconForType, EncryptionBadge } from "../lib/fileMeta";
+import { useDeleteFile } from "../hooks/useFiles";
+import { useDialogs } from "@/providers/DialogProvider";
+import { useAuth } from "@/features/auth/hooks/auth";
+import { formatBytes } from "@/lib/bytes";
+import { formatDate } from "@/lib/time";
+import { cn } from "@/lib/cn";
+import type { FileObject } from "../types";
+
+export function FileRow({ file }: { file: FileObject }) {
+  const [expanded, setExpanded] = useState(false);
+  const del = useDeleteFile();
+  const { confirm } = useDialogs();
+  const { can } = useAuth();
+
+  const canDelete = can("can_delete");
+  const canLinks = can("can_regenerate_links");
+  const Icon = iconForType(file.content_type);
+
+  const onDelete = async () => {
+    const ok = await confirm({
+      title: "Delete file?",
+      description: `“${file.original_filename}” and all its links will be removed.`,
+      confirmText: "Delete",
+      destructive: true,
+    });
+    if (ok) del.mutate(file.id);
+  };
+
+  return (
+    <div className="rounded-lg border border-border bg-secondary/20 transition-colors hover:bg-secondary/30">
+      <div className="flex items-center gap-3 p-3">
+        <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-background/50">
+          <Icon className="size-4 text-muted-foreground" />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-sm font-medium" title={file.original_filename}>
+              {file.original_filename}
+            </span>
+            <EncryptionBadge mode={file.encryption_mode} />
+            {file.compressed && (
+              <Tooltip content="zstd-compressed">
+                <Badge variant="secondary">zst</Badge>
+              </Tooltip>
+            )}
+            {file.archived && (
+              <Badge variant="secondary">
+                <Archive /> archived
+              </Badge>
+            )}
+          </div>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            {formatBytes(file.size_bytes)} · {formatDate(file.created_at)}
+          </p>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          {canLinks && <CreateLinkDialog fileId={file.id} />}
+          {canDelete && (
+            <Tooltip content="Delete file">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="text-destructive"
+                onClick={onDelete}
+                loading={del.isPending}
+                aria-label={`Delete ${file.original_filename}`}
+              >
+                <Trash2 />
+              </Button>
+            </Tooltip>
+          )}
+          <Tooltip content={`${file.links.length} link${file.links.length === 1 ? "" : "s"}`}>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setExpanded((e) => !e)}
+              className="gap-1"
+              aria-label={`${expanded ? "Hide" : "Show"} ${file.links.length} share link${file.links.length === 1 ? "" : "s"} for ${file.original_filename}`}
+              aria-expanded={expanded}
+            >
+              <Link2 className="size-4" />
+              <span>
+                {file.links.length} <span className="hidden sm:inline">links</span>
+              </span>
+              <ChevronDown className={cn("size-4 transition-transform", expanded && "rotate-180")} />
+            </Button>
+          </Tooltip>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="border-t border-border px-3 py-2.5">
+          <LinkList file={file} />
+        </div>
+      )}
+    </div>
+  );
+}

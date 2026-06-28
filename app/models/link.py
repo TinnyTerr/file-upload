@@ -22,4 +22,5 @@ class Link(Base):
     use_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    hide_uploader: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_utcnow)
