@@ -195,6 +195,53 @@ _ADDED_COLUMNS = [
     ("links", "hide_uploader", "BOOLEAN NOT NULL DEFAULT 0"),
 ]
 
+_PERMISSION_COLUMNS = (
+    "id",
+    "user_id",
+    "can_upload",
+    "can_upload_client_encrypted",
+    "can_delete",
+    "can_regenerate_links",
+    "can_delete_links",
+    "can_create_directories",
+    "can_manage_lifecycle",
+    "can_use_api_keys",
+    "can_view_admin",
+    "can_manage_users",
+    "can_manage_storage",
+    "can_manage_api_keys",
+    "quota_bytes",
+    "max_file_bytes",
+    "archive_after_idle_days",
+    "created_at",
+)
+
+_PERMISSIONS_TABLE_DDL = """
+CREATE TABLE permissions (
+    id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    can_upload BOOLEAN NOT NULL,
+    can_upload_client_encrypted BOOLEAN NOT NULL,
+    can_delete BOOLEAN NOT NULL,
+    can_regenerate_links BOOLEAN NOT NULL,
+    can_delete_links BOOLEAN NOT NULL,
+    can_create_directories BOOLEAN NOT NULL,
+    can_manage_lifecycle BOOLEAN NOT NULL,
+    can_use_api_keys BOOLEAN NOT NULL,
+    can_view_admin BOOLEAN NOT NULL,
+    can_manage_users BOOLEAN NOT NULL,
+    can_manage_storage BOOLEAN NOT NULL,
+    can_manage_api_keys BOOLEAN NOT NULL,
+    quota_bytes BIGINT NOT NULL,
+    max_file_bytes BIGINT NOT NULL,
+    archive_after_idle_days INTEGER NOT NULL,
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    UNIQUE (user_id),
+    FOREIGN KEY(user_id) REFERENCES users (id)
+)
+"""
+
 
 def _migrate_add_columns(engine: Engine) -> None:
     with engine.begin() as conn:
@@ -210,10 +257,44 @@ def _migrate_add_columns(engine: Engine) -> None:
             cols = {c["name"] for c in inspector.get_columns(table)}
             if column not in cols:
                 conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN {column} {ddl}'))
+        if "permissions" in existing_tables:
+            _drop_legacy_permission_p2p_column(conn)
         if "api_keys" in existing_tables:
             _backfill_api_key_numbers(conn)
         if "files" in existing_tables and "content_blobs" in existing_tables:
             _backfill_content_blobs(conn)
+
+
+def _sqlite_column_names(conn, table: str) -> set[str]:
+    rows = conn.execute(text(f'PRAGMA table_info("{table}")')).all()
+    return {str(row[1]) for row in rows}
+
+
+def _drop_legacy_permission_p2p_column(conn) -> None:
+    columns = _sqlite_column_names(conn, "permissions")
+    if "can_use_p2p" not in columns:
+        return
+
+    missing = [column for column in _PERMISSION_COLUMNS if column not in columns]
+    if missing:
+        raise RuntimeError(
+            "cannot migrate permissions.can_use_p2p before columns exist: "
+            + ", ".join(missing)
+        )
+
+    column_sql = ", ".join(f'"{column}"' for column in _PERMISSION_COLUMNS)
+    conn.execute(text("ALTER TABLE permissions RENAME TO permissions_legacy_p2p"))
+    conn.execute(text(_PERMISSIONS_TABLE_DDL))
+    conn.execute(
+        text(
+            f"""
+            INSERT INTO permissions ({column_sql})
+            SELECT {column_sql}
+            FROM permissions_legacy_p2p
+            """
+        )
+    )
+    conn.execute(text("DROP TABLE permissions_legacy_p2p"))
 
 
 def _backfill_api_key_numbers(conn) -> None:

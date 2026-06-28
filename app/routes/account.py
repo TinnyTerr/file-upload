@@ -299,18 +299,35 @@ def _purge_user_data(db: Session, user_id: int) -> list[str | None]:
     from app.models.file import FileObject
     from app.models.link import Link
     from app.models.directory import Directory
+    from app.models.directory_link import DirectoryLink
     from app.models.directory_collaborator import DirectoryCollaborator
     from app.models.api_key import ApiKey
     from app.models.dropbox_link import DropboxUploadLink
+    from app.models.remote_upload_job import RemoteUploadJob
     from app.storage.blobs import release_blob
 
-    # Collect all files to delete (may span directories and standalone files)
+    dirs = db.query(Directory).filter_by(owner_id=user_id).all()
+    dir_ids = [d.id for d in dirs]
+
+    # Collect all files to delete: standalone files owned by the user plus any
+    # files inside directories the user owns.
     files = db.query(FileObject).filter_by(owner_id=user_id).all()
+    if dir_ids:
+        files += db.query(FileObject).filter(FileObject.directory_id.in_(dir_ids)).all()
+    files = list({f.id: f for f in files}.values())
 
     # Delete share links for those files first (FK → files.id)
     if files:
         file_ids = [f.id for f in files]
-        db.query(Link).filter(Link.file_id.in_(file_ids)).delete(synchronize_session="fetch")
+        db.query(FileObject).filter(FileObject.saved_from_file_id.in_(file_ids)).update(
+            {FileObject.saved_from_file_id: None},
+            synchronize_session=False,
+        )
+        db.query(RemoteUploadJob).filter(RemoteUploadJob.file_id.in_(file_ids)).update(
+            {RemoteUploadJob.file_id: None},
+            synchronize_session=False,
+        )
+        db.query(Link).filter(Link.file_id.in_(file_ids)).delete(synchronize_session=False)
 
     # Release each file's blob reference and collect paths
     paths: list[str | None] = []
@@ -319,16 +336,25 @@ def _purge_user_data(db: Session, user_id: int) -> list[str | None]:
         db.delete(f)
     db.flush()
 
-    # Delete dropbox links owned by user
+    # Delete rows that reference the user's directories before deleting them.
+    if dir_ids:
+        db.query(DropboxUploadLink).filter(
+            DropboxUploadLink.target_directory_id.in_(dir_ids)
+        ).delete(synchronize_session=False)
+        db.query(DirectoryCollaborator).filter(
+            DirectoryCollaborator.directory_id.in_(dir_ids)
+        ).delete(synchronize_session=False)
+        db.query(DirectoryLink).filter(
+            DirectoryLink.directory_id.in_(dir_ids)
+        ).delete(synchronize_session=False)
+
+    for d in dirs:
+        db.delete(d)
+
+    # Delete remaining user-owned rows.
     db.query(DropboxUploadLink).filter_by(owner_id=user_id).delete()
-
-    # Delete directory collaborator entries where this user is a member
     db.query(DirectoryCollaborator).filter_by(user_id=user_id).delete()
-
-    # Delete directories owned by user (files inside already deleted above)
-    db.query(Directory).filter_by(owner_id=user_id).delete()
-
-    # Revoke API keys
+    db.query(RemoteUploadJob).filter_by(owner_id=user_id).delete()
     db.query(ApiKey).filter_by(owner_id=user_id).delete()
 
     # Clear the permission row (will be recreated fresh by ensure_permissions)
