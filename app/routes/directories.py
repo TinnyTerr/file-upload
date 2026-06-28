@@ -235,12 +235,20 @@ def _serialize_directories(
     *,
     user: User | None = None,
 ) -> list[dict]:
+    owner_ids = {d.owner_id for d in dirs}
+    user_map = {
+        u.id: u
+        for u in db.query(User).filter(User.id.in_(owner_ids)).all()
+    } if owner_ids else {}
     result = []
     for d in dirs:
+        owner = user_map.get(d.owner_id)
         file_count = db.query(func.count(FileObject.id)).filter_by(directory_id=d.id).scalar() or 0
         result.append({
             "id": d.id,
             "owner_id": d.owner_id,
+            "owner_username": owner.username if owner else f"user:{d.owner_id}",
+            "owner_has_avatar": (owner.avatar_data is not None) if owner else False,
             "slug": d.slug,
             "title": d.title,
             "url": _dir_url(request, d.slug),

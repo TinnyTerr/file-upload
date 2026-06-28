@@ -16,6 +16,30 @@ import { cn } from "@/lib/cn";
 import type { Directory } from "../types";
 import { FolderLinksModal } from "./FolderLinksModal";
 
+function UploaderAvatar({ ownerId, ownerUsername, hasAvatar }: {
+  ownerId: number;
+  ownerUsername: string;
+  hasAvatar: boolean;
+}) {
+  const cls = "flex size-6 shrink-0 items-center justify-center rounded-full overflow-hidden";
+  if (hasAvatar) {
+    return (
+      <span className={cls}>
+        <img
+          src={`/account/avatar/${ownerId}`}
+          alt={ownerUsername}
+          className="size-full object-cover"
+        />
+      </span>
+    );
+  }
+  return (
+    <span className={cn(cls, "bg-brand-gradient text-[9px] font-semibold text-white")}>
+      {ownerUsername.slice(0, 2).toUpperCase()}
+    </span>
+  );
+}
+
 export function FolderRow({ dir }: { dir: Directory }) {
   const [expanded, setExpanded] = useState(false);
   const [linksOpen, setLinksOpen] = useState(false);
@@ -27,39 +51,48 @@ export function FolderRow({ dir }: { dir: Directory }) {
   const { can } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const canDelete = can("can_delete") || dir.role === "owner";
-  const canManageLinks = can("can_regenerate_links") || dir.role === "owner";
+  const canDelete = can(“can_delete”) || dir.role === “owner”;
+  const canManageLinks = can(“can_regenerate_links”) || dir.role === “owner”;
   // Adding files to a folder is only safe for unencrypted folders (no stored key).
-  const canAddFiles = can("can_upload") && dir.encryption_mode === "none";
+  const canAddFiles = can(“can_upload”) && dir.encryption_mode === “none”;
   const url = shareUrl(folderUrl(dir.slug), dir.encryption_mode, { accessKey: dir.access_key, clientKeyB64: null });
+
+  const ownerUsername = dir.owner_username ?? “unknown”;
+  const hasAvatar = dir.owner_has_avatar ?? false;
 
   const onDelete = async () => {
     const ok = await confirm({
-      title: "Delete folder?",
-      description: `“${dir.title}” and all ${dir.file_count} files will be removed.`,
-      confirmText: "Delete",
+      title: “Delete folder?”,
+      description: `”${dir.title}” and all ${dir.file_count} files will be removed.`,
+      confirmText: “Delete”,
       destructive: true,
     });
     if (ok) del.mutate(dir.id);
   };
 
   return (
-    <div className="rounded-lg border border-border bg-secondary/20 transition-colors hover:bg-secondary/30">
-      <div className="flex items-center gap-3 p-3">
-        <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-background/50">
-          <Folder className="size-4 text-muted-foreground" />
+    <div className=”rounded-lg border border-border bg-secondary/20 transition-colors hover:bg-secondary/30”>
+      <div className=”flex items-center gap-3 p-3”>
+        <div className=”flex size-10 shrink-0 items-center justify-center rounded-md bg-background/50”>
+          <Folder className=”size-4 text-muted-foreground” />
         </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-medium" title={dir.title}>
+        <div className=”min-w-0 flex-1”>
+          <div className=”flex items-center gap-2”>
+            <span className=”truncate text-sm font-medium” title={dir.title}>
               {dir.title}
             </span>
             <EncryptionBadge mode={dir.encryption_mode} />
-            {dir.role === "editor" && <Badge variant="secondary">shared</Badge>}
+            {dir.role === “editor” && <Badge variant=”secondary”>shared</Badge>}
           </div>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            {dir.file_count} files · {formatBytes(dir.total_bytes)}
-          </p>
+          {/* Owner + meta */}
+          <div className=”mt-1 flex items-center gap-1.5 text-xs text-muted-foreground”>
+            <UploaderAvatar ownerId={dir.owner_id} ownerUsername={ownerUsername} hasAvatar={hasAvatar} />
+            <span className=”font-medium text-foreground/70”>{ownerUsername}</span>
+            <span>·</span>
+            <span>{dir.file_count} files</span>
+            <span>·</span>
+            <span>{formatBytes(dir.total_bytes)}</span>
+          </div>
         </div>
         <div className="flex items-center gap-1.5">
           <CopyButton value={url} tooltip="Copy folder URL" />

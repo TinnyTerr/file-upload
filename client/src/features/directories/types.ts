@@ -16,6 +16,8 @@ export interface DirectoryLink {
 export interface Directory {
   id: number;
   owner_id: number;
+  owner_username?: string;
+  owner_has_avatar?: boolean;
   slug: string;
   title: string;
   url: string;

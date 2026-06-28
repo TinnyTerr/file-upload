@@ -15,6 +15,7 @@ export interface FileObject {
   id: number;
   owner_id: number;
   owner_username?: string;
+  has_avatar?: boolean;
   original_filename: string;
   source_type: string;
   saved_from_file_id: number | null;
