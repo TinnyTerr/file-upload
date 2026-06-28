@@ -86,6 +86,17 @@ _STATIC = Path(__file__).parent / "static"
 _log = logging.getLogger(__name__)
 _request_log = logging.getLogger("app.request")
 
+# Paths that are routine browser/infrastructure noise (favicon probes, health
+# checks, crawler files). Requests to these are logged at DEBUG regardless of
+# status so an unauthenticated favicon 404 doesn't clutter the INFO log.
+_QUIET_PATHS = frozenset({
+    "/favicon.ico",
+    "/health",
+    "/robots.txt",
+    "/apple-touch-icon.png",
+    "/apple-touch-icon-precomposed.png",
+})
+
 
 def create_app(config_path: str | None = None, database_url: str | None = None) -> FastAPI:
     install_backend_log_handler(reset=True)
@@ -262,7 +273,19 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
                 method = scope.get("method", "")
                 client = scope.get("client") or ("unknown", 0)
                 duration_ms = (time.perf_counter() - started) * 1000
-                level = logging.DEBUG if path.startswith("/static") else logging.INFO
+                # Pick a level proportional to how noteworthy the request is so
+                # the default INFO log isn't drowned out by routine traffic.
+                is_noise = path.startswith("/static") or path in _QUIET_PATHS
+                if status >= 500:
+                    level = logging.ERROR
+                elif status >= 400:
+                    # Expected probes (e.g. favicon 404) stay quiet; other
+                    # client errors are worth a WARNING.
+                    level = logging.DEBUG if is_noise else logging.WARNING
+                elif is_noise:
+                    level = logging.DEBUG
+                else:
+                    level = logging.INFO
                 _request_log.log(
                     level,
                     "http request method=%s path=%s status=%s duration_ms=%.1f client=%s",

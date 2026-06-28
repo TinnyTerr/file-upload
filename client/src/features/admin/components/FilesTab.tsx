@@ -108,7 +108,7 @@ function UserSection({
   files: FileObject[];
   selection: ReturnType<typeof useSelection>;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const allSelected = files.every((f) => selection.has(f.id));
 
   return (

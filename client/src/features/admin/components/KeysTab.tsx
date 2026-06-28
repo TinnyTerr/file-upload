@@ -21,7 +21,7 @@ import type { NewApiKey, AdminApiKey } from "@/features/apikeys/types";
 type StatusFilter = "all" | "active" | "inactive" | "bound" | "unbound";
 
 function UserSection({ username, keys, selection }: { username: string; keys: AdminApiKey[]; selection: ReturnType<typeof useSelection> }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const allSelected = keys.every((k) => selection.has(k.id));
   const someSelected = keys.some((k) => selection.has(k.id));
 

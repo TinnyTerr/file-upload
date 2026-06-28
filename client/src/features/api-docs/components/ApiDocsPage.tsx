@@ -135,7 +135,7 @@ function Endpoint({
   description: string;
   children: React.ReactNode;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   return (
     <div id={id} className="rounded-lg border border-border scroll-mt-20">
       <button
