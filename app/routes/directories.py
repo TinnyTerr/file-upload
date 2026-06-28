@@ -419,6 +419,8 @@ def delete_directory(
     # before the parent — flush the member removals first so the directory's
     # foreign keys are clear before we drop it.
     db.flush()
+    from app.models.dropbox_link import DropboxUploadLink
+    db.query(DropboxUploadLink).filter_by(target_directory_id=d.id).delete()
     db.query(DirectoryCollaborator).filter_by(directory_id=d.id).delete()
     db.delete(d)
     record(db, actor=user.username, action="directory.deleted",
@@ -547,6 +549,7 @@ def directory_preview_manifest(slug: str, db: Session = Depends(get_db)) -> dict
 def save_directory(
     slug: str,
     request: Request,
+    ek: str | None = None,
     _csrf: SessionRow = Depends(require_csrf),
     user: User = Depends(require_active_user),
     db: Session = Depends(get_db),
@@ -554,6 +557,11 @@ def save_directory(
     from app.permissions.policy import ensure_permissions
 
     source_dir = _resolve(db, slug)
+    # Server-mode bundles are gated by the ?ek= access credential exactly like the
+    # zip download — without it, saving would mint a decryptable copy and leak the
+    # recovered access key, fully bypassing the gate.
+    if not _verify_access_key(request, source_dir, ek):
+        raise HTTPException(401, detail="missing or invalid access key (?ek=)")
     pairs = _public_files(db, source_dir)
     logical_bytes = sum(f.size_bytes for f, _ in pairs)
     perm = ensure_permissions(db, user.id, master=(user.role == "master"))

@@ -19,7 +19,9 @@ class DirectoryCollaborator(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     directory_id: Mapped[int] = mapped_column(Integer, ForeignKey("directories.id"), nullable=False, index=True)
     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    invited_by_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    invited_by_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
     role: Mapped[str] = mapped_column(String(16), nullable=False, default="editor")
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_utcnow)
 

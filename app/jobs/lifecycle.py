@@ -13,13 +13,16 @@ def _now() -> datetime:
 
 
 def archive_idle_job(session_factory, storage_root: Path) -> int:
+    from app.models.content_blob import ContentBlob
     from app.models.file import FileObject
+    from app.storage.blobs import unlink_queued
     from app.storage.compress import compress_file, should_compress
 
     processed = 0
     scanned = 0
     skipped_recent = 0
     with session_factory() as db:
+        unlink_after_commit: list[str | None] = []
         candidates = (
             db.query(FileObject)
             .filter(
@@ -48,13 +51,25 @@ def archive_idle_job(session_factory, storage_root: Path) -> int:
                 db.commit()
                 _log.info("archive idle job marked archived file_id=%s reason=already_compressed_or_incompressible", f.id)
                 continue
+            blob = db.get(ContentBlob, f.blob_id) if f.blob_id else None
+            if blob is not None and (blob.ref_count or 1) > 1:
+                # The physical bytes are deduplicated across several files. Archiving
+                # rewrites them in place, which would corrupt every sibling that still
+                # expects plaintext. Retire this record from the active scan without
+                # touching the shared blob.
+                f.lifecycle_state = "archived"
+                db.commit()
+                _log.info("archive idle job skipped shared blob file_id=%s blob_id=%s ref_count=%s", f.id, blob.id, blob.ref_count)
+                continue
             src = storage_root / f.storage_path
             if not src.exists():
                 # The bytes vanished from under the DB row — drop the stale record
                 # instead of looping on it forever.
                 _log.warning("archive: storage missing for file %d; removing stale record", f.id)
-                _delete_file(db, f, storage_root)
+                _delete_file(db, f, storage_root, unlink_after_commit)
                 db.commit()
+                unlink_queued(unlink_after_commit)
+                unlink_after_commit.clear()
                 continue
             tmp = src.with_suffix(".arch.tmp")
             try:
@@ -70,6 +85,11 @@ def archive_idle_job(session_factory, storage_root: Path) -> int:
                 f.archived = True
                 f.archive_codec = "zstd"
                 f.lifecycle_state = "archived"
+                # Keep global storage accounting (which sums ContentBlob.stored_size_bytes)
+                # in step with the now-compressed bytes on disk.
+                if blob is not None:
+                    blob.stored_size_bytes = stored
+                    blob.transform_key = f"{blob.transform_key}|archived"
                 db.commit()
                 _log.info(
                     "archive idle job archived file_id=%s original_bytes=%s stored_bytes=%s saved_bytes=%s",
@@ -90,10 +110,12 @@ def archive_idle_job(session_factory, storage_root: Path) -> int:
 def delete_idle_job(session_factory, storage_root: Path) -> int:
     from app.models.file import FileObject
     from app.models.link import Link
+    from app.storage.blobs import unlink_queued
 
     processed = 0
     scanned = 0
     with session_factory() as db:
+        unlink_after_commit: list[str | None] = []
         files = db.query(FileObject).filter(FileObject.delete_if_idle_days.isnot(None)).all()
         _log.info("idle delete job started candidates=%s", len(files))
         for f in files:
@@ -101,18 +123,21 @@ def delete_idle_job(session_factory, storage_root: Path) -> int:
             last = f.last_downloaded_at or f.created_at
             if (_now() - last) < timedelta(days=f.delete_if_idle_days):
                 continue
-            if _delete_file(db, f, storage_root):
+            if _delete_file(db, f, storage_root, unlink_after_commit):
                 processed += 1
         db.commit()
+        unlink_queued(unlink_after_commit)
     _log.info("idle delete job completed scanned=%s processed=%s", scanned, processed)
     return processed
 
 
 def temp_expiry_job(session_factory, storage_root: Path) -> int:
     from app.models.file import FileObject
+    from app.storage.blobs import unlink_queued
 
     processed = 0
     with session_factory() as db:
+        unlink_after_commit: list[str | None] = []
         files = (
             db.query(FileObject)
             .filter(FileObject.is_permanent == False, FileObject.expires_at < _now())
@@ -120,9 +145,10 @@ def temp_expiry_job(session_factory, storage_root: Path) -> int:
         )
         _log.info("temp expiry job started candidates=%s", len(files))
         for f in files:
-            if _delete_file(db, f, storage_root):
+            if _delete_file(db, f, storage_root, unlink_after_commit):
                 processed += 1
         db.commit()
+        unlink_queued(unlink_after_commit)
     _log.info("temp expiry job completed processed=%s", processed)
     return processed
 
@@ -143,28 +169,16 @@ def link_expiry_job(session_factory) -> int:
         return processed
 
 
-def _delete_file(db, f, storage_root: Path) -> bool:
+def _delete_file(db, f, storage_root: Path, unlink_paths: list) -> bool:
     from app.models.link import Link
-    from app.storage.paths import safe_join
-
-    try:
-        path = safe_join(storage_root, f.storage_path)
-    except ValueError:
-        # A storage_path that escapes the root should never have been written;
-        # refuse to touch the filesystem but still clear the DB rows.
-        path = None
-
-    if path is not None:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError as exc:
-            # On Windows a file that is still open/locked can't be unlinked. Keep
-            # the DB rows so a later run retries, rather than orphaning the bytes
-            # with no record pointing at them.
-            _log.warning("deferred delete for file %d (storage locked?): %s", f.id, exc)
-            return False
+    from app.storage.blobs import release_blob
 
     db.query(Link).filter_by(file_id=f.id).delete()
+    # Decrement the shared-blob ref count; release_blob only returns a path to
+    # unlink once the LAST logical reference is gone, so deduplicated bytes that
+    # other files still point at are never destroyed. The caller unlinks the
+    # returned paths after the surrounding transaction commits.
+    unlink_paths.append(release_blob(db, f))
     db.delete(f)
     _log.info("lifecycle deleted file file_id=%s storage_path=%s", f.id, f.storage_path)
     return True

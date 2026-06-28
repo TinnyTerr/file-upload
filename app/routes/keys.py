@@ -57,7 +57,7 @@ def list_keys(
 ) -> dict:
     keys = (
         db.query(ApiKey)
-        .filter_by(owner_id=user.id)
+        .filter_by(owner_id=user.id, active=True)
         .order_by(ApiKey.user_key_number.asc())
         .all()
     )
@@ -108,7 +108,10 @@ def delete_key(
         raise HTTPException(404, detail="not found")
     if user.role != "master" and key.owner_id != user.id:
         raise HTTPException(403, detail="not your key")
-    db.delete(key)
+    # Soft-delete: drop the key from the owner's active list and revoke auth, but
+    # keep the row so its per-user key number is never reused (numbers stay stable
+    # and monotonic) and admins retain a record of the revoked key.
+    key.active = False
     record(db, actor=user.username, action="apikey.deleted",
            target=f"apikey:{key_id}", ip=client_ip(request))
     db.commit()

@@ -242,38 +242,63 @@ def delete_user(
     if user.role == "master" and _master_count(db) <= 1:
         raise HTTPException(400, detail="cannot delete the last master")
 
-    import os
     from app.models.api_key import ApiKey
     from app.models.directory import Directory
+    from app.models.directory_collaborator import DirectoryCollaborator
+    from app.models.dropbox_link import DropboxUploadLink
     from app.models.file import FileObject
     from app.models.link import Link
-    from app.storage.paths import safe_join, storage_root
+    from app.models.remote_upload_job import RemoteUploadJob
+    from app.storage.blobs import release_blob, unlink_queued
 
     # Foreign keys are enforced (PRAGMA foreign_keys=ON) and none of the dependent
     # tables cascade, so every row that references this user must be removed first
     # or the delete fails with an IntegrityError. Files owned by the user — plus
-    # any files a master uploaded into the user's directories — also get their
-    # bytes unlinked so nothing is left orphaned on disk.
+    # any files a master uploaded into the user's directories — have their bytes
+    # released through the shared-blob ref counter so deduplicated content other
+    # users still reference is never destroyed.
     dirs = db.query(Directory).filter_by(owner_id=user_id).all()
     dir_ids = [d.id for d in dirs]
 
     files = db.query(FileObject).filter_by(owner_id=user_id).all()
     if dir_ids:
         files += db.query(FileObject).filter(FileObject.directory_id.in_(dir_ids)).all()
+    files = list({ff.id: ff for ff in files}.values())
+    file_ids = [f.id for f in files]
 
-    for f in {ff.id: ff for ff in files}.values():
-        try:
-            full = safe_join(storage_root(), f.storage_path)
-            if full.exists():
-                os.unlink(full)
-        except (OSError, ValueError):
-            pass
+    unlink_after_commit: list[str | None] = []
+    # Detach rows in other users' data that point at the files/user we're removing,
+    # so the deletes don't trip foreign keys (independent of DB-level ON DELETE).
+    if file_ids:
+        db.query(FileObject).filter(FileObject.saved_from_file_id.in_(file_ids)).update(
+            {FileObject.saved_from_file_id: None}, synchronize_session=False
+        )
+        db.query(RemoteUploadJob).filter(RemoteUploadJob.file_id.in_(file_ids)).update(
+            {RemoteUploadJob.file_id: None}, synchronize_session=False
+        )
+    db.query(DirectoryCollaborator).filter_by(invited_by_id=user_id).update(
+        {DirectoryCollaborator.invited_by_id: None}, synchronize_session=False
+    )
+
+    for f in files:
         db.query(Link).filter_by(file_id=f.id).delete()
+        unlink_after_commit.append(release_blob(db, f))
         db.delete(f)
     db.flush()
 
+    # Rows that reference the user's directories or the user directly.
+    if dir_ids:
+        db.query(DropboxUploadLink).filter(DropboxUploadLink.target_directory_id.in_(dir_ids)).delete(
+            synchronize_session=False
+        )
+        db.query(DirectoryCollaborator).filter(DirectoryCollaborator.directory_id.in_(dir_ids)).delete(
+            synchronize_session=False
+        )
     for d in dirs:
         db.delete(d)
+    db.query(DirectoryCollaborator).filter_by(user_id=user_id).delete()
+    db.query(DropboxUploadLink).filter_by(owner_id=user_id).delete()
+    db.query(RemoteUploadJob).filter_by(owner_id=user_id).delete()
     db.query(ApiKey).filter_by(owner_id=user_id).delete()
     db.query(SessionRow).filter_by(user_id=user_id).delete()
     db.query(Permission).filter_by(user_id=user_id).delete()
@@ -290,6 +315,7 @@ def delete_user(
     )
     db.delete(user)
     db.commit()
+    unlink_queued(unlink_after_commit)
     return {"status": "deleted"}
 
 

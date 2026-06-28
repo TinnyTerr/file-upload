@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.audit.log import record
 from app.deps import client_ip, get_db, get_upload_user, require_active_user, require_master, require_permission
-from app.links.consume import resolve_active_link
+from app.links.consume import consume_use, resolve_active_link
 from app.links.slugs import new_slug
 from app.models.content_blob import ContentBlob
 from app.models.file import FileObject
@@ -822,10 +822,21 @@ def _recover_access_key(request: Request, f: FileObject) -> str | None:
         return None
 
 
+def _verify_file_access_key(request: Request, f: FileObject, ek: str | None) -> bool:
+    """Server-mode ?ek= gate for a standalone file (mirrors the /raw download)."""
+    if f.encryption_mode != "server":
+        return True
+    expected = _recover_access_key(request, f)
+    if expected is None or not ek:
+        return False
+    return _secrets.compare_digest(ek, expected)
+
+
 @router.post("/files/{slug}/save")
 def save_shared_file(
     slug: str,
     request: Request,
+    ek: str | None = None,
     _csrf: SessionRow = Depends(require_csrf),
     user: User = Depends(require_active_user),
     db: Session = Depends(get_db),
@@ -836,9 +847,18 @@ def save_shared_file(
     source = db.get(FileObject, link.file_id)
     if source is None:
         raise HTTPException(404, detail="not found")
+    # Server-mode files require the ?ek= access credential before we copy bytes or
+    # hand back the recovered key — verify BEFORE consuming a use so a wrong key
+    # never burns a limited-use link.
+    if not _verify_file_access_key(request, source, ek):
+        raise HTTPException(401, detail="missing or invalid access key (?ek=)")
     perm = ensure_permissions(db, user.id, master=(user.role == "master"))
     if _used_bytes(db, user.id) + source.size_bytes > perm.quota_bytes:
         raise HTTPException(413, detail="save would exceed your quota")
+    # Saving a copy counts as a download against the link's limit; otherwise a
+    # single-use link could be turned into an unlimited redistributable copy.
+    if not consume_use(db, slug):
+        raise HTTPException(404, detail="not found")
     blob = db.get(ContentBlob, source.blob_id) if source.blob_id else None
     if blob is not None:
         blob.ref_count = (blob.ref_count or 0) + 1

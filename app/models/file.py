@@ -29,7 +29,7 @@ class FileObject(Base):
     original_filename: Mapped[str] = mapped_column(String(512), nullable=False)
     source_type: Mapped[str] = mapped_column(String(24), nullable=False, default="upload")
     saved_from_file_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("files.id"), nullable=True
+        Integer, ForeignKey("files.id", ondelete="SET NULL"), nullable=True
     )
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     stored_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
