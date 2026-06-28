@@ -15,7 +15,7 @@ export function BulkBar({
   const open = count > 0;
   return (
     <div
-      inert={!open ? "" : undefined}
+      inert={!open ? true : undefined}
       className={cn(
         "pointer-events-none fixed inset-x-0 bottom-6 z-40 flex justify-center px-4 transition-all duration-300",
         open ? "translate-y-0 opacity-100" : "translate-y-8 opacity-0",

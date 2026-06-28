@@ -20,7 +20,7 @@ export function FilesMode() {
     const results = await start(files, toUploadOptions(form));
     setFiles([]);
     if (results.length) {
-      setShareEntries(results.map((r) => outcomeToShareEntry(r.filename, r.outcome)));
+      setShareEntries(results.map((r) => outcomeToShareEntry(r.filename, r.outcome)).filter((e): e is ShareEntry => e !== null));
       setShareOpen(true);
     }
   };
