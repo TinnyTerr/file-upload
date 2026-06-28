@@ -30,14 +30,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tooltip } from "@/components/ui/tooltip";
-import { useAuth } from "@/features/auth/hooks/auth";
+import { useAuth, ME_QUERY_KEY } from "@/features/auth/hooks/auth";
 import { accountService } from "@/features/account/services/accountService";
 import { errorMessage } from "@/config/api";
 import { toast } from "sonner";
 import { cn } from "@/lib/cn";
 import { useNavigate } from "react-router-dom";
-import { useQueryClient } from "@tanstack/react-query";
-import { ME_QUERY_KEY } from "@/features/auth/hooks/auth";
 
 // ---------------------------------------------------------------------------
 // Shared primitives

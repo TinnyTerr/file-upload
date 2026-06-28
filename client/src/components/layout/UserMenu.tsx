@@ -11,7 +11,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Tooltip } from "@/components/ui/tooltip";
 import { SettingsModal } from "./SettingsModal";
 import { useAuth } from "@/features/auth/hooks/auth";
 import { accountService } from "@/features/account/services/accountService";

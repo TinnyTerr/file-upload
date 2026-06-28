@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { Power, PowerOff, Trash2, Plus, Link2, EyeOff, Eye } from "lucide-react";
 import {
   Dialog,
@@ -10,13 +9,10 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { CopyButton } from "@/components/ui/copy-button";
-import { Switch } from "@/components/ui/switch";
-import { Label } from "@/components/ui/label";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useDialogs } from "@/providers/DialogProvider";
 import { useDirLinks, useCreateDirLink, useUpdateDirLink, useDeleteDirLink } from "../hooks/useDirectories";
 import { formatDateTime } from "@/lib/time";
-import { cn } from "@/lib/cn";
 import type { DirectoryLink } from "../types";
 import type { EncryptionMode } from "@/features/files/types";
 

@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
 import {
   BookText, KeyRound, Upload, Download, Info, FolderTree, ShieldCheck, AlertCircle,
-  Link2, List, Trash2, Globe, ChevronDown, ChevronRight,
+  Link2, Globe, ChevronDown, ChevronRight,
 } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { CopyButton } from "@/components/ui/copy-button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,7 +28,7 @@ function MethodBadge({ method }: { method: "GET" | "POST" | "PATCH" | "DELETE" |
   );
 }
 
-function CodeBlock({ code, lang = "bash" }: { code: string; lang?: string }) {
+function CodeBlock({ code }: { code: string; lang?: string }) {
   return (
     <div className="relative">
       <pre className="overflow-x-auto rounded-lg border border-border bg-background/50 p-3 pr-12 font-mono text-xs leading-relaxed whitespace-pre">
