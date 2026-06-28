@@ -1,102 +1,61 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
-import { b64urlDecodeBytes } from "../../../lib/keys";
-import { clientDecrypt, saveBlob } from "../../../lib/crypto";
-import { useToast } from "../../../providers/ToastProvider";
-import { useDialog } from "../../../providers/DialogProvider";
-import { fetchCiphertext, fetchFileInfo, saveToMyFiles, type FileInfo } from "../services/downloadService";
+import { useState, useCallback } from "react";
+import { toast } from "sonner";
+import { publicService, rawPath } from "../services/publicService";
+import { decryptBlob } from "@/workers/aeadClient";
+import { base64UrlToBytes } from "@/lib/base64url";
+import { saveBlob } from "@/lib/download";
+import type { EncryptionMode } from "@/features/files/types";
 
-/** Data loading + decryption/download orchestration for the public file page. */
-export function useDownload() {
-  const { slug = "" } = useParams();
-  const { showToast } = useToast();
-  const dialog = useDialog();
+export type DownloadStatus = "idle" | "downloading" | "decrypting" | "done" | "error";
 
-  const [info, setInfo] = useState<FileInfo | null>(null);
-  const [status, setStatus] = useState<"loading" | "error" | "ready">("loading");
-  const [btnLabel, setBtnLabel] = useState("Download");
-  const [btnBusy, setBtnBusy] = useState(false);
-  const [hash, setHash] = useState("");
+export function useDownload(slug: string, filename: string, mode: EncryptionMode) {
+  const [status, setStatus] = useState<DownloadStatus>("idle");
+  const [percent, setPercent] = useState(0);
+  const [error, setError] = useState<string | null>(null);
 
-  const fragmentKey = useRef<string | null>(null);
-  const queryKey = useRef<string | null>(null);
-
-  useEffect(() => {
-    const m = window.location.hash.match(/[#&]ek=([^&]*)/);
-    fragmentKey.current = m ? m[1] : null;
-    queryKey.current = new URLSearchParams(window.location.search).get("ek");
-  }, []);
-
-  useEffect(() => {
-    if (!slug) return setStatus("error");
-    (async () => {
+  /** keys: clientKey (base64url, from #ek=) / serverKey (from ?ek=). */
+  const download = useCallback(
+    async (keys: { clientKey?: string | null; serverKey?: string | null }) => {
+      setError(null);
       try {
-        const data = await fetchFileInfo(slug);
-        setInfo(data);
-        document.title = `${data.filename} — Oxymoron`;
-        const firstHash = Object.entries(data.hashes || {}).find(([, v]) => v)?.[0] || "";
-        setHash(firstHash);
-        setStatus("ready");
-      } catch {
-        setStatus("error");
-      }
-    })();
-  }, [slug]);
-
-  const clientDownload = useCallback(
-    async (fragKey: string, filename: string) => {
-      setBtnBusy(true);
-      setBtnLabel("⟳ Decrypting…");
-      try {
-        let keyBytes: Uint8Array;
-        try {
-          keyBytes = b64urlDecodeBytes(fragKey);
-        } catch {
-          throw new Error("the key in the URL is malformed");
+        if (mode === "none") {
+          window.location.assign(rawPath(slug));
+          return;
         }
-        if (keyBytes.length !== 32)
-          throw new Error("wrong key length — check the full #ek= value was copied");
-        const ciphertext = await fetchCiphertext(slug);
-        const plaintext = await clientDecrypt(ciphertext, keyBytes, (pct) =>
-          setBtnLabel(`⟳ Decrypting… ${pct}%`),
+        if (mode === "server") {
+          if (!keys.serverKey) {
+            setError("This file needs an access key (?ek=). Paste the full share link.");
+            return;
+          }
+          window.location.assign(rawPath(slug, keys.serverKey));
+          return;
+        }
+        // client mode → fetch ciphertext, decrypt in-browser, save plaintext.
+        if (!keys.clientKey) {
+          setError("Missing decryption key (#ek=). You need the complete share link.");
+          return;
+        }
+        const keyBytes = base64UrlToBytes(keys.clientKey);
+        setStatus("downloading");
+        setPercent(0);
+        const cipher = await publicService.fetchRaw(slug, (loaded, total) =>
+          setPercent(total ? Math.round((loaded / total) * 100) : 0),
         );
-        saveBlob(new Blob([plaintext]), filename);
+        setStatus("decrypting");
+        setPercent(0);
+        const plain = await decryptBlob(cipher, keyBytes, setPercent);
+        saveBlob(plain, filename);
+        setStatus("done");
+        toast.success("Downloaded & decrypted");
       } catch (err) {
-        dialog.alert({
-          title: "Decryption failed",
-          message: (err as Error).message,
-          glyph: "🔒",
-          kind: "error",
-        });
-      } finally {
-        setBtnBusy(false);
-        setBtnLabel("Download");
+        const msg = err instanceof Error ? err.message : "Download failed";
+        setError(msg);
+        setStatus("error");
+        toast.error(msg);
       }
     },
-    [slug, dialog],
+    [slug, filename, mode],
   );
 
-  async function saveFile() {
-    try {
-      await saveToMyFiles(slug);
-      showToast("Saved to your files.");
-    } catch (err) {
-      showToast((err as Error).message || "Save failed.", "error");
-    }
-  }
-
-  return {
-    slug,
-    info,
-    status,
-    hash,
-    setHash,
-    btnBusy,
-    btnLabel,
-    frag: fragmentKey.current,
-    qk: queryKey.current,
-    clientDownload,
-    saveFile,
-    dialog,
-  };
+  return { download, status, percent, error };
 }

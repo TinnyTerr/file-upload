@@ -1,66 +1,51 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ApiError, csrf, user } from "../../../lib/api";
-import { changeCredentials, fetchMe } from "../services/authService";
+import { toast } from "sonner";
+import { accountService } from "@/features/account/services/accountService";
+import { useAuth } from "./auth";
+import { errorMessage } from "@/config/api";
 
-type Alert = { kind: "error" | "success"; msg: string } | null;
+const MIN_PASSWORD = 12;
 
-/** State + orchestration for the credential-change form. */
 export function useChangeCredentials() {
-  const nav = useNavigate();
-  const [current, setCurrent] = useState("");
-  const [newUsername, setNewUsername] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [confirm, setConfirm] = useState("");
-  const [alert, setAlert] = useState<Alert>(null);
-  const [busy, setBusy] = useState(false);
+  const { refresh } = useAuth();
+  const navigate = useNavigate();
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!csrf.get()) {
-      nav("/login", { replace: true });
-      return;
+  async function submit(input: {
+    current_password: string;
+    new_username: string;
+    new_password: string;
+    confirm_password: string;
+  }) {
+    setError(null);
+    if (input.new_password.length < MIN_PASSWORD) {
+      setError(`New password must be at least ${MIN_PASSWORD} characters.`);
+      return false;
     }
-    const stored = user.get();
-    if (stored?.username) setNewUsername(stored.username);
-  }, [nav]);
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setAlert(null);
-
-    if (!newUsername.trim()) return setAlert({ kind: "error", msg: "Username cannot be empty." });
-    if (newPassword.length < 12)
-      return setAlert({ kind: "error", msg: "Password must be at least 12 characters." });
-    if (newPassword !== confirm) return setAlert({ kind: "error", msg: "Passwords do not match." });
-
-    setBusy(true);
+    if (input.new_password !== input.confirm_password) {
+      setError("Passwords do not match.");
+      return false;
+    }
+    setSubmitting(true);
     try {
-      await changeCredentials({
-        currentPassword: current,
-        newUsername: newUsername.trim(),
-        newPassword,
+      await accountService.changeCredentials({
+        current_password: input.current_password,
+        new_username: input.new_username,
+        new_password: input.new_password,
       });
-      const me = await fetchMe();
-      if (me) user.set(me);
-      setAlert({ kind: "success", msg: "Credentials updated — redirecting…" });
-      setTimeout(() => nav("/files", { replace: true }), 800);
+      await refresh();
+      toast.success("Credentials updated", { description: "Other sessions were signed out." });
+      navigate("/files", { replace: true });
+      return true;
     } catch (err) {
-      if (err instanceof ApiError && err.status === 409)
-        setAlert({ kind: "error", msg: "Username is taken — choose another." });
-      else if (err instanceof ApiError && err.status === 401)
-        setAlert({ kind: "error", msg: "Current password is incorrect." });
-      else if (err instanceof ApiError) setAlert({ kind: "error", msg: err.message });
-      else setAlert({ kind: "error", msg: "Network error." });
+      setError(errorMessage(err));
+      return false;
     } finally {
-      setBusy(false);
+      setSubmitting(false);
     }
   }
 
-  return {
-    current, setCurrent,
-    newUsername, setNewUsername,
-    newPassword, setNewPassword,
-    confirm, setConfirm,
-    alert, busy, submit,
-  };
+  return { submit, submitting, error, minPassword: MIN_PASSWORD };
 }

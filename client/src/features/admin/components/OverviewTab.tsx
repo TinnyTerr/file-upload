@@ -1,263 +1,253 @@
-import { useEffect, useState } from "react";
-import { formatBytes, parseSize } from "../../../lib/api";
-import { useToast } from "../../../providers/ToastProvider";
-import { Card, Eyebrow, Input, Spinner } from "../../../components/ui/primitives";
-import { Button } from "../../../components/ui/Button";
-import { fetchStorage, runLifecycle as runLifecycleJob, updateStorageCap } from "../services/adminService";
-import { BarList, DashCard, MetricTile, StatList, StatusPills, StorageRing } from "./charts";
+import { useState } from "react";
+import { Save, Archive, Clock, Link2Off, RefreshCw, Trash2, Wrench } from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
+import { StorageRing, BarList, StatusPills, QuotaBars, Donut, StackedBar } from "./charts";
+import { StatsGrid } from "./StatsGrid";
+import { BulkConfirmDialog } from "./BulkConfirmDialog";
+import { useStorageDetails, useStorageMutations } from "../hooks/useAdminDashboard";
+import { useBulk } from "../hooks/useBulk";
+import { formatBytes } from "@/lib/bytes";
+import type { LifecycleJob } from "../types";
 
-interface StorageData {
-  global_storage_quota_bytes: number;
-  used_bytes: number;
-  allocated_quota_bytes: number;
-  storage_summary?: { free_under_cap_bytes?: number };
-  total_files?: number;
-  active_links?: number;
-  total_links?: number;
-  total_api_keys?: number;
-  dedup_saved_bytes?: number;
-  archive_saved_bytes?: number;
-  disk?: { free_bytes?: number };
-  users?: { username: string; used_bytes?: number; quota_bytes?: number | null }[];
-  content_type_counts?: { content_type: string; count: number; stored_bytes?: number }[];
-  lifecycle_counts?: Record<string, number>;
-  link_status_counts?: Record<string, number>;
-  api_key_status_counts?: Record<string, number>;
-  recent_audit_counts?: { action: string; count: number }[];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  fun_stats?: any;
-}
-
-const LIFECYCLE_BTNS = [
-  { path: "/admin/lifecycle/archive-idle", label: "Archive idle" },
-  { path: "/admin/lifecycle/temp-expiry", label: "Temp expiry" },
-  { path: "/admin/lifecycle/link-expiry", label: "Link expiry" },
-  { path: "/admin/lifecycle/reconcile", label: "Reconcile" },
+const JOBS: { id: LifecycleJob; label: string; icon: typeof Archive }[] = [
+  { id: "archive-idle", label: "Archive idle", icon: Archive },
+  { id: "temp-expiry", label: "Expire temp files", icon: Clock },
+  { id: "link-expiry", label: "Expire links", icon: Link2Off },
+  { id: "reconcile", label: "Reconcile states", icon: RefreshCw },
 ];
 
-export function OverviewTab({ version, bump }: { version: number; bump: () => void }) {
-  const { showToast } = useToast();
-  const [d, setD] = useState<StorageData | null>(null);
-  const [cap, setCap] = useState("");
-  const [lifeResult, setLifeResult] = useState("");
-  const [busyPath, setBusyPath] = useState("");
+export function OverviewTab() {
+  const { data, isLoading } = useStorageDetails();
+  const { setCap, runJob } = useStorageMutations();
+  const bulk = useBulk();
+  const [capGb, setCapGb] = useState("");
 
-  async function load() {
-    try {
-      const data: StorageData = await fetchStorage();
-      setD(data);
-      setCap(formatBytes(data.global_storage_quota_bytes));
-    } catch {
-      showToast("Failed to load storage details.", "error");
-    }
-  }
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [version]);
-
-  async function saveCap() {
-    const bytes = parseSize(cap);
-    if (bytes === null) return showToast('Invalid cap — use "500 GB"', "error");
-    try {
-      await updateStorageCap(bytes);
-      showToast("Storage cap updated.");
-      bump();
-    } catch {
-      showToast("Failed to update cap.", "error");
-    }
-  }
-
-  async function runLifecycle(path: string) {
-    setBusyPath(path);
-    try {
-      const res = await runLifecycleJob(path);
-      const msg = `Last run processed ${res.processed ?? 0} item(s).`;
-      setLifeResult(msg);
-      showToast(msg);
-      bump();
-    } catch {
-      showToast("Lifecycle action failed.", "error");
-    } finally {
-      setBusyPath("");
-    }
-  }
-
-  if (!d)
+  if (isLoading || !data) {
     return (
-      <div className="flex items-center gap-2 py-10 text-sm text-[var(--color-ink-muted)]">
-        <Spinner /> Loading…
+      <div className="space-y-4">
+        <Skeleton className="h-24" />
+        <div className="grid gap-4 md:grid-cols-2">
+          <Skeleton className="h-56" />
+          <Skeleton className="h-56" />
+        </div>
       </div>
     );
+  }
 
-  const fun = d.fun_stats || {};
-  const typeTotal = (d.content_type_counts || []).reduce((s, r) => s + (r.stored_bytes || 0), 0);
+  const onSaveCap = () => {
+    const gb = parseFloat(capGb);
+    if (!Number.isFinite(gb) || gb <= 0) return;
+    setCap.mutate(Math.round(gb * 1024 ** 3));
+  };
+
+  const sourceData = Object.entries(data.fun_stats.source_type_counts).map(([label, value]) => ({ label, value }));
 
   return (
-    <div className="space-y-5">
-      {/* Storage cap + ring */}
-      <Card>
-        <div className="flex flex-col gap-5 md:flex-row md:items-center">
-          <StorageRing used={d.used_bytes} total={d.global_storage_quota_bytes} />
-          <div className="flex-1 space-y-3">
-            <div>
-              <Eyebrow>Global storage cap</Eyebrow>
-              <div className="mt-1.5 flex gap-2">
-                <Input value={cap} onChange={(e) => setCap(e.target.value)} className="max-w-[200px]" />
-                <Button onClick={saveCap}>Save</Button>
+    <div className="space-y-4">
+      <StatsGrid data={data} />
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Global storage</CardTitle>
+            <CardDescription>Used against the configured cap.</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col items-center gap-4">
+            <StorageRing used={data.used_bytes} total={data.global_storage_quota_bytes} />
+            <div className="grid w-full grid-cols-2 gap-2 text-center text-xs">
+              <div className="rounded-md bg-secondary/30 p-2">
+                <div className="font-semibold">{formatBytes(data.storage_summary.free_under_cap_bytes)}</div>
+                <div className="text-muted-foreground">free under cap</div>
+              </div>
+              <div className="rounded-md bg-secondary/30 p-2">
+                <div className="font-semibold">{formatBytes(data.allocated_quota_bytes)}</div>
+                <div className="text-muted-foreground">allocated</div>
               </div>
             </div>
-            <BarList
-              rows={[
-                { label: "Used storage", value: d.used_bytes, total: d.global_storage_quota_bytes, bytes: true, tone: "capacity" },
-                { label: "Allocated quotas", value: d.allocated_quota_bytes, total: d.global_storage_quota_bytes, bytes: true },
-                { label: "Free under cap", value: d.storage_summary?.free_under_cap_bytes || 0, total: d.global_storage_quota_bytes, bytes: true },
-              ]}
-            />
-          </div>
-        </div>
-      </Card>
+            <div className="flex w-full items-end gap-2">
+              <div className="flex-1 space-y-1">
+                <label className="text-xs text-muted-foreground">Set cap (GB)</label>
+                <Input
+                  type="number"
+                  min={1}
+                  placeholder={(data.global_storage_quota_bytes / 1024 ** 3).toFixed(0)}
+                  value={capGb}
+                  onChange={(e) => setCapGb(e.target.value)}
+                />
+              </div>
+              <Button onClick={onSaveCap} loading={setCap.isPending}>
+                <Save /> Save
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
 
-      {/* KPIs */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-        <MetricTile label="Files" value={Number(d.total_files || 0).toLocaleString()} sub="stored objects" />
-        <MetricTile label="Links" value={`${Number(d.active_links || 0).toLocaleString()} / ${Number(d.total_links || 0).toLocaleString()}`} sub="active / total" />
-        <MetricTile label="API keys" value={Number(d.total_api_keys || 0).toLocaleString()} sub="all users" />
-        <MetricTile label="Dedup savings" value={formatBytes(d.dedup_saved_bytes || 0)} sub="duplicate blobs" />
-        <MetricTile label="Archive savings" value={formatBytes(d.archive_saved_bytes || 0)} sub="archiving" />
-        <MetricTile label="Disk free" value={formatBytes(d.disk?.free_bytes || 0)} sub="filesystem" />
-        <MetricTile label="Users" value={Number((d.users || []).length).toLocaleString()} sub="accounts" />
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle className="text-base">Per-user storage</CardTitle>
+            <CardDescription>Top consumers by used bytes.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <QuotaBars rows={data.fun_stats.top_storage_users.length ? data.fun_stats.top_storage_users : data.users} />
+          </CardContent>
+        </Card>
       </div>
 
-      {/* Charts grid */}
-      <div className="grid gap-4 lg:grid-cols-2">
-        <DashCard title="Per-user storage">
-          <BarList
-            rows={(d.users || []).map((u) => ({
-              label: u.username,
-              value: u.used_bytes || 0,
-              total: u.quota_bytes || Math.max(u.used_bytes || 0, 1),
-              bytes: true,
-              tone: "capacity",
-            }))}
-          />
-        </DashCard>
-        <DashCard title="File types">
-          <BarList
-            rows={(d.content_type_counts || []).map((r) => ({
-              label: r.content_type,
-              value: r.stored_bytes || 0,
-              total: typeTotal || 1,
-              bytes: true,
-            }))}
-          />
-        </DashCard>
-        <DashCard title="Lifecycle states">
-          <StatusPills
-            counts={d.lifecycle_counts}
-            labels={{
-              active: { label: "active", color: "var(--color-good)" },
-              archived: { label: "archived", color: "var(--color-accent)" },
-              archiving: { label: "archiving", color: "var(--color-warn)" },
-              unarchiving: { label: "unarchiving", color: "var(--color-warn)" },
-            }}
-          />
-        </DashCard>
-        <DashCard title="Links status">
-          <StatusPills
-            counts={d.link_status_counts}
-            labels={{
-              active: { label: "active", color: "var(--color-good)" },
-              inactive: { label: "inactive", color: "var(--color-ink-muted)" },
-              expired: { label: "expired", color: "var(--color-bad)" },
-              used_up: { label: "used up", color: "var(--color-warn)" },
-            }}
-          />
-        </DashCard>
-        <DashCard title="API keys status">
-          <StatusPills
-            counts={d.api_key_status_counts}
-            labels={{
-              active: { label: "active", color: "var(--color-good)" },
-              inactive: { label: "revoked", color: "var(--color-ink-muted)" },
-              bound: { label: "IP bound", color: "var(--color-accent)" },
-              unbound: { label: "unbound", color: "var(--color-ink-dim)" },
-            }}
-          />
-        </DashCard>
-        <DashCard title="Recent audit activity">
-          <BarList
-            rows={(d.recent_audit_counts || []).map((r) => ({
-              label: r.action,
-              value: r.count || 0,
-              total: (d.recent_audit_counts || []).reduce((s, x) => s + (x.count || 0), 0) || 1,
-            }))}
-          />
-        </DashCard>
-      </div>
-
-      {/* Fun stats */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <StatList
-          title="Most downloaded"
-          rows={(fun.top_downloaded_files || []).map((r: { filename: string; downloads?: number; id: number }) => ({
-            label: r.filename,
-            value: `${Number(r.downloads || 0).toLocaleString()} dl`,
-            sub: `file ${r.id}`,
-          }))}
-        />
-        <StatList
-          title="Biggest files"
-          rows={(fun.biggest_files || []).map((r: { filename: string; size_bytes?: number; stored_size_bytes?: number }) => ({
-            label: r.filename,
-            value: formatBytes(r.size_bytes || 0),
-            sub: `stored ${formatBytes(r.stored_size_bytes || 0)}`,
-          }))}
-        />
-        <StatList
-          title="Top storage users"
-          rows={(fun.top_storage_users || []).map((r: { username: string; used_bytes?: number; quota_bytes?: number }) => ({
-            label: r.username,
-            value: formatBytes(r.used_bytes || 0),
-            sub: r.quota_bytes ? `of ${formatBytes(r.quota_bytes)}` : "",
-          }))}
-        />
-        <StatList
-          title="Upload sources"
-          rows={Object.entries(fun.source_type_counts || {}).map(([source, count]) => ({
-            label: source,
-            value: Number(count || 0).toLocaleString(),
-          }))}
-        />
-        <StatList
-          title="Busy folders"
-          rows={(fun.busiest_directories || []).map((r: { title: string; file_count?: number; total_bytes?: number }) => ({
-            label: r.title,
-            value: `${Number(r.file_count || 0).toLocaleString()} files`,
-            sub: formatBytes(r.total_bytes || 0),
-          }))}
-        />
-        <StatList
-          title="Remote jobs"
-          rows={Object.entries(fun.remote_upload_counts || {}).map(([status, count]) => ({
-            label: status,
-            value: Number(count || 0).toLocaleString(),
-          }))}
-        />
-      </div>
-
-      {/* Lifecycle controls */}
       <Card>
-        <Eyebrow>Lifecycle controls</Eyebrow>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {LIFECYCLE_BTNS.map((b) => (
-            <Button key={b.path} variant="ghost" disabled={busyPath === b.path} onClick={() => runLifecycle(b.path)}>
-              {busyPath === b.path ? "Running…" : b.label}
-            </Button>
-          ))}
-        </div>
-        {lifeResult && <div className="mt-2 text-sm text-[var(--color-ink-muted)]">{lifeResult}</div>}
+        <CardHeader>
+          <CardTitle className="text-base">Storage allocation</CardTitle>
+          <CardDescription>How the global cap is divided.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <StackedBar
+            data={[
+              { label: "used", value: data.used_bytes },
+              { label: "allocated (free)", value: Math.max(0, data.allocated_quota_bytes - data.used_bytes) },
+              { label: "unallocated", value: data.storage_summary.unallocated_quota_bytes },
+            ]}
+            formatValue={formatBytes}
+          />
+        </CardContent>
       </Card>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Link status</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Donut data={Object.entries(data.link_status_counts).map(([label, value]) => ({ label, value }))} unit="links" />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">API key status</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Donut data={Object.entries(data.api_key_status_counts).map(([label, value]) => ({ label, value }))} unit="keys" />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Upload sources</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Donut data={sourceData} unit="files" />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">File types</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Donut data={data.content_type_counts.slice(0, 6).map((c) => ({ label: c.content_type, value: c.count }))} unit="files" />
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Top downloaded</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <BarList data={data.fun_stats.top_downloaded_files.slice(0, 8).map((f) => ({ label: f.filename, value: f.downloads }))} />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Biggest files</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <BarList
+              data={data.fun_stats.biggest_files.slice(0, 8).map((f) => ({ label: f.filename, value: f.size_bytes }))}
+              formatValue={formatBytes}
+            />
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Busiest folders</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <BarList
+            data={data.fun_stats.busiest_directories.slice(0, 8).map((d) => ({ label: d.title, value: d.total_bytes }))}
+            formatValue={formatBytes}
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Status breakdown</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div>
+            <p className="mb-2 text-xs font-medium text-muted-foreground">Links</p>
+            <StatusPills counts={data.link_status_counts} />
+          </div>
+          <div>
+            <p className="mb-2 text-xs font-medium text-muted-foreground">API keys</p>
+            <StatusPills counts={data.api_key_status_counts} />
+          </div>
+          {Object.keys(data.lifecycle_counts).length > 0 && (
+            <div>
+              <p className="mb-2 text-xs font-medium text-muted-foreground">Lifecycle</p>
+              <StatusPills counts={data.lifecycle_counts} />
+            </div>
+          )}
+          {Object.keys(data.fun_stats.remote_upload_counts).length > 0 && (
+            <div>
+              <p className="mb-2 text-xs font-medium text-muted-foreground">Remote jobs</p>
+              <StatusPills counts={data.fun_stats.remote_upload_counts} />
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Run lifecycle jobs</CardTitle>
+            <CardDescription>Trigger background maintenance immediately.</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2">
+            {JOBS.map((job) => (
+              <Button
+                key={job.id}
+                variant="secondary"
+                size="sm"
+                onClick={() => runJob.mutate(job.id)}
+                loading={runJob.isPending && runJob.variables === job.id}
+              >
+                <job.icon /> {job.label}
+              </Button>
+            ))}
+          </CardContent>
+        </Card>
+
+        <Card className="border-destructive/30">
+          <CardHeader>
+            <CardTitle className="text-base">Global maintenance</CardTitle>
+            <CardDescription>Repository-wide cleanup. Each needs confirmation.</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2">
+            <Button variant="secondary" size="sm" loading={bulk.loading} onClick={() => bulk.startPreview("run_cleanup_jobs")}>
+              <Wrench /> Run all cleanup jobs
+            </Button>
+            <Button variant="destructive" size="sm" loading={bulk.loading} onClick={() => bulk.startPreview("delete_inactive_links")}>
+              <Trash2 /> Delete inactive links
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+
+      <BulkConfirmDialog bulk={bulk} />
     </div>
   );
 }

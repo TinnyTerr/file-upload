@@ -1,17 +1,34 @@
-// Centralized app navigation. Expanding the top nav is as simple as adding an
-// entry here — no edits to the Nav component itself.
+import { FolderUp, BookText, ShieldCheck, type LucideIcon } from "lucide-react";
+import type { PermissionFlag } from "./permissions";
 
 export interface NavItem {
-  to: string;
   label: string;
-  /** Pathname prefix used to mark the link active. */
-  match: string;
-  /** When true, only shown to master/admin users. */
-  master?: boolean;
+  to: string;
+  icon: LucideIcon;
+  description: string;
+  /** If set, item only shows when the current user has this permission. */
+  requires?: PermissionFlag;
 }
 
-export const NAV_LINKS: NavItem[] = [
-  { to: "/files", label: "Files", match: "/files" },
-  { to: "/api-docs", label: "API", match: "/api-docs" },
-  { to: "/admin", label: "Admin", match: "/admin", master: true },
+export const NAV_ITEMS: NavItem[] = [
+  {
+    label: "Files",
+    to: "/files",
+    icon: FolderUp,
+    description: "Upload, share and manage your files",
+  },
+  {
+    label: "API",
+    to: "/api-docs",
+    icon: BookText,
+    description: "Programmatic upload reference",
+    requires: "can_use_api_keys",
+  },
+  {
+    label: "Admin",
+    to: "/admin",
+    icon: ShieldCheck,
+    description: "Users, storage and audit controls",
+    requires: "can_view_admin",
+  },
 ];

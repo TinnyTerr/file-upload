@@ -1,4 +1,7 @@
-/** Tiny className joiner (no dependency). */
-export function cn(...parts: Array<string | false | null | undefined>): string {
-  return parts.filter(Boolean).join(" ");
+import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+/** Merge conditional class names and de-dupe conflicting Tailwind utilities. */
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
 }

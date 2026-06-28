@@ -188,6 +188,8 @@ def _finalize_stored_file(
         work_path.unlink(missing_ok=True)
         _log.warning("upload finalize rejected user_id=%s reason=global_storage stored_bytes=%s", user.id, stored)
         raise
+    # Lock the user row to serialize concurrent quota evaluations
+    db.query(User).filter_by(id=user.id).with_for_update().first()
     if _used_bytes(db, user.id) + stored > perm.quota_bytes:
         work_path.unlink(missing_ok=True)
         _log.warning("upload finalize rejected user_id=%s reason=user_quota stored_bytes=%s", user.id, stored)

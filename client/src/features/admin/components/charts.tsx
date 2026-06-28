@@ -1,172 +1,217 @@
-import type { ReactNode } from "react";
-import { formatBytes } from "../../../lib/api";
-import { Card } from "../../../components/ui/primitives";
+import { formatBytes, percent as pctOf } from "@/lib/bytes";
+import { cn } from "@/lib/cn";
 
-function pctOf(value: number, total: number) {
-  return total > 0 ? Math.min(100, Math.max(0, (value / total) * 100)) : 0;
-}
+const CHART_COLORS = [
+  "var(--chart-1)",
+  "var(--chart-2)",
+  "var(--chart-3)",
+  "var(--chart-4)",
+  "var(--chart-5)",
+];
 
-export interface BarRow {
-  label: string;
-  value: number;
-  total: number;
-  bytes?: boolean;
-  tone?: "capacity" | "info";
-}
-
-export function BarList({ rows }: { rows: BarRow[] }) {
-  const filtered = rows.filter((r) => r.value > 0 || r.total > 0);
-  if (!filtered.length)
-    return <div className="text-sm text-[var(--color-ink-muted)]">No data yet.</div>;
-  return (
-    <div className="space-y-2.5">
-      {filtered.slice(0, 8).map((r, i) => {
-        const pct = pctOf(r.value, r.total || 1);
-        const tone =
-          r.tone === "capacity" ? (pct >= 90 ? "bad" : pct >= 70 ? "warn" : "accent") : "accent";
-        const color =
-          tone === "bad" ? "var(--color-bad)" : tone === "warn" ? "var(--color-warn)" : "var(--color-accent)";
-        return (
-          <div key={i}>
-            <div className="mb-1 flex items-center justify-between gap-2 text-xs">
-              <span className="min-w-0 truncate text-[var(--color-ink-dim)]">{r.label}</span>
-              <span className="shrink-0 font-[var(--font-mono)] text-[var(--color-ink-muted)]">
-                {r.bytes
-                  ? `${formatBytes(r.value)} / ${formatBytes(r.total)} (${pct.toFixed(1)}%)`
-                  : r.value.toLocaleString()}
-              </span>
-            </div>
-            <div className="h-1.5 overflow-hidden rounded-[var(--radius-pill)] bg-[var(--color-surface-3)]">
-              <div className="h-full rounded-[var(--radius-pill)]" style={{ width: `${pct}%`, background: color }} />
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-export interface PillDef {
-  label: string;
-  color?: string;
-}
-export function StatusPills({
-  counts,
-  labels,
-}: {
-  counts: Record<string, number> | undefined;
-  labels: Record<string, PillDef>;
-}) {
-  const entries = Object.entries(counts || {});
-  if (!entries.length)
-    return <div className="text-sm text-[var(--color-ink-muted)]">No data yet.</div>;
-  return (
-    <div className="flex flex-wrap gap-2">
-      {entries.map(([key, value]) => {
-        const info = labels[key] || { label: key.replaceAll("_", " ") };
-        return (
-          <div
-            key={key}
-            className="flex items-center gap-1.5 rounded-[var(--radius-field)] border border-[var(--color-line)] bg-[var(--color-surface-2)] px-2.5 py-1.5"
-          >
-            <strong className="font-[var(--font-mono)] text-sm" style={{ color: info.color }}>
-              {Number(value || 0).toLocaleString()}
-            </strong>
-            <span className="text-xs text-[var(--color-ink-dim)]">{info.label}</span>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-export function MetricTile({ label, value, sub }: { label: string; value: string; sub?: string }) {
-  return (
-    <div className="rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-surface-2)]/50 p-3.5">
-      <div className="font-[var(--font-mono)] text-[10px] uppercase tracking-wider text-[var(--color-ink-muted)]">
-        {label}
-      </div>
-      <div className="mt-1 font-[var(--font-display)] text-xl font-semibold text-[var(--color-ink)]">
-        {value}
-      </div>
-      {sub && <div className="text-xs text-[var(--color-ink-muted)]">{sub}</div>}
-    </div>
-  );
-}
-
-export function StorageRing({ used, total }: { used: number; total: number }) {
+/** Donut showing used vs free against a cap. */
+export function StorageRing({ used, total, size = 140 }: { used: number; total: number; size?: number }) {
   const pct = pctOf(used, total);
-  const radius = 48;
-  const circ = 2 * Math.PI * radius;
+  const r = size / 2 - 12;
+  const c = 2 * Math.PI * r;
+  const dash = (pct / 100) * c;
+
   return (
-    <div className="relative grid place-items-center">
-      <svg viewBox="0 0 120 120" className="h-32 w-32 -rotate-90">
-        <circle cx="60" cy="60" r={radius} fill="none" stroke="var(--color-surface-3)" strokeWidth="10" />
+    <div className="relative inline-flex items-center justify-center" style={{ width: size, height: size }}>
+      <svg width={size} height={size} className="-rotate-90">
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="var(--secondary)" strokeWidth={10} />
         <circle
-          cx="60"
-          cy="60"
-          r={radius}
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
           fill="none"
           stroke="url(#ringGrad)"
-          strokeWidth="10"
+          strokeWidth={10}
           strokeLinecap="round"
-          strokeDasharray={`${((circ * pct) / 100).toFixed(1)} ${circ.toFixed(1)}`}
+          strokeDasharray={`${dash} ${c - dash}`}
+          className="transition-[stroke-dasharray] duration-700 ease-out"
         />
         <defs>
           <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stopColor="var(--color-accent)" />
-            <stop offset="100%" stopColor="var(--color-cyan)" />
+            <stop offset="0%" stopColor="var(--brand-from)" />
+            <stop offset="100%" stopColor="var(--brand-to)" />
           </linearGradient>
         </defs>
       </svg>
-      <div className="absolute text-center">
-        <div className="font-[var(--font-display)] text-lg font-bold text-[var(--color-ink)]">
-          {pct.toFixed(1)}%
-        </div>
-        <div className="text-[10px] uppercase tracking-wider text-[var(--color-ink-muted)]">used</div>
+      <div className="absolute flex flex-col items-center">
+        <span className="text-lg font-bold">{pct.toFixed(0)}%</span>
+        <span className="text-[11px] text-muted-foreground">{formatBytes(used)}</span>
       </div>
     </div>
   );
 }
 
-export function StatList({
-  title,
-  rows,
-}: {
-  title: string;
-  rows: { label: string; value: string; sub?: string }[];
-}) {
+export interface BarDatum {
+  label: string;
+  value: number;
+  hint?: string;
+}
+
+/** Horizontal bar list, values normalized to the max. */
+export function BarList({ data, formatValue }: { data: BarDatum[]; formatValue?: (v: number) => string }) {
+  const max = Math.max(1, ...data.map((d) => d.value));
+  if (!data.length) return <p className="py-4 text-center text-sm text-muted-foreground">No data</p>;
   return (
-    <Card>
-      <div className="mb-2 font-[var(--font-display)] text-sm font-semibold text-[var(--color-ink)]">
-        {title}
-      </div>
-      {!rows.length ? (
-        <div className="text-sm text-[var(--color-ink-muted)]">No data yet.</div>
-      ) : (
-        <div className="divide-y divide-[var(--color-line)]">
-          {rows.slice(0, 6).map((r, i) => (
-            <div key={i} className="flex items-center gap-2 py-1.5 text-sm">
-              <span className="min-w-0 flex-1 truncate text-[var(--color-ink-dim)]">{r.label}</span>
-              <span className="shrink-0 font-[var(--font-mono)] text-xs text-[var(--color-ink)]">
-                {r.value}
-              </span>
-              {r.sub && <span className="shrink-0 text-xs text-[var(--color-ink-muted)]">{r.sub}</span>}
-            </div>
-          ))}
+    <div className="space-y-2">
+      {data.map((d, i) => (
+        <div key={`${d.label}-${i}`} className="space-y-1">
+          <div className="flex items-center justify-between gap-2 text-xs">
+            <span className="truncate text-foreground" title={d.hint ?? d.label}>
+              {d.label}
+            </span>
+            <span className="shrink-0 text-muted-foreground">{formatValue ? formatValue(d.value) : d.value}</span>
+          </div>
+          <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
+            <div
+              className="h-full rounded-full transition-[width] duration-500"
+              style={{ width: `${(d.value / max) * 100}%`, backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }}
+            />
+          </div>
         </div>
-      )}
-    </Card>
+      ))}
+    </div>
   );
 }
 
-export function DashCard({ title, children }: { title: string; children: ReactNode }) {
+/** Status count pills. */
+export function StatusPills({ counts }: { counts: Record<string, number> }) {
+  const entries = Object.entries(counts);
+  if (!entries.length) return null;
   return (
-    <Card>
-      <div className="mb-3 font-[var(--font-display)] text-sm font-semibold text-[var(--color-ink)]">
-        {title}
+    <div className="flex flex-wrap gap-2">
+      {entries.map(([key, count], i) => (
+        <div key={key} className="flex items-center gap-2 rounded-full border border-border bg-secondary/30 px-3 py-1 text-xs">
+          <span className="size-2 rounded-full" style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }} />
+          <span className="capitalize text-muted-foreground">{key.replace(/_/g, " ")}</span>
+          <span className="font-semibold">{count}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export interface Segment {
+  label: string;
+  value: number;
+}
+
+/** Donut chart with a legend, built from labelled values. */
+export function Donut({ data, size = 132, unit }: { data: Segment[]; size?: number; unit?: string }) {
+  const items = data.filter((d) => d.value > 0);
+  const total = items.reduce((n, d) => n + d.value, 0);
+  if (total === 0) return <p className="py-6 text-center text-sm text-muted-foreground">No data</p>;
+
+  const r = size / 2 - 10;
+  const c = 2 * Math.PI * r;
+  let offset = 0;
+
+  return (
+    <div className="flex items-center gap-4">
+      <div className="relative shrink-0" style={{ width: size, height: size }}>
+        <svg width={size} height={size} className="-rotate-90">
+          {items.map((d, i) => {
+            const frac = d.value / total;
+            const dash = frac * c;
+            const seg = (
+              <circle
+                key={d.label}
+                cx={size / 2}
+                cy={size / 2}
+                r={r}
+                fill="none"
+                stroke={CHART_COLORS[i % CHART_COLORS.length]}
+                strokeWidth={12}
+                strokeDasharray={`${dash} ${c - dash}`}
+                strokeDashoffset={-offset}
+                className="transition-all duration-500"
+              />
+            );
+            offset += dash;
+            return seg;
+          })}
+        </svg>
+        <div className="absolute inset-0 flex flex-col items-center justify-center">
+          <span className="text-lg font-bold">{total.toLocaleString()}</span>
+          {unit && <span className="text-[11px] text-muted-foreground">{unit}</span>}
+        </div>
       </div>
-      {children}
-    </Card>
+      <ul className="min-w-0 flex-1 space-y-1 text-xs">
+        {items.map((d, i) => (
+          <li key={d.label} className="flex items-center justify-between gap-2">
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }} />
+              <span className="truncate capitalize text-muted-foreground" title={d.label}>
+                {d.label.replace(/_/g, " ")}
+              </span>
+            </span>
+            <span className="shrink-0 font-medium">
+              {d.value.toLocaleString()} · {((d.value / total) * 100).toFixed(0)}%
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** Single horizontal stacked bar with a legend (e.g. storage allocation). */
+export function StackedBar({ data, formatValue }: { data: Segment[]; formatValue?: (v: number) => string }) {
+  const items = data.filter((d) => d.value > 0);
+  const total = items.reduce((n, d) => n + d.value, 0);
+  if (total === 0) return <p className="py-4 text-center text-sm text-muted-foreground">No data</p>;
+  return (
+    <div className="space-y-3">
+      <div className="flex h-3 w-full overflow-hidden rounded-full bg-secondary">
+        {items.map((d, i) => (
+          <div
+            key={d.label}
+            className="h-full transition-[width] duration-500"
+            style={{ width: `${(d.value / total) * 100}%`, backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }}
+            title={`${d.label}: ${formatValue ? formatValue(d.value) : d.value}`}
+          />
+        ))}
+      </div>
+      <ul className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-3">
+        {items.map((d, i) => (
+          <li key={d.label} className="flex items-center gap-1.5">
+            <span className="size-2 shrink-0 rounded-full" style={{ backgroundColor: CHART_COLORS[i % CHART_COLORS.length] }} />
+            <span className="truncate capitalize text-muted-foreground">{d.label.replace(/_/g, " ")}</span>
+            <span className="ml-auto font-medium">{formatValue ? formatValue(d.value) : d.value}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** Per-user storage bars (used vs quota). */
+export function QuotaBars({ rows }: { rows: { username: string; used_bytes: number; quota_bytes: number | null }[] }) {
+  if (!rows.length) return <p className="py-4 text-center text-sm text-muted-foreground">No users</p>;
+  return (
+    <div className="space-y-2.5">
+      {rows.map((row) => {
+        const pct = row.quota_bytes ? pctOf(row.used_bytes, row.quota_bytes) : 0;
+        const tone = pct >= 90 ? "bg-destructive" : pct >= 70 ? "bg-warning" : "bg-brand-gradient";
+        return (
+          <div key={row.username} className="space-y-1">
+            <div className="flex items-center justify-between text-xs">
+              <span className="truncate">{row.username}</span>
+              <span className="text-muted-foreground">
+                {formatBytes(row.used_bytes)}
+                {row.quota_bytes ? ` / ${formatBytes(row.quota_bytes)}` : ""}
+              </span>
+            </div>
+            <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
+              <div className={cn("h-full rounded-full transition-[width] duration-500", tone)} style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }

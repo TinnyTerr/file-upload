@@ -1,50 +1,54 @@
-import { useCallback, useEffect, useState } from "react";
-import { fetchDiskStats, type DiskStats } from "../services/adminService";
-import type { AdminLink, Selection } from "../types";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { adminService } from "../services/adminService";
+import { errorMessage } from "@/config/api";
+import type { LifecycleJob } from "../types";
 
-/** Top-level admin state: disk stats, a refresh "version" bus, cross-tab
- *  selection, and the link-edit modal target. */
-export function useAdminDashboard() {
-  const [active, setActive] = useState("users");
-  const [disk, setDisk] = useState<DiskStats | null>(null);
-  const [version, setVersion] = useState(0);
-  const bump = useCallback(() => setVersion((v) => v + 1), []);
+const adminKeys = {
+  disk: ["admin", "disk"] as const,
+  storage: ["admin", "storage"] as const,
+};
 
-  const [selection, setSelection] = useState<Selection>({
-    files: new Set<number>(),
-    directories: new Set<number>(),
-    keys: new Set<number>(),
-  });
-  const toggleSel = useCallback((kind: keyof Selection, id: number) => {
-    setSelection((s) => {
-      const next: Selection = { files: new Set(s.files), directories: new Set(s.directories), keys: new Set(s.keys) };
-      if (next[kind].has(id)) next[kind].delete(id);
-      else next[kind].add(id);
-      return next;
-    });
-  }, []);
-  const clearSel = useCallback((kinds: (keyof Selection)[]) => {
-    setSelection((s) => {
-      const next: Selection = { files: new Set(s.files), directories: new Set(s.directories), keys: new Set(s.keys) };
-      for (const k of kinds) next[k] = new Set<number>();
-      return next;
-    });
-  }, []);
+export function useDiskStats() {
+  return useQuery({ queryKey: adminKeys.disk, queryFn: adminService.diskStats });
+}
 
-  const [editLink, setEditLink] = useState<AdminLink | null>(null);
+export function useStorageDetails() {
+  return useQuery({ queryKey: adminKeys.storage, queryFn: adminService.storage });
+}
 
-  useEffect(() => {
-    fetchDiskStats()
-      .then(setDisk)
-      .catch(() => {
-        /* ignore */
-      });
-  }, [version]);
-
-  return {
-    active, setActive,
-    disk, version, bump,
-    selection, toggleSel, clearSel,
-    editLink, setEditLink,
+export function useStorageMutations() {
+  const qc = useQueryClient();
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: adminKeys.storage });
+    qc.invalidateQueries({ queryKey: adminKeys.disk });
   };
+
+  const setCap = useMutation({
+    mutationFn: (bytes: number) => adminService.setStorageCap(bytes),
+    onSuccess: () => {
+      toast.success("Storage cap updated");
+      invalidate();
+    },
+    onError: (err) => toast.error("Couldn't update cap", { description: errorMessage(err) }),
+  });
+
+  const runJob = useMutation({
+    mutationFn: (job: LifecycleJob) => adminService.runLifecycle(job),
+    onSuccess: (res, job) => {
+      toast.success(`Job complete: ${job}`, { description: `${res.processed} processed` });
+      invalidate();
+    },
+    onError: (err) => toast.error("Job failed", { description: errorMessage(err) }),
+  });
+
+  return { setCap, runJob };
+}
+
+export function useRestartWorkers() {
+  return useMutation({
+    mutationFn: () => adminService.restartWorkers(),
+    onSuccess: (res) => toast.success("Workers restarted", { description: `${res.jobs.length} jobs rescheduled` }),
+    onError: (err) => toast.error("Couldn't restart workers", { description: errorMessage(err) }),
+  });
 }

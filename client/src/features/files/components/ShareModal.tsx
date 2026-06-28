@@ -1,100 +1,151 @@
-import { useState } from "react";
-import { Modal } from "../../../components/ui/Modal";
-import { Button } from "../../../components/ui/Button";
-import { QRCode } from "../../../components/ui/QRCode";
-import { cn } from "../../../lib/cn";
+import { useMemo } from "react";
+import { ShieldCheck, ShieldAlert, Link2, KeyRound, FileText, Code2, ExternalLink } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { CopyButton } from "@/components/ui/copy-button";
+import { QRCode } from "@/components/ui/qr-code";
+import { Tooltip } from "@/components/ui/tooltip";
+import { shareUrl } from "../lib/shareUrl";
+import { asMarkdown, asHtml } from "@/lib/copy";
+import type { EncryptionMode } from "../types";
 
-function MiniBtn({ label, onClick }: { label: string; onClick: () => void }) {
-  const [done, setDone] = useState(false);
+export interface ShareEntry {
+  filename: string;
+  mode: EncryptionMode;
+  /** Base URL with no key, e.g. https://host/file/<slug> or /d/<slug>. */
+  baseUrl: string;
+  accessKey?: string | null;
+  clientKeyB64?: string | null;
+}
+
+function EncryptionNote({ mode }: { mode: EncryptionMode }) {
+  const keyClass = "whitespace-nowrap rounded bg-background/50 px-1 py-0.5 font-mono text-[11px]";
+
+  if (mode === "client") {
+    return (
+      <p className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+        <ShieldAlert className="mt-0.5 size-4 shrink-0" />
+        <span className="min-w-0 leading-relaxed">
+          End-to-end encrypted. The key <code className={keyClass}>#ek=</code> lives only in this URL. Save the full URL because it cannot be recovered from the server.
+        </span>
+      </p>
+    );
+  }
+  if (mode === "server") {
+    return (
+      <p className="flex items-start gap-2 rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-accent">
+        <ShieldCheck className="mt-0.5 size-4 shrink-0" />
+        <span className="min-w-0 leading-relaxed">
+          Server-side encrypted. Downloads require the access key <code className={keyClass}>?ek=</code>. Share the full URL.
+        </span>
+      </p>
+    );
+  }
+  return null;
+}
+
+function UrlRow({ label, value, icon }: { label: string; value: string; icon: React.ReactNode }) {
   return (
-    <button
-      type="button"
-      onClick={() => {
-        onClick();
-        setDone(true);
-        setTimeout(() => setDone(false), 1400);
-      }}
-      className="shrink-0 rounded-[7px] border border-[var(--color-line)] bg-[var(--color-surface-2)] px-2.5 py-1 text-[12px] font-medium text-[var(--color-ink-dim)] transition-colors hover:text-[var(--color-ink)]"
-    >
-      {done ? "✓" : label}
-    </button>
+    <div className="space-y-1">
+      <span className="text-xs font-medium text-muted-foreground">{label}</span>
+      <div className="flex min-w-0 items-center gap-2 rounded-md border border-border bg-background/40 px-2.5 py-1.5">
+        <span className="text-muted-foreground">{icon}</span>
+        <code className="flex-1 truncate font-mono text-xs">{value}</code>
+        <CopyButton value={value} />
+      </div>
+    </div>
   );
 }
 
-export interface ShareRow {
-  label: string;
-  value: string;
-  filename?: string;
-  open?: boolean;
-}
+function EntryCard({ entry }: { entry: ShareEntry }) {
+  const fullUrl = useMemo(
+    () => shareUrl(entry.baseUrl, entry.mode, { accessKey: entry.accessKey, clientKeyB64: entry.clientKeyB64 }),
+    [entry],
+  );
+  const key = entry.mode === "client" ? entry.clientKeyB64 : entry.accessKey;
+  const hasKey = entry.mode !== "none" && !!key;
 
-export interface ShareSpec {
-  title: string;
-  subtitle?: string;
-  rows: ShareRow[];
-  hint?: { tone: "warn" | "accent"; text: string };
-  qr?: string;
-}
-
-export function ShareModal({ spec, onClose }: { spec: ShareSpec | null; onClose: () => void }) {
-  const copy = (t: string) => navigator.clipboard.writeText(t).catch(() => {});
   return (
-    <Modal
-      open={!!spec}
-      onClose={onClose}
-      title={spec?.title}
-      width="max-w-lg"
-      footer={<Button variant="ghost" onClick={onClose}>Done</Button>}
-    >
-      {spec && (
-        <div className="space-y-3">
-          {spec.subtitle && (
-            <p className="text-sm text-[var(--color-ink-dim)]">{spec.subtitle}</p>
-          )}
-          {spec.rows.map((r, i) => (
-            <div
-              key={i}
-              className="flex flex-wrap items-center gap-2 rounded-[var(--radius-field)] border border-[var(--color-line)] bg-[var(--color-surface-2)] p-1.5 pl-3"
-            >
-              <span className="w-12 shrink-0 font-[var(--font-mono)] text-[10px] uppercase tracking-wider text-[var(--color-ink-muted)]">
-                {r.label}
-              </span>
-              <span className="min-w-0 flex-1 break-all font-[var(--font-mono)] text-[12px] text-[var(--color-ink-dim)]">
-                {r.value}
-              </span>
-              <div className="flex shrink-0 gap-1.5">
-                <MiniBtn label="Copy" onClick={() => copy(r.value)} />
-                {r.filename && (
-                  <>
-                    <MiniBtn label="MD" onClick={() => copy(`[${r.filename}](${r.value})`)} />
-                    <MiniBtn label="HTML" onClick={() => copy(`<a href="${r.value}">${r.filename}</a>`)} />
-                  </>
-                )}
-                {r.open && (
-                  <MiniBtn label="Open" onClick={() => window.open(r.value, "_blank", "noopener")} />
-                )}
-              </div>
-            </div>
+    <div className="space-y-3 rounded-lg border border-border bg-secondary/20 p-4">
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate font-medium" title={entry.filename}>
+          {entry.filename}
+        </span>
+        <Badge variant={entry.mode === "client" ? "warning" : entry.mode === "server" ? "accent" : "secondary"}>
+          {entry.mode === "none" ? "public" : entry.mode === "client" ? "end-to-end" : "server-encrypted"}
+        </Badge>
+      </div>
+
+      <EncryptionNote mode={entry.mode} />
+
+      <UrlRow label="Share URL" value={fullUrl} icon={<Link2 className="size-3.5" />} />
+      {hasKey && <UrlRow label="URL without key" value={entry.baseUrl} icon={<Link2 className="size-3.5" />} />}
+      {hasKey && key && <UrlRow label="Key only" value={key} icon={<KeyRound className="size-3.5" />} />}
+
+      <div className="flex flex-wrap items-center gap-2 pt-1">
+        <CopyButton value={asMarkdown(entry.filename, fullUrl)} variant="secondary" size="sm" tooltip="Copy as Markdown">
+          <FileText /> Markdown
+        </CopyButton>
+        <CopyButton value={asHtml(entry.filename, fullUrl)} variant="secondary" size="sm" tooltip="Copy as HTML">
+          <Code2 /> HTML
+        </CopyButton>
+        <Tooltip content="Open in a new tab">
+          <Button variant="secondary" size="sm" asChild>
+            <a href={fullUrl} target="_blank" rel="noreferrer">
+              <ExternalLink /> Open
+            </a>
+          </Button>
+        </Tooltip>
+      </div>
+    </div>
+  );
+}
+
+export function ShareModal({
+  entries,
+  open,
+  onOpenChange,
+  title,
+  description,
+}: {
+  entries: ShareEntry[];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  title?: string;
+  description?: string;
+}) {
+  const single = entries.length === 1 ? entries[0] : null;
+  const singleUrl = single
+    ? shareUrl(single.baseUrl, single.mode, { accessKey: single.accessKey, clientKeyB64: single.clientKeyB64 })
+    : null;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle>{title ?? `Share ${entries.length > 1 ? `${entries.length} files` : "your file"}`}</DialogTitle>
+          <DialogDescription>{description ?? "Copy a link or scan the code to share."}</DialogDescription>
+        </DialogHeader>
+
+        {single && singleUrl && (
+          <div className="flex justify-center pb-1">
+            <QRCode value={singleUrl} size={168} />
+          </div>
+        )}
+
+        <div className="max-h-[55vh] space-y-3 overflow-y-auto pr-1">
+          {entries.map((entry, i) => (
+            <EntryCard key={`${entry.baseUrl}-${i}`} entry={entry} />
           ))}
-          {spec.hint && (
-            <p
-              className={cn(
-                "text-[13px] leading-relaxed",
-                spec.hint.tone === "warn"
-                  ? "text-[var(--color-warn)]"
-                  : "text-[var(--color-accent)]",
-              )}
-            >
-              {spec.hint.text}
-            </p>
-          )}
-          {spec.qr && (
-            <div className="flex justify-center pt-1">
-              <QRCode value={spec.qr} />
-            </div>
-          )}
         </div>
-      )}
-    </Modal>
+      </DialogContent>
+    </Dialog>
   );
 }

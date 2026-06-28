@@ -1,181 +1,123 @@
-import { useEffect, useState } from "react";
-import { useToast } from "../../../providers/ToastProvider";
-import { useDialog } from "../../../providers/DialogProvider";
-import { Badge, Card, EmptyState, Field, Input, Select, Spinner } from "../../../components/ui/primitives";
-import { Button } from "../../../components/ui/Button";
-import { Modal } from "../../../components/ui/Modal";
-import { createKey, listAdminKeys, resetKeyIp, revokeKey } from "../services/adminService";
-import type { AdminKey, Selection } from "../types";
+import { useState, useMemo } from "react";
+import { Search, KeyRound, Plus, Lock, Globe, RotateCcw, Trash2 } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Skeleton } from "@/components/ui/skeleton";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import { NewKeyModal } from "@/features/apikeys/components/NewKeyModal";
+import { BulkBar } from "./BulkBar";
+import { BulkConfirmDialog } from "./BulkConfirmDialog";
+import { useAdminKeys } from "../hooks/useAdminData";
+import { useApiKeys } from "@/features/apikeys/hooks/useApiKeys";
+import { useBulk } from "../hooks/useBulk";
+import { useSelection } from "../hooks/useSelection";
+import { formatDate, relativeTime } from "@/lib/time";
+import { cn } from "@/lib/cn";
+import type { NewApiKey } from "@/features/apikeys/types";
 
-interface Props {
-  version: number;
-  bump: () => void;
-  selection: Selection;
-  toggleSel: (kind: keyof Selection, id: number) => void;
-}
+type StatusFilter = "all" | "active" | "inactive" | "bound" | "unbound";
 
-export function KeysTab({ version, bump, selection, toggleSel }: Props) {
-  const { showToast } = useToast();
-  const dialog = useDialog();
-  const [keys, setKeys] = useState<AdminKey[] | null>(null);
+export function KeysTab() {
+  const keys = useAdminKeys();
+  const { create } = useApiKeys();
   const [filter, setFilter] = useState("");
-  const [statusFilter, setStatusFilter] = useState("");
-  const [newKey, setNewKey] = useState<string | null>(null);
-  const [resetId, setResetId] = useState<number | null>(null);
-  const [pw, setPw] = useState("");
+  const [status, setStatus] = useState<StatusFilter>("all");
+  const [newKey, setNewKey] = useState<NewApiKey | null>(null);
+  const selection = useSelection();
+  const bulk = useBulk(selection.clear);
 
-  async function load() {
-    try {
-      setKeys(await listAdminKeys());
-    } catch {
-      showToast("Failed to load API keys.", "error");
-    }
-  }
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [version]);
-
-  const needle = filter.trim().toLowerCase();
-  const shown = (keys || []).filter((k) => {
-    if (statusFilter === "active" && !k.active) return false;
-    if (statusFilter === "inactive" && k.active) return false;
-    if (statusFilter === "bound" && !k.bound_ip) return false;
-    if (statusFilter === "unbound" && k.bound_ip) return false;
-    if (!needle) return true;
-    return [k.owner_username, `uid:${k.owner_id}`, String(k.owner_id), String(k.user_key_number ?? k.id), k.bound_ip || ""].some(
-      (v) => (v || "").toLowerCase().includes(needle),
-    );
-  });
-
-  async function create() {
-    try {
-      setNewKey(await createKey());
-    } catch (err) {
-      showToast((err as Error).message || "Failed to create key.", "error");
-    }
-  }
-  async function revoke(id: number) {
-    const ok = await dialog.confirm({
-      title: "Revoke API key?",
-      message: "Any integration using this key will immediately stop working. This cannot be undone.",
-      confirmText: "Revoke key",
-      danger: true,
+  const filtered = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    return (keys.data ?? []).filter((k) => {
+      if (q && !k.owner_username.toLowerCase().includes(q) && String(k.owner_id) !== q && String(k.id) !== q) return false;
+      if (status === "active" && !k.active) return false;
+      if (status === "inactive" && k.active) return false;
+      if (status === "bound" && !k.bound_ip) return false;
+      if (status === "unbound" && k.bound_ip) return false;
+      return true;
     });
-    if (!ok) return;
-    try {
-      await revokeKey(id);
-      showToast("Key revoked.");
-      bump();
-    } catch {
-      showToast("Failed to revoke key.", "error");
-    }
-  }
-  async function confirmReset() {
-    if (!pw || resetId == null) return;
-    const id = resetId;
-    const password = pw;
-    setResetId(null);
-    setPw("");
-    try {
-      await resetKeyIp(id, password);
-      showToast("IP binding cleared.");
-      bump();
-    } catch (err) {
-      showToast((err as Error).message || "Failed to reset IP.", "error");
-    }
-  }
+  }, [keys.data, filter, status]);
+
+  const onCreate = async () => setNewKey(await create.mutateAsync());
 
   return (
-    <div>
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <Input placeholder="Filter keys…" value={filter} onChange={(e) => setFilter(e.target.value)} className="max-w-xs" />
-        <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="max-w-[160px]">
-          <option value="">All</option>
-          <option value="active">Active</option>
-          <option value="inactive">Revoked</option>
-          <option value="bound">IP bound</option>
-          <option value="unbound">Unbound</option>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative min-w-48 flex-1">
+          <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input className="pl-8" placeholder="Filter by owner or id…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        </div>
+        <Select value={status} onValueChange={(v) => setStatus(v as StatusFilter)}>
+          <SelectTrigger className="w-36">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All</SelectItem>
+            <SelectItem value="active">Active</SelectItem>
+            <SelectItem value="inactive">Inactive</SelectItem>
+            <SelectItem value="bound">Bound</SelectItem>
+            <SelectItem value="unbound">Unbound</SelectItem>
+          </SelectContent>
         </Select>
-        <Button className="ml-auto" onClick={create}>
-          + New key
+        <Button onClick={onCreate} loading={create.isPending}>
+          <Plus /> New key
         </Button>
       </div>
 
-      {keys === null ? (
-        <div className="flex items-center gap-2 py-10 text-sm text-[var(--color-ink-muted)]">
-          <Spinner /> Loading…
+      {keys.isLoading ? (
+        <div className="space-y-2">
+          <Skeleton className="h-16 w-full" />
+          <Skeleton className="h-16 w-full" />
         </div>
-      ) : !keys.length ? (
-        <EmptyState icon="🔑">No API keys yet.</EmptyState>
-      ) : !shown.length ? (
-        <EmptyState icon="⌕">No API keys match the filter.</EmptyState>
+      ) : filtered.length === 0 ? (
+        <EmptyState icon={KeyRound} title="No API keys" />
       ) : (
-        <div className="flex flex-col gap-2">
-          {shown.map((k) => (
-            <Card key={k.id} className="p-0 overflow-hidden">
-              <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-line)] px-4 py-2.5">
-                <input
-                  type="checkbox"
-                  checked={selection.keys.has(k.id)}
-                  onChange={() => toggleSel("keys", k.id)}
-                  className="accent-[var(--color-accent)]"
-                />
-                <span className="font-[var(--font-mono)] font-medium text-[var(--color-ink)]">
-                  Key #{k.user_key_number ?? k.id}
-                </span>
-                <Badge tone="neutral">{k.owner_username || `uid:${k.owner_id}`}</Badge>
-                <span className="text-xs text-[var(--color-ink-muted)]">{k.bound_ip ? `📍 ${k.bound_ip}` : "unbound"}</span>
-                <Badge tone={k.active ? "good" : "neutral"}>{k.active ? "active" : "inactive"}</Badge>
-                {k.active && (
-                  <div className="ml-auto flex gap-1.5">
-                    <Button size="sm" variant="ghost" onClick={() => setResetId(k.id)}>Reset IP</Button>
-                    <Button size="sm" variant="ghost" className="!text-[var(--color-bad)]" onClick={() => revoke(k.id)}>Revoke</Button>
+        <div className="space-y-2 pb-16">
+          {filtered.map((k) => (
+            <Card key={k.id} className={cn(selection.has(k.id) && "ring-1 ring-primary/50")}>
+              <CardContent className="flex items-center gap-3 p-3">
+                <Checkbox checked={selection.has(k.id)} onCheckedChange={() => selection.toggle(k.id)} aria-label="Select key" />
+                <KeyRound className="size-4 shrink-0 text-muted-foreground" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-sm font-medium">
+                      {k.owner_username} · key #{k.user_key_number}
+                    </span>
+                    {k.active ? <Badge variant="success">active</Badge> : <Badge variant="secondary">inactive</Badge>}
+                    {k.bound_ip ? (
+                      <Badge variant="accent">
+                        <Lock /> {k.bound_ip}
+                      </Badge>
+                    ) : (
+                      <Badge variant="secondary">
+                        <Globe /> unbound
+                      </Badge>
+                    )}
                   </div>
-                )}
-              </div>
-              <div className="px-4 py-2 text-xs text-[var(--color-ink-muted)]">
-                Created: {new Date(k.created_at).toLocaleString()}
-                {k.last_used_at && ` · Last used: ${new Date(k.last_used_at).toLocaleString()}`}
-              </div>
+                  <p className="text-xs text-muted-foreground">
+                    created {formatDate(k.created_at)} · last used {relativeTime(k.last_used_at)}
+                  </p>
+                </div>
+              </CardContent>
             </Card>
           ))}
         </div>
       )}
 
-      <Modal
-        open={!!newKey}
-        onClose={() => {
-          setNewKey(null);
-          bump();
-        }}
-        title="API key created"
-        footer={<Button variant="ghost" onClick={() => { setNewKey(null); bump(); }}>Done</Button>}
-      >
-        <p className="mb-3 text-sm text-[var(--color-warn)]">⚠ Copy this key now — it won't be shown again.</p>
-        <div className="mb-3 break-all rounded-[var(--radius-field)] border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3.5 py-2.5 font-[var(--font-mono)] text-[13px] text-[var(--color-ink)]">
-          {newKey}
-        </div>
-        <Button size="sm" variant="ghost" onClick={() => { navigator.clipboard.writeText(newKey || "").then(() => showToast("Copied!")).catch(() => {}); }}>
-          Copy key
+      <BulkBar count={selection.count} onClear={selection.clear}>
+        <Button variant="ghost" size="sm" onClick={() => bulk.startPreview("reset_api_key_ips", selection.list)}>
+          <RotateCcw /> Reset IP
         </Button>
-      </Modal>
-
-      <Modal
-        open={resetId != null}
-        onClose={() => { setResetId(null); setPw(""); }}
-        title="Reset IP binding"
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => { setResetId(null); setPw(""); }}>Cancel</Button>
-            <Button onClick={confirmReset}>Reset IP</Button>
-          </>
-        }
-      >
-        <Field label="Confirm your password">
-          <Input type="password" autoFocus value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && confirmReset()} />
-        </Field>
-      </Modal>
+        <Button variant="ghost" size="sm" className="text-destructive" onClick={() => bulk.startPreview("delete_api_keys", selection.list)}>
+          <Trash2 /> Delete
+        </Button>
+      </BulkBar>
+      <BulkConfirmDialog bulk={bulk} />
+      <NewKeyModal apiKey={newKey} onClose={() => setNewKey(null)} />
     </div>
   );
 }

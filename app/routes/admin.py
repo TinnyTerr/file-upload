@@ -334,7 +334,7 @@ def _serialize_file_lifecycle(f: FileObject) -> dict:
 
 def _bulk_action_permission(action: str) -> str:
     permissions = {
-        "revoke_api_keys": "can_manage_api_keys",
+        "delete_api_keys": "can_manage_api_keys",
         "reset_api_key_ips": "can_manage_api_keys",
         "delete_inactive_links": "can_delete_links",
         "delete_files": "can_manage_storage",
@@ -383,8 +383,8 @@ def _bulk_candidates(action: str, body: BulkActionBody, db: Session) -> list:
     _bulk_action_permission(action)
     ids = _dedupe_ids(body.ids)
 
-    if action == "revoke_api_keys":
-        q = db.query(ApiKey).filter_by(active=True)
+    if action == "delete_api_keys":
+        q = db.query(ApiKey)
         if ids:
             q = q.filter(ApiKey.id.in_(ids))
         if body.owner_id is not None:
@@ -685,12 +685,12 @@ def bulk_run(
     processed = 0
     unlink_after_commit: list[str | None] = []
 
-    if body.action == "revoke_api_keys":
+    if body.action == "delete_api_keys":
         for key in candidates:
-            key.active = False
+            db.delete(key)
             processed += 1
         if processed:
-            record(db, actor=user.username, action="bulk.apikeys_revoked",
+            record(db, actor=user.username, action="bulk.apikeys_deleted",
                    target=f"api_keys:{processed}", ip=client_ip(request))
         db.commit()
 

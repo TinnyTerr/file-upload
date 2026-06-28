@@ -1,187 +1,125 @@
+import * as React from "react";
 import {
-  createContext,
-  useCallback,
-  useContext,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
-import { Modal } from "../components/ui/Modal";
-import { Button } from "../components/ui/Button";
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 
-export interface AlertOpts {
-  title?: string;
-  message?: string;
-  glyph?: string;
-  kind?: "" | "error" | "success";
-}
-export interface ConfirmOpts {
-  title?: string;
-  message?: string;
+interface ConfirmOptions {
+  title: string;
+  description?: React.ReactNode;
   confirmText?: string;
   cancelText?: string;
-  danger?: boolean;
-  glyph?: string;
+  destructive?: boolean;
 }
-export interface PromptOpts {
-  title?: string;
-  message?: string;
+
+interface PromptOptions extends ConfirmOptions {
+  label?: string;
   placeholder?: string;
   defaultValue?: string;
-  confirmText?: string;
-  cancelText?: string;
-  glyph?: string;
+  inputType?: string;
 }
 
-interface DialogCtx {
-  alert: (opts?: AlertOpts) => Promise<void>;
-  confirm: (opts?: ConfirmOpts) => Promise<boolean>;
-  prompt: (opts?: PromptOpts) => Promise<string | null>;
+interface DialogContextValue {
+  confirm: (opts: ConfirmOptions) => Promise<boolean>;
+  prompt: (opts: PromptOptions) => Promise<string | null>;
 }
 
-const Ctx = createContext<DialogCtx | null>(null);
+const DialogContext = React.createContext<DialogContextValue | null>(null);
 
-export function useDialog(): DialogCtx {
-  const c = useContext(Ctx);
-  if (!c) throw new Error("useDialog must be used within DialogProvider");
-  return c;
-}
+type State =
+  | { kind: "none" }
+  | { kind: "confirm"; opts: ConfirmOptions; resolve: (v: boolean) => void }
+  | { kind: "prompt"; opts: PromptOptions; resolve: (v: string | null) => void };
 
-type Spec =
-  | { kind: "alert"; opts: AlertOpts; resolve: (v: void) => void }
-  | { kind: "confirm"; opts: ConfirmOpts; resolve: (v: boolean) => void }
-  | { kind: "prompt"; opts: PromptOpts; resolve: (v: string | null) => void };
+export function DialogProvider({ children }: { children: React.ReactNode }) {
+  const [state, setState] = React.useState<State>({ kind: "none" });
+  const [value, setValue] = React.useState("");
 
-const GLYPH_BG: Record<string, string> = {
-  danger: "bg-[var(--color-bad-soft)] text-[var(--color-bad)]",
-  success: "bg-[var(--color-good-soft)] text-[var(--color-good)]",
-  accent: "bg-[var(--color-accent-soft)] text-[var(--color-accent)]",
-};
-
-export function DialogProvider({ children }: { children: ReactNode }) {
-  const [spec, setSpec] = useState<Spec | null>(null);
-  const [field, setField] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const close = useCallback(() => setSpec(null), []);
-
-  const alert = useCallback(
-    (opts: AlertOpts = {}) =>
-      new Promise<void>((resolve) => setSpec({ kind: "alert", opts, resolve })),
+  const confirm = React.useCallback(
+    (opts: ConfirmOptions) =>
+      new Promise<boolean>((resolve) => setState({ kind: "confirm", opts, resolve })),
     [],
   );
-  const confirm = useCallback(
-    (opts: ConfirmOpts = {}) =>
-      new Promise<boolean>((resolve) => setSpec({ kind: "confirm", opts, resolve })),
-    [],
-  );
-  const prompt = useCallback(
-    (opts: PromptOpts = {}) =>
+
+  const prompt = React.useCallback(
+    (opts: PromptOptions) =>
       new Promise<string | null>((resolve) => {
-        setField(opts.defaultValue || "");
-        setSpec({ kind: "prompt", opts, resolve });
+        setValue(opts.defaultValue ?? "");
+        setState({ kind: "prompt", opts, resolve });
       }),
     [],
   );
 
-  function settle(value: unknown) {
-    if (!spec) return;
-    (spec.resolve as (v: unknown) => void)(value);
-    close();
-  }
+  const close = (result: boolean | string | null) => {
+    if (state.kind === "confirm") state.resolve(result as boolean);
+    if (state.kind === "prompt") state.resolve(result as string | null);
+    setState({ kind: "none" });
+  };
 
-  let glyph = "?";
-  let glyphTone = "accent";
-  let title = "";
-  let message = "";
-  let footer: ReactNode = null;
-
-  if (spec) {
-    const o = spec.opts as AlertOpts & ConfirmOpts & PromptOpts;
-    message = o.message || "";
-    if (spec.kind === "alert") {
-      title = o.title || "Heads up";
-      glyph = o.glyph || "!";
-      glyphTone = o.kind === "error" ? "danger" : o.kind === "success" ? "success" : "accent";
-      footer = (
-        <Button onClick={() => settle(undefined)} autoFocus>
-          OK
-        </Button>
-      );
-    } else if (spec.kind === "confirm") {
-      title = o.title || "Are you sure?";
-      glyph = o.glyph || (o.danger ? "⚠" : "?");
-      glyphTone = o.danger ? "danger" : "accent";
-      footer = (
-        <>
-          <Button variant="ghost" onClick={() => settle(false)}>
-            {o.cancelText || "Cancel"}
-          </Button>
-          <Button variant={o.danger ? "danger" : "primary"} onClick={() => settle(true)} autoFocus>
-            {o.confirmText || "Confirm"}
-          </Button>
-        </>
-      );
-    } else {
-      title = o.title || "Enter a value";
-      glyph = o.glyph || "✎";
-      footer = (
-        <>
-          <Button variant="ghost" onClick={() => settle(null)}>
-            {o.cancelText || "Cancel"}
-          </Button>
-          <Button variant="primary" onClick={() => settle(field)}>
-            {o.confirmText || "OK"}
-          </Button>
-        </>
-      );
-    }
-  }
-
-  const cancelValue = spec?.kind === "confirm" ? false : spec?.kind === "prompt" ? null : undefined;
+  const open = state.kind !== "none";
+  const opts = state.kind !== "none" ? state.opts : null;
 
   return (
-    <Ctx.Provider value={{ alert, confirm, prompt }}>
+    <DialogContext.Provider value={{ confirm, prompt }}>
       {children}
-      <Modal
-        open={!!spec}
-        onClose={() => settle(cancelValue)}
-        footer={footer}
-        width="max-w-[460px]"
-      >
-        {spec && (
-          <div className="flex gap-3.5">
-            <div
-              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-field)] text-lg ${GLYPH_BG[glyphTone]}`}
-            >
-              {glyph}
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="font-[var(--font-display)] text-base font-semibold text-[var(--color-ink)]">
-                {title}
-              </div>
-              {message && (
-                <div className="mt-1 text-sm leading-relaxed text-[var(--color-ink-dim)]">
-                  {message}
-                </div>
-              )}
-              {spec.kind === "prompt" && (
-                <input
-                  ref={inputRef}
+      <Dialog open={open} onOpenChange={(o) => !o && close(state.kind === "prompt" ? null : false)}>
+        {opts && (
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>{opts.title}</DialogTitle>
+              {opts.description && <DialogDescription>{opts.description}</DialogDescription>}
+            </DialogHeader>
+
+            {state.kind === "prompt" && (
+              <form
+                id="prompt-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  close(value);
+                }}
+                className="space-y-2"
+              >
+                {state.opts.label && <Label htmlFor="prompt-input">{state.opts.label}</Label>}
+                <Input
+                  id="prompt-input"
                   autoFocus
-                  className="mt-3 h-10 w-full rounded-[var(--radius-field)] border border-[var(--color-line)] bg-[var(--color-surface-2)] px-3 text-sm text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)]"
-                  placeholder={spec.opts.placeholder}
-                  value={field}
-                  onChange={(e) => setField(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") settle(field);
-                  }}
+                  type={state.opts.inputType ?? "text"}
+                  placeholder={state.opts.placeholder}
+                  value={value}
+                  onChange={(e) => setValue(e.target.value)}
                 />
-              )}
-            </div>
-          </div>
+              </form>
+            )}
+
+            <DialogFooter>
+              <Button variant="ghost" onClick={() => close(state.kind === "prompt" ? null : false)}>
+                {opts.cancelText ?? "Cancel"}
+              </Button>
+              <Button
+                variant={opts.destructive ? "destructive" : "default"}
+                type={state.kind === "prompt" ? "submit" : "button"}
+                form={state.kind === "prompt" ? "prompt-form" : undefined}
+                onClick={state.kind === "confirm" ? () => close(true) : undefined}
+              >
+                {opts.confirmText ?? "Confirm"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
         )}
-      </Modal>
-    </Ctx.Provider>
+      </Dialog>
+    </DialogContext.Provider>
   );
+}
+
+export function useDialogs() {
+  const ctx = React.useContext(DialogContext);
+  if (!ctx) throw new Error("useDialogs must be used within DialogProvider");
+  return ctx;
 }

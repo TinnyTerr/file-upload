@@ -67,7 +67,7 @@ def test_bulk_danger_zone_previews_requires_confirmation_and_deletes_inactive_li
     assert "bulk.links_deleted" in audit_actions
 
 
-def test_bulk_danger_zone_revokes_and_resets_api_keys(master_session):
+def test_bulk_danger_zone_deletes_and_resets_api_keys(master_session):
     c, csrf, _ = master_session
     key = c.post("/keys/", headers={"X-CSRF-Token": csrf})
     assert key.status_code == 200, key.text
@@ -100,15 +100,15 @@ def test_bulk_danger_zone_revokes_and_resets_api_keys(master_session):
     key_row = next(k for k in c.get("/admin/keys").json()["keys"] if k["id"] == key_id)
     assert key_row["bound_ip"] is None
 
-    revoke = c.post(
+    delete = c.post(
         "/admin/bulk/run",
-        json={"action": "revoke_api_keys", "ids": [key_id], "confirm": "CONFIRM 1"},
+        json={"action": "delete_api_keys", "ids": [key_id], "confirm": "CONFIRM 1"},
         headers={"X-CSRF-Token": csrf},
     )
-    assert revoke.status_code == 200, revoke.text
-    assert revoke.json()["processed_count"] == 1
-    key_row = next(k for k in c.get("/admin/keys").json()["keys"] if k["id"] == key_id)
-    assert key_row["active"] is False
+    assert delete.status_code == 200, delete.text
+    assert delete.json()["processed_count"] == 1
+    remaining_key_ids = {k["id"] for k in c.get("/admin/keys").json()["keys"]}
+    assert key_id not in remaining_key_ids
 
 
 def test_bulk_danger_zone_deletes_selected_files_and_audits(master_session):

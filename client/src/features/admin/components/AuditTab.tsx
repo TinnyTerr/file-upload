@@ -1,157 +1,128 @@
-import { useEffect, useRef, useState } from "react";
-import { formatDate } from "../../../lib/api";
-import { useToast } from "../../../providers/ToastProvider";
-import { Badge, Card, Input, Select, Spinner } from "../../../components/ui/primitives";
-import { Button } from "../../../components/ui/Button";
-import { fetchAudit } from "../services/adminService";
-import type { AuditEntry } from "../types";
+import { useState } from "react";
+import { Search, ShieldCheck, ShieldAlert, ChevronLeft, ChevronRight, ScrollText } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import { useAudit } from "../hooks/useAdminData";
+import { formatDateTime } from "@/lib/time";
 
-const LIMIT = 50;
+const PAGE = 50;
 
-function actionTone(action: string): "good" | "bad" | "warn" | "neutral" {
-  if (/(deleted|deactivat|revoked|broken|failed)/i.test(action)) return "bad";
-  if (/(created|uploaded|added|login)/i.test(action)) return "good";
-  if (/(updated|edited|changed|reset)/i.test(action)) return "warn";
-  return "neutral";
+function actionVariant(action: string): "success" | "destructive" | "warning" | "secondary" {
+  if (action.includes("created")) return "success";
+  if (action.includes("deleted") || action.includes("revoked")) return "destructive";
+  if (action.includes("updated") || action.includes("edited") || action.includes("archived")) return "warning";
+  return "secondary";
 }
 
 export function AuditTab() {
-  const { showToast } = useToast();
-  const [entries, setEntries] = useState<AuditEntry[]>([]);
-  const [actions, setActions] = useState<string[]>([]);
-  const [chainOk, setChainOk] = useState(true);
-  const [total, setTotal] = useState(0);
-  const [filtered, setFiltered] = useState(0);
-  const [offset, setOffset] = useState(0);
   const [q, setQ] = useState("");
-  const [action, setAction] = useState("");
-  const [loading, setLoading] = useState(true);
-  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [action, setAction] = useState("all");
+  const [page, setPage] = useState(0);
 
-  async function load(off = offset) {
-    setLoading(true);
-    try {
-      const data = await fetchAudit({ limit: LIMIT, offset: off, q, action });
-      setEntries(data.entries);
-      setActions(data.actions || []);
-      setChainOk(!!data.chain_ok);
-      setTotal(Number(data.total_count || 0));
-      setFiltered(Number(data.filtered_count || 0));
-    } catch {
-      showToast("Failed to load audit log.", "error");
-    } finally {
-      setLoading(false);
-    }
-  }
+  const { data, isLoading, isPlaceholderData } = useAudit({
+    limit: PAGE,
+    offset: page * PAGE,
+    q: q || undefined,
+    action: action === "all" ? undefined : action,
+  });
 
-  // Reload when offset/action change, debounced for q.
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [offset, action]);
-
-  function onSearch(value: string) {
-    setQ(value);
-    if (searchTimer.current) clearTimeout(searchTimer.current);
-    searchTimer.current = setTimeout(() => {
-      setOffset(0);
-      load(0);
-    }, 220);
-  }
+  const pages = data ? Math.ceil(data.filtered_count / PAGE) : 0;
 
   return (
     <div className="space-y-4">
-      <Card className="flex items-center gap-2.5">
-        <Badge tone={chainOk ? "good" : "bad"}>{chainOk ? "verified" : "broken"}</Badge>
-        <span className="text-sm text-[var(--color-ink-dim)]">
-          {chainOk
-            ? "Audit log integrity is verified."
-            : "Audit log integrity failed. Treat the log as potentially tampered until investigated."}
-        </span>
-      </Card>
+      {data && !data.chain_ok && (
+        <div className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+          <ShieldAlert className="size-4 shrink-0" />
+          Audit log hash-chain is broken — possible tampering detected.
+        </div>
+      )}
+      {data && data.chain_ok && (
+        <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 px-4 py-2.5 text-sm text-success">
+          <ShieldCheck className="size-4 shrink-0" />
+          Audit chain verified · {data.total_count} entries
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
-        <Input placeholder="Search actor, action, target, IP…" value={q} onChange={(e) => onSearch(e.target.value)} className="max-w-xs" />
-        <Select value={action} onChange={(e) => { setAction(e.target.value); setOffset(0); }} className="max-w-[200px]">
-          <option value="">All actions</option>
-          {actions.map((a) => (
-            <option key={a} value={a}>
-              {a}
-            </option>
-          ))}
-        </Select>
-        <Button
-          variant="ghost"
-          onClick={() => {
-            setQ("");
-            setAction("");
-            setOffset(0);
-            load(0);
-          }}
-        >
-          Clear
-        </Button>
-        <Button variant="ghost" onClick={() => load()}>Refresh</Button>
-      </div>
-
-      <div className="overflow-x-auto rounded-[var(--radius-card)] border border-[var(--color-line)]">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="bg-[var(--color-surface-2)] text-left font-[var(--font-mono)] text-[11px] uppercase tracking-wider text-[var(--color-ink-muted)]">
-              <th className="px-3 py-2.5">#</th>
-              <th className="px-3 py-2.5">Actor</th>
-              <th className="px-3 py-2.5">Action</th>
-              <th className="px-3 py-2.5">Target</th>
-              <th className="px-3 py-2.5">IP</th>
-              <th className="px-3 py-2.5">Time</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-[var(--color-line)]">
-            {loading ? (
-              <tr>
-                <td colSpan={6} className="px-3 py-8 text-center text-[var(--color-ink-muted)]">
-                  <Spinner /> Loading…
-                </td>
-              </tr>
-            ) : !entries.length ? (
-              <tr>
-                <td colSpan={6} className="px-3 py-8 text-center text-[var(--color-ink-muted)]">
-                  No audit entries match the filters.
-                </td>
-              </tr>
-            ) : (
-              entries.map((e) => (
-                <tr key={e.id} className="hover:bg-[var(--color-surface-2)]/40">
-                  <td className="px-3 py-2 font-[var(--font-mono)] text-xs">{e.id}</td>
-                  <td className="px-3 py-2 font-[var(--font-mono)] text-xs">{e.actor}</td>
-                  <td className="px-3 py-2">
-                    <Badge tone={actionTone(e.action)}>{e.action}</Badge>
-                  </td>
-                  <td className="px-3 py-2 text-xs text-[var(--color-ink-muted)]">{e.target || "–"}</td>
-                  <td className="px-3 py-2 font-[var(--font-mono)] text-xs text-[var(--color-ink-muted)]">{e.ip || "–"}</td>
-                  <td className="px-3 py-2 text-xs text-[var(--color-ink-muted)]">{formatDate(e.created_at)}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      <div className="flex items-center justify-between text-sm text-[var(--color-ink-muted)]">
-        <span>
-          {entries.length
-            ? `${offset + 1}–${offset + entries.length} of ${filtered.toLocaleString()}${filtered !== total ? ` filtered (${total.toLocaleString()} total)` : ""}`
-            : "No audit entries"}
-        </span>
-        <div className="flex gap-2">
-          <Button size="sm" variant="ghost" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - LIMIT))}>
-            Prev
-          </Button>
-          <Button size="sm" variant="ghost" disabled={offset + entries.length >= filtered} onClick={() => setOffset(offset + LIMIT)}>
-            Next
-          </Button>
+        <div className="relative min-w-48 flex-1">
+          <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            className="pl-8"
+            placeholder="Search actor, action, target, IP…"
+            value={q}
+            onChange={(e) => { setQ(e.target.value); setPage(0); }}
+          />
         </div>
+        <Select value={action} onValueChange={(v) => { setAction(v); setPage(0); }}>
+          <SelectTrigger className="w-48">
+            <SelectValue placeholder="All actions" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All actions</SelectItem>
+            {data?.actions.map((a) => (
+              <SelectItem key={a} value={a}>
+                {a}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
+
+      {isLoading ? (
+        <Skeleton className="h-80 w-full" />
+      ) : !data || data.entries.length === 0 ? (
+        <EmptyState icon={ScrollText} title="No audit entries" />
+      ) : (
+        <>
+          <div className="rounded-lg border border-border" style={{ opacity: isPlaceholderData ? 0.6 : 1 }}>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-16">ID</TableHead>
+                  <TableHead>Actor</TableHead>
+                  <TableHead>Action</TableHead>
+                  <TableHead>Target</TableHead>
+                  <TableHead>IP</TableHead>
+                  <TableHead>When</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {data.entries.map((e) => (
+                  <TableRow key={e.id}>
+                    <TableCell className="font-mono text-xs text-muted-foreground">{e.id}</TableCell>
+                    <TableCell className="font-medium">{e.actor}</TableCell>
+                    <TableCell>
+                      <Badge variant={actionVariant(e.action)}>{e.action}</Badge>
+                    </TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">{e.target ?? "—"}</TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">{e.ip ?? "—"}</TableCell>
+                    <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{formatDateTime(e.created_at)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-muted-foreground">
+              Page {page + 1} of {Math.max(1, pages)} · {data.filtered_count} results
+            </span>
+            <div className="flex gap-1">
+              <Button variant="outline" size="sm" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>
+                <ChevronLeft /> Prev
+              </Button>
+              <Button variant="outline" size="sm" disabled={page + 1 >= pages} onClick={() => setPage((p) => p + 1)}>
+                Next <ChevronRight />
+              </Button>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

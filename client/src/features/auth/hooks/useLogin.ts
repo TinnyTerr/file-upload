@@ -1,40 +1,43 @@
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { ApiError, csrf, isLoggedIn } from "../../../lib/api";
-import { login, persistSession } from "../services/authService";
+import { useState } from "react";
+import { useNavigate, useLocation } from "react-router-dom";
+import { toast } from "sonner";
+import { authService } from "../services/authService";
+import { useAuth } from "./auth";
+import { ApiError, errorMessage } from "@/config/api";
 
-/** All state + orchestration for the login form. The page only renders it. */
+interface LocationState {
+  from?: string;
+}
+
 export function useLogin() {
-  const nav = useNavigate();
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
+  const { refresh } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (isLoggedIn()) nav("/files", { replace: true });
-  }, [nav]);
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setError("");
-    setBusy(true);
+  async function login(username: string, password: string) {
+    setSubmitting(true);
+    setError(null);
     try {
-      const { csrfToken, mustChange } = await login(username.trim(), password);
-      csrf.set(csrfToken);
-      await persistSession(username.trim(), mustChange);
-      nav(mustChange ? "/account/change" : "/files", { replace: true });
+      const res = await authService.login(username, password);
+      await refresh();
+      const dest = res.must_change_credentials
+        ? "/account/change"
+        : ((location.state as LocationState)?.from ?? "/files");
+      toast.success("Welcome back");
+      navigate(dest, { replace: true });
     } catch (err) {
-      if (err instanceof ApiError && err.status === 429)
-        setError("Too many attempts — try again later.");
-      else if (err instanceof ApiError && err.status === 401)
-        setError("Invalid username or password.");
-      else if (err instanceof ApiError) setError(err.message);
-      else setError("Network error — is the server running?");
+      let msg = errorMessage(err);
+      if (err instanceof ApiError) {
+        if (err.status === 401) msg = "Invalid username or password.";
+        else if (err.status === 429) msg = "Too many attempts — try again later.";
+      }
+      setError(msg);
     } finally {
-      setBusy(false);
+      setSubmitting(false);
     }
   }
 
-  return { username, setUsername, password, setPassword, error, busy, submit };
+  return { login, submitting, error };
 }

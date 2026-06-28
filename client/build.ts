@@ -1,38 +1,19 @@
-#!/usr/bin/env bun
 /**
- * Build orchestration for the Oxymoron SPA.
- *
- * Builds the React client with Vite → ../public, which the FastAPI server serves
- * as the SPA shell (see app/spa.py). Optionally hand off to the Python server:
- *       bun run build.ts            # build only
- *       bun run build.ts --serve    # build, then start the Python server
- *
- * Run from the client/ directory:  `bun run build.ts`
+ * Bun build orchestration: type-check then produce the production bundle into
+ * ../public. Run with `bun run build.ts` (or `bun run build:prod`).
  */
+import { spawnSync } from "node:child_process";
 
-const serve = process.argv.includes("--serve");
-
-async function run(cmd: string[], cwd?: string): Promise<void> {
-  console.log(`\n$ ${cmd.join(" ")}`);
-  const proc = Bun.spawn(cmd, {
-    cwd,
-    stdout: "inherit",
-    stderr: "inherit",
-    stdin: "inherit",
-  });
-  const code = await proc.exited;
-  if (code !== 0) {
-    console.error(`\n✗ command failed (exit ${code}): ${cmd.join(" ")}`);
-    process.exit(code);
+function run(cmd: string, args: string[]) {
+  const label = [cmd, ...args].join(" ");
+  console.log(`\n\x1b[36m▸ ${label}\x1b[0m`);
+  const res = spawnSync(cmd, args, { stdio: "inherit", shell: true });
+  if (res.status !== 0) {
+    console.error(`\x1b[31m✗ failed: ${label}\x1b[0m`);
+    process.exit(res.status ?? 1);
   }
 }
 
-// 1. Type-check + bundle the SPA into ../public.
-await run(["bunx", "vite", "build"]);
-console.log("\n✓ SPA built → ../public");
-
-// 2. (Optional) Hand off to the Python server, which now serves ./public.
-if (serve) {
-  console.log("\n→ starting Python server (serving ./public)…");
-  await run(["./.venv/bin/python3", "app"], "..");
-}
+run("tsc", ["-b"]);
+run("vite", ["build"]);
+console.log("\n\x1b[32m✓ Build complete → ../public\x1b[0m");

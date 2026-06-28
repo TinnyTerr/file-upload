@@ -1,123 +1,87 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { formatDate } from "../../../lib/api";
-import { useToast } from "../../../providers/ToastProvider";
-import { useDialog } from "../../../providers/DialogProvider";
-import { Input, Select, Toggle } from "../../../components/ui/primitives";
-import { Button } from "../../../components/ui/Button";
-import { cn } from "../../../lib/cn";
-import { fetchBackendLogs, restartWorkers } from "../services/adminService";
-import type { BackendLogEntry } from "../types";
+import { useState } from "react";
+import { Search, RefreshCw, Power, Terminal } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import { useBackendLogs } from "../hooks/useAdminData";
+import { useRestartWorkers } from "../hooks/useAdminDashboard";
+import { formatDateTime } from "@/lib/time";
+import { cn } from "@/lib/cn";
 
-const LEVEL_TONE: Record<string, string> = {
-  debug: "text-[var(--color-ink-muted)]",
-  info: "text-[var(--color-cyan)]",
-  warning: "text-[var(--color-warn)]",
-  error: "text-[var(--color-bad)]",
-  critical: "text-[var(--color-bad)]",
+const LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"];
+
+const LEVEL_COLOR: Record<string, string> = {
+  DEBUG: "text-muted-foreground",
+  INFO: "text-accent",
+  WARNING: "text-warning",
+  ERROR: "text-destructive",
+  CRITICAL: "text-destructive font-bold",
 };
 
 export function BackendTab() {
-  const { showToast } = useToast();
-  const dialog = useDialog();
-  const [entries, setEntries] = useState<BackendLogEntry[]>([]);
-  const [status, setStatus] = useState("");
   const [q, setQ] = useState("");
-  const [level, setLevel] = useState("");
+  const [level, setLevel] = useState("all");
   const [auto, setAuto] = useState(false);
-  const [restarting, setRestarting] = useState(false);
-  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const qRef = useRef(q);
-  const levelRef = useRef(level);
-  qRef.current = q;
-  levelRef.current = level;
+  const restart = useRestartWorkers();
 
-  const load = useCallback(async () => {
-    try {
-      const data = await fetchBackendLogs({ q: qRef.current, level: levelRef.current });
-      setEntries(data.entries || []);
-      setStatus(`${Number(data.filtered_count || 0).toLocaleString()} shown / ${Number(data.total_count || 0).toLocaleString()} captured`);
-    } catch {
-      showToast("Failed to load backend logs.", "error");
-    }
-  }, [showToast]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  // Auto-refresh every 3s while enabled.
-  useEffect(() => {
-    if (!auto) return;
-    const t = setInterval(load, 3000);
-    return () => clearInterval(t);
-  }, [auto, load]);
-
-  function onSearch(v: string) {
-    setQ(v);
-    if (searchTimer.current) clearTimeout(searchTimer.current);
-    searchTimer.current = setTimeout(load, 220);
-  }
-
-  async function restart() {
-    const ok = await dialog.confirm({
-      title: "Restart backend workers?",
-      message:
-        "This restarts the background scheduler jobs for lifecycle scans, cleanup, link expiry, and stale upload cleanup. Active HTTP requests are not restarted.",
-      confirmText: "Restart workers",
-      danger: true,
-    });
-    if (!ok) return;
-    setRestarting(true);
-    try {
-      const d = await restartWorkers();
-      showToast(`Backend workers ${d.status}.`);
-      load();
-    } catch {
-      showToast("Failed to restart backend workers.", "error");
-    } finally {
-      setRestarting(false);
-    }
-  }
+  const { data, isLoading } = useBackendLogs(
+    { limit: 200, q: q || undefined, level: level === "all" ? undefined : level },
+    auto,
+  );
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
-        <Input placeholder="Filter logs…" value={q} onChange={(e) => onSearch(e.target.value)} className="max-w-xs" />
-        <Select value={level} onChange={(e) => { setLevel(e.target.value); setTimeout(load, 0); }} className="max-w-[160px]">
-          <option value="">All levels</option>
-          <option value="DEBUG">Debug</option>
-          <option value="INFO">Info</option>
-          <option value="WARNING">Warning</option>
-          <option value="ERROR">Error</option>
-          <option value="CRITICAL">Critical</option>
+        <div className="relative min-w-48 flex-1">
+          <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+          <Input className="pl-8" placeholder="Search log messages…" value={q} onChange={(e) => setQ(e.target.value)} />
+        </div>
+        <Select value={level} onValueChange={setLevel}>
+          <SelectTrigger className="w-36">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All levels</SelectItem>
+            {LEVELS.map((l) => (
+              <SelectItem key={l} value={l}>
+                {l}
+              </SelectItem>
+            ))}
+          </SelectContent>
         </Select>
-        <Toggle checked={auto} onChange={setAuto} label="Auto-refresh" />
-        <Button variant="ghost" onClick={load}>Refresh</Button>
-        <Button variant="danger" disabled={restarting} onClick={restart} className="ml-auto">
-          {restarting ? "Restarting…" : "Restart workers"}
+        <div className="flex items-center gap-2 rounded-md border border-border px-3 py-1.5">
+          <RefreshCw className={cn("size-4", auto && "animate-spin text-primary")} />
+          <Label className="text-xs">Auto</Label>
+          <Switch checked={auto} onCheckedChange={setAuto} />
+        </div>
+        <Button variant="secondary" onClick={() => restart.mutate()} loading={restart.isPending}>
+          <Power /> Restart workers
         </Button>
       </div>
 
-      <div className="text-xs text-[var(--color-ink-muted)]">{status}</div>
-
-      <div className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--color-line)] bg-[var(--color-canvas-2)]/40 font-[var(--font-mono)] text-[12px]">
-        {!entries.length ? (
-          <div className="px-3 py-8 text-center text-[var(--color-ink-muted)]">No backend logs match the filters.</div>
-        ) : (
-          <div className="divide-y divide-[var(--color-line)]">
-            {entries.map((e, i) => (
-              <div key={i} className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 px-3 py-1.5">
-                <span className="shrink-0 text-[var(--color-ink-muted)]">{formatDate(e.created_at)}</span>
-                <span className={cn("shrink-0 font-semibold uppercase", LEVEL_TONE[(e.level || "info").toLowerCase()])}>
-                  {e.level || "INFO"}
-                </span>
-                <span className="shrink-0 text-[var(--color-accent)]">{e.logger || "app"}</span>
-                <span className="min-w-0 flex-1 break-words text-[var(--color-ink-dim)]">{e.message || ""}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      {isLoading ? (
+        <Skeleton className="h-96 w-full" />
+      ) : !data || data.entries.length === 0 ? (
+        <EmptyState icon={Terminal} title="No log entries" />
+      ) : (
+        <div className="max-h-[60vh] space-y-0.5 overflow-y-auto rounded-lg border border-border bg-background/50 p-3 font-mono text-xs">
+          {data.entries.map((log, i) => (
+            <div key={i} className="flex gap-2 border-b border-border/40 py-1 last:border-0">
+              <span className="shrink-0 text-muted-foreground">{formatDateTime(log.created_at)}</span>
+              <span className={cn("w-16 shrink-0 uppercase", LEVEL_COLOR[log.level] ?? "text-muted-foreground")}>{log.level}</span>
+              <span className="shrink-0 text-muted-foreground">{log.module}:{log.line}</span>
+              <span className="break-all">{log.message}</span>
+            </div>
+          ))}
+          <p className="pt-2 text-center text-muted-foreground">
+            {data.filtered_count} of {data.total_count} entries
+          </p>
+        </div>
+      )}
     </div>
   );
 }

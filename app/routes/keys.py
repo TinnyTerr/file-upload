@@ -17,8 +17,7 @@ from app.security.passwords import verify_password
 router = APIRouter(prefix="/keys", tags=["keys"])
 admin_router = APIRouter(tags=["keys"])
 
-# Cap on simultaneously-active keys per user. Keys are never hard-deleted (only
-# deactivated), so without a ceiling a user could grow the table without bound.
+# Cap on simultaneously-active keys per user.
 _MAX_ACTIVE_KEYS_PER_USER = 20
 
 
@@ -33,7 +32,7 @@ def create_key(
     if active_count >= _MAX_ACTIVE_KEYS_PER_USER:
         raise HTTPException(
             429,
-            detail=f"active API key limit reached ({_MAX_ACTIVE_KEYS_PER_USER}); revoke one first",
+            detail=f"active API key limit reached ({_MAX_ACTIVE_KEYS_PER_USER}); delete one first",
         )
     next_number = (
         db.query(func.max(ApiKey.user_key_number))
@@ -97,7 +96,7 @@ def _serialize_key(k: ApiKey) -> dict:
 
 
 @router.delete("/{key_id}")
-def deactivate_key(
+def delete_key(
     key_id: int,
     request: Request,
     _csrf: SessionRow = Depends(require_csrf),
@@ -109,11 +108,11 @@ def deactivate_key(
         raise HTTPException(404, detail="not found")
     if user.role != "master" and key.owner_id != user.id:
         raise HTTPException(403, detail="not your key")
-    key.active = False
-    record(db, actor=user.username, action="apikey.deactivated",
+    db.delete(key)
+    record(db, actor=user.username, action="apikey.deleted",
            target=f"apikey:{key_id}", ip=client_ip(request))
     db.commit()
-    return {"status": "deactivated"}
+    return {"status": "deleted"}
 
 
 class ResetIpBody(BaseModel):
