@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import {
   BookText, KeyRound, Upload, Download, Info, FolderTree, ShieldCheck, AlertCircle,
-  Link2, Globe, ChevronDown, ChevronRight,
+  Link2, Globe, ChevronDown, ChevronRight, Radio,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -188,6 +188,7 @@ export function ApiDocsPage() {
     { id: "folders-section", label: "Folders" },
     { id: "dropbox-section", label: "Dropbox" },
     { id: "account-section", label: "Account" },
+    { id: "realtime-section", label: "Realtime & cluster" },
     { id: "encryption-section", label: "Encryption" },
     { id: "errors-section", label: "Errors" },
   ];
@@ -603,6 +604,153 @@ export function ApiDocsPage() {
       </Endpoint>
 
       {/* ── encryption ── */}
+      {/* ── realtime & cluster ── */}
+      <SectionHeader id="realtime-section" icon={Radio} title="Realtime & cluster" />
+
+      <Card>
+        <CardContent className="pt-4 space-y-4 text-sm text-muted-foreground">
+          <p>
+            Every action on the server (uploads, deletes, logins, link changes, admin actions —
+            anything that writes to the audit log) is published as an <strong>event</strong> in real time.
+            Subscribe over WebSocket for a live stream, or poll over HTTP. This powers monitoring
+            dashboards and multi-node / cluster deployments.
+          </p>
+          <div className="rounded-md border border-border p-3 space-y-1.5">
+            <p className="font-medium text-foreground">Event payload</p>
+            <p>Each frame is JSON. Stream frames carry a <code>type</code> of <code>ready</code> (sent once on connect) or <code>event</code>.</p>
+            <CodeBlock
+              lang="json"
+              code={`{\n  "type": "event",\n  "id": 1421,            // monotonic per-process sequence — use as a cursor\n  "ts": "2026-06-29T12:00:00+00:00",\n  "action": "file.uploaded",\n  "actor": "alice",     // username, or "system" / "dropbox" / "apikey:<id>"\n  "target": "file:42",\n  "ip": "203.0.113.7"\n}`}
+            />
+          </div>
+          <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 space-y-1.5">
+            <p className="font-medium text-foreground">Reconnect without gaps</p>
+            <p>
+              The server retains a buffer of recent events. Pass the highest <code>id</code> you have
+              already processed as <code>?after=</code> (WebSocket) or <code>?after=</code> (poll) to
+              replay only what you missed.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Endpoint
+        id="ep-user-ws"
+        method="GET"
+        path="/ws/events"
+        title="Per-user event stream (WebSocket)"
+        description="Authenticated by your session cookie — open it from the browser app. A regular user receives only their own events (across every session and node); a master receives the full firehose."
+      >
+        <ParamTable
+          title="Query parameters"
+          params={[
+            { name: "after", type: "integer", description: "Replay buffered events with a higher id before streaming live ones. Optional." },
+          ]}
+        />
+        <LangTabs examples={{
+          curl: `# WebSockets aren't curl-friendly; use websocat with your session cookie:\nwebsocat "${origin.replace(/^http/, "ws")}/ws/events" \\\n  -H "Cookie: fu_session=<your-session-cookie>"`,
+          python: `import json, websockets, asyncio\n\nasync def main():\n    url = "${origin.replace(/^http/, "ws")}/ws/events"\n    async with websockets.connect(url, additional_headers={"Cookie": "fu_session=<cookie>"}) as ws:\n        async for raw in ws:\n            evt = json.loads(raw)\n            if evt["type"] == "event":\n                print(evt["action"], evt["actor"])\n\nasyncio.run(main())`,
+          node: `const ws = new WebSocket("${origin.replace(/^http/, "ws")}/ws/events");\nws.onmessage = (m) => {\n  const evt = JSON.parse(m.data);\n  if (evt.type === "event") console.log(evt.action, evt.actor);\n};`,
+        }} />
+        <p className="text-xs">Closes with code <code>4401</code> if the session cookie is missing or invalid.</p>
+      </Endpoint>
+
+      <Card className="border-destructive/30 bg-destructive/5">
+        <CardContent className="pt-4 space-y-2 text-sm text-muted-foreground">
+          <p className="flex items-center gap-2 font-medium text-foreground">
+            <ShieldCheck className="size-4 text-destructive" />
+            Cluster token — sensitive
+          </p>
+          <p>
+            The endpoints below authenticate with the <strong>cluster token</strong>, not a user login.
+            This single token streams <strong>every</strong> event on the server, for every user, regardless of
+            any password. Treat it like a root credential: store it in a secret manager, scope it to your
+            cluster/monitoring infrastructure, and rotate it if it leaks. It lives only in the server's
+            <code> data/app.env</code> (<code>CLUSTER_TOKEN</code>) and is revealed to / rotated by a master via the API below.
+          </p>
+        </CardContent>
+      </Card>
+
+      <Endpoint
+        id="ep-cluster-firehose"
+        method="GET"
+        path="/admin/cluster/firehose"
+        title="Event firehose (WebSocket)"
+        description="Streams every event on the server. Authenticated by the cluster token via the ?token= query parameter or an Authorization: Bearer header. Intended for cluster nodes and monitoring agents."
+      >
+        <ParamTable
+          title="Query parameters"
+          params={[
+            { name: "token", type: "string", required: true, description: "The cluster token (or pass it as Authorization: Bearer)." },
+            { name: "after", type: "integer", description: "Replay buffered events newer than this id on connect. Optional." },
+          ]}
+        />
+        <LangTabs examples={{
+          curl: `websocat "${origin.replace(/^http/, "ws")}/admin/cluster/firehose?token=<cluster-token>"`,
+          python: `import json, asyncio, websockets\n\nasync def monitor():\n    url = "${origin.replace(/^http/, "ws")}/admin/cluster/firehose?token=<cluster-token>"\n    cursor = 0\n    while True:\n        try:\n            async with websockets.connect(f"{url}&after={cursor}") as ws:\n                async for raw in ws:\n                    evt = json.loads(raw)\n                    if evt["type"] == "event":\n                        cursor = evt["id"]\n                        print(evt)\n        except Exception:\n            await asyncio.sleep(2)  # reconnect; the buffer fills the gap\n\nasyncio.run(monitor())`,
+          node: `const ws = new WebSocket("${origin.replace(/^http/, "ws")}/admin/cluster/firehose?token=<cluster-token>");\nws.onmessage = (m) => {\n  const evt = JSON.parse(m.data);\n  if (evt.type === "event") console.log(evt);\n};`,
+        }} />
+        <p className="text-xs">Closes with code <code>4401</code> on an invalid token.</p>
+      </Endpoint>
+
+      <Endpoint
+        id="ep-cluster-poll"
+        method="GET"
+        path="/admin/cluster/events"
+        title="Poll events (HTTP)"
+        description="A websocket-free alternative for nodes that prefer HTTP polling. Returns recent events newer than the given cursor. Authenticated by the cluster token (Authorization: Bearer or X-Cluster-Token)."
+      >
+        <ParamTable
+          title="Query parameters"
+          params={[
+            { name: "after", type: "integer", description: "Return only events with a higher id. Default 0." },
+            { name: "limit", type: "integer", description: "Max events to return (1–1000). Default 200." },
+          ]}
+        />
+        <LangTabs examples={{
+          curl: `curl "${origin}/admin/cluster/events?after=0" \\\n  -H "Authorization: Bearer <cluster-token>"`,
+          python: `import requests, time\n\ncursor = 0\nwhile True:\n    r = requests.get(\n        "${origin}/admin/cluster/events",\n        params={"after": cursor},\n        headers={"Authorization": "Bearer <cluster-token>"},\n    ).json()\n    for evt in r["events"]:\n        print(evt)\n    cursor = r["last_id"]\n    time.sleep(2)`,
+          node: `const r = await fetch("${origin}/admin/cluster/events?after=0", {\n  headers: { "Authorization": "Bearer <cluster-token>" }\n});\nconst { events, last_id } = await r.json();\nconsole.log(events, last_id);`,
+        }} />
+        <ResponseBlock json={{
+          events: [
+            { id: 1421, ts: "2026-06-29T12:00:00+00:00", action: "file.uploaded", actor: "alice", target: "file:42", ip: "203.0.113.7" },
+          ],
+          last_id: 1421,
+          count: 1,
+        }} />
+      </Endpoint>
+
+      <Endpoint
+        id="ep-cluster-token"
+        method="GET"
+        path="/admin/cluster/token"
+        title="Reveal cluster token"
+        description="Returns the current cluster token. Master only (session + login required)."
+      >
+        <LangTabs examples={{
+          curl: `curl "${origin}/admin/cluster/token" \\\n  -H "Cookie: fu_session=<master-session>"`,
+          python: `import requests\n\nr = requests.get("${origin}/admin/cluster/token", cookies={"fu_session": "<master-session>"})\nprint(r.json()["token"])`,
+          node: `const r = await fetch("${origin}/admin/cluster/token", { credentials: "include" });\nconst { token } = await r.json();`,
+        }} />
+        <ResponseBlock json={{ token: "fu_cluster_…" }} />
+      </Endpoint>
+
+      <Endpoint
+        id="ep-cluster-token-rotate"
+        method="POST"
+        path="/admin/cluster/token/rotate"
+        title="Rotate cluster token"
+        description="Generates a new cluster token and persists it to the server config. The previous token stops working immediately — every firehose/poll consumer must be updated. Master only; requires the X-CSRF-Token header."
+      >
+        <LangTabs examples={{
+          curl: `curl -X POST "${origin}/admin/cluster/token/rotate" \\\n  -H "Cookie: fu_session=<master-session>" \\\n  -H "X-CSRF-Token: <csrf>"`,
+          python: `import requests\n\nr = requests.post(\n    "${origin}/admin/cluster/token/rotate",\n    cookies={"fu_session": "<master-session>"},\n    headers={"X-CSRF-Token": "<csrf>"},\n)\nprint(r.json()["token"])`,
+          node: `const r = await fetch("${origin}/admin/cluster/token/rotate", {\n  method: "POST",\n  credentials: "include",\n  headers: { "X-CSRF-Token": "<csrf>" },\n});\nconst { token } = await r.json();`,
+        }} />
+        <ResponseBlock json={{ token: "fu_cluster_…(new)" }} />
+      </Endpoint>
+
       <SectionHeader id="encryption-section" icon={ShieldCheck} title="Encryption modes" />
 
       <Card>

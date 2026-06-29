@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import text
@@ -10,6 +11,10 @@ from sqlalchemy.orm import Session
 from app.models.audit import AuditEntry
 
 GENESIS = "0" * 64
+
+# Surfaces every audit event in the standard backend log stream (and thus the
+# admin Logs viewer / cluster monitoring), alongside the websocket firehose.
+_event_log = logging.getLogger("app.event")
 
 
 def _utcnow() -> datetime:
@@ -79,6 +84,20 @@ def record(session: Session, actor: str, action: str,
                        prev_hash=prev_hash, entry_hash=entry_hash)
     session.add(entry)
     session.flush()
+    # Mirror the event into the backend log stream so it shows up in the admin
+    # Logs viewer and anything tailing process logs.
+    _event_log.info(
+        "event action=%s actor=%s target=%s ip=%s",
+        action, actor, target or "-", ip or "-",
+    )
+    # Fan the event out to live websocket subscribers (per-user sockets and the
+    # cluster/monitoring firehose). Best-effort and decoupled from the DB commit:
+    # the recent-events replay buffer smooths over the rare rolled-back entry.
+    try:
+        from app.observability.events import event_bus
+        event_bus.publish(action=action, actor=actor, target=target, ip=ip)
+    except Exception:
+        pass
     return entry
 
 

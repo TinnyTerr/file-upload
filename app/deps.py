@@ -21,6 +21,9 @@ class AppState:
     session_manager: SessionManager
     lockout: LockoutPolicy
     bootstrap_password: str | None = None
+    # Current cluster/monitoring firehose token. Seeded from settings; may be
+    # rotated at runtime by a master via the admin API.
+    cluster_token: str = ""
 
 
 def get_state(request: Request) -> AppState:

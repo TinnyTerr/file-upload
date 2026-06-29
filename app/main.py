@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
@@ -64,6 +65,7 @@ from app.jobs.lifecycle import (
     archive_idle_job, delete_idle_job, temp_expiry_job, link_expiry_job,
     reconcile_stale_states,
 )
+from app.observability.events import event_bus
 from app.observability.log_buffer import install_backend_log_handler
 from app.security.lockout import LockoutPolicy
 from app.security.sessions import SessionManager
@@ -79,6 +81,8 @@ from app.routes.users import router as users_router
 from app.routes.audit_view import router as audit_router
 from app.routes.keys import admin_router as admin_keys_router
 from app.routes.keys import router as keys_router
+from app.routes.ws import router as ws_router
+from app.routes.ws import admin_router as cluster_router
 from app.spa import SPA_ASSETS, render_spa
 from app.storage.paths import storage_root
 
@@ -116,6 +120,7 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
         session_factory=session_factory,
         session_manager=SessionManager(settings.secret_key, secure=secure),
         lockout=LockoutPolicy(max_attempts=5, lockout_seconds=900),
+        cluster_token=settings.cluster_token,
     )
 
     def _start_backend_workers(app: FastAPI):
@@ -155,6 +160,10 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         _log.info("application startup begin database_url=%s", db_url)
+        # Bridge the synchronous event producers to this app's running loop so
+        # the websocket firehose can deliver events from any thread.
+        event_bus.reset()
+        event_bus.bind_loop(asyncio.get_running_loop())
         storage_root().mkdir(parents=True, exist_ok=True)
         # Serialize first-run admin creation across worker processes: without
         # this, every worker's lifespan passes the "no user yet" check and races
@@ -351,6 +360,8 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
     app.include_router(audit_router)
     app.include_router(keys_router)
     app.include_router(admin_keys_router)
+    app.include_router(ws_router)
+    app.include_router(cluster_router)
 
     app.mount("/static", _RevalidatingStatic(directory=str(_STATIC)), name="static")
 
