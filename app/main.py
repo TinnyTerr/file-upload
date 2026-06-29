@@ -363,6 +363,9 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
     app.include_router(ws_router)
     app.include_router(cluster_router)
 
+    # Created at runtime if absent: a wheel install won't ship this empty dir
+    # (no __init__.py → not a package), and StaticFiles raises if it's missing.
+    _STATIC.mkdir(parents=True, exist_ok=True)
     app.mount("/static", _RevalidatingStatic(directory=str(_STATIC)), name="static")
 
     # Vite's hashed bundle (JS/CSS/workers) referenced by the SPA shell. Mounted
