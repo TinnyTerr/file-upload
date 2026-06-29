@@ -15,5 +15,5 @@ function run(cmd: string, args: string[]) {
 }
 
 run("bunx", ["tsc", "-b"]);
-run("tsc", ["vite", "build"]);
+run("bunx", ["vite", "build"]);
 console.log("\n\x1b[32m✓ Build complete → ../public\x1b[0m");
