@@ -2,18 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from sqlalchemy.orm import Session
 
-from app.audit.log import record
-from app.config import set_env_value
-from app.deps import AppState, client_ip, get_db, require_master
+from app.deps import AppState
 from app.models.user import User
 from app.observability.events import event_bus
-from app.security.csrf import require_csrf
 from app.security.sessions import COOKIE_NAME
 
 router = APIRouter(tags=["realtime"])
@@ -164,30 +160,3 @@ def poll_events(request: Request, after: int = 0, limit: int = 200,
     events = event_bus.recent(after_id=after, limit=limit)
     last_id = events[-1]["id"] if events else after
     return {"events": events, "last_id": last_id, "count": len(events)}
-
-
-@admin_router.get("/token")
-def reveal_token(request: Request, master: User = Depends(require_master)) -> dict:
-    """Reveal the current cluster token to a logged-in master."""
-    state: AppState = request.app.state.app_state
-    return {"token": state.cluster_token}
-
-
-@admin_router.post("/token/rotate")
-def rotate_token(request: Request,
-                 _csrf=Depends(require_csrf),
-                 master: User = Depends(require_master),
-                 db: Session = Depends(get_db)) -> dict:
-    """Rotate the cluster token. Immediately revokes existing firehose
-    connections' credentials (they must reconnect with the new token)."""
-    state: AppState = request.app.state.app_state
-    new_token = secrets.token_urlsafe(32)
-    state.cluster_token = new_token
-    try:
-        set_env_value(Path(state.settings.config_path), "CLUSTER_TOKEN", new_token)
-    except OSError:
-        pass
-    record(db, actor=master.username, action="cluster.token_rotated",
-           target="cluster_token", ip=client_ip(request))
-    db.commit()
-    return {"token": new_token}

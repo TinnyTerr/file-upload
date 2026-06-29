@@ -25,7 +25,7 @@ def _login_master(app_client):
 def test_cluster_token_generated_and_revealable(app_client):
     c, state, csrf = _login_master(app_client)
     assert state.cluster_token
-    r = c.get("/admin/cluster/token")
+    r = c.get("/cluster/token")
     assert r.status_code == 200
     assert r.json()["token"] == state.cluster_token
 
@@ -44,7 +44,7 @@ def test_cluster_token_required_for_poll(app_client):
 def test_token_rotation_changes_token(app_client):
     c, state, csrf = _login_master(app_client)
     old = state.cluster_token
-    r = c.post("/admin/cluster/token/rotate", headers={"X-CSRF-Token": csrf})
+    r = c.post("/cluster/token/rotate", headers={"X-CSRF-Token": csrf})
     assert r.status_code == 200
     new = r.json()["token"]
     assert new != old

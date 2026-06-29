@@ -83,6 +83,7 @@ from app.routes.keys import admin_router as admin_keys_router
 from app.routes.keys import router as keys_router
 from app.routes.ws import router as ws_router
 from app.routes.ws import admin_router as cluster_router
+from app.routes.cluster import router as cluster_mgmt_router
 from app.spa import SPA_ASSETS, render_spa
 from app.storage.paths import storage_root
 
@@ -362,6 +363,7 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
     app.include_router(admin_keys_router)
     app.include_router(ws_router)
     app.include_router(cluster_router)
+    app.include_router(cluster_mgmt_router)
 
     # Created at runtime if absent: a wheel install won't ship this empty dir
     # (no __init__.py → not a package), and StaticFiles raises if it's missing.

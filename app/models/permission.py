@@ -47,6 +47,12 @@ class Permission(Base):
     can_manage_api_keys: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
+    # Reveal/rotate this server's cluster token and link/unlink remote cluster
+    # nodes (pass other servers' cluster tokens). Sensitive — grants control over
+    # the firehose credential.
+    can_manage_cluster: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     quota_bytes: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=100 * _GB
     )

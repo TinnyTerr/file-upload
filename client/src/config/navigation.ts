@@ -1,4 +1,4 @@
-import { FolderUp, BookText, ShieldCheck, KeyRound, type LucideIcon } from "lucide-react";
+import { FolderUp, BookText, ShieldCheck, KeyRound, Network, type LucideIcon } from "lucide-react";
 import type { PermissionFlag } from "./permissions";
 
 export interface NavItem {
@@ -30,6 +30,13 @@ export const NAV_ITEMS: NavItem[] = [
     icon: BookText,
     description: "Programmatic upload reference",
     requires: "can_use_api_keys",
+  },
+  {
+    label: "Cluster",
+    to: "/cluster",
+    icon: Network,
+    description: "Link nodes and manage cluster tokens",
+    requires: "can_manage_cluster",
   },
   {
     label: "Admin",

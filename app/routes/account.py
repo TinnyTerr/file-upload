@@ -98,6 +98,7 @@ def me(user: User = Depends(require_active_user), db: Session = Depends(get_db))
         "can_manage_users": perm.can_manage_users,
         "can_manage_storage": perm.can_manage_storage,
         "can_manage_api_keys": perm.can_manage_api_keys,
+        "can_manage_cluster": perm.can_manage_cluster,
     }
 
 

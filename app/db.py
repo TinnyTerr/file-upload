@@ -153,6 +153,7 @@ def init_db(engine: Engine) -> None:
     from app.models import dropbox_link as _dropbox_link  # noqa: F401
     from app.models import remote_upload_job as _remote_upload_job  # noqa: F401
     from app.models import directory_link as _directory_link  # noqa: F401
+    from app.models import cluster_node as _cluster_node  # noqa: F401
 
     # create_all() does a non-atomic check-then-create: it inspects existing
     # tables, then issues bare CREATE TABLE. When multiple worker processes call
@@ -184,6 +185,7 @@ _ADDED_COLUMNS = [
     ("permissions", "can_manage_users", "BOOLEAN NOT NULL DEFAULT 0"),
     ("permissions", "can_manage_storage", "BOOLEAN NOT NULL DEFAULT 0"),
     ("permissions", "can_manage_api_keys", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("permissions", "can_manage_cluster", "BOOLEAN NOT NULL DEFAULT 0"),
     ("users", "avatar_data", "BLOB"),
     ("users", "avatar_content_type", "TEXT"),
     ("sessions", "ip_address", "TEXT"),
@@ -211,6 +213,7 @@ _PERMISSION_COLUMNS = (
     "can_manage_users",
     "can_manage_storage",
     "can_manage_api_keys",
+    "can_manage_cluster",
     "quota_bytes",
     "max_file_bytes",
     "archive_after_idle_days",
@@ -233,6 +236,7 @@ CREATE TABLE permissions (
     can_manage_users BOOLEAN NOT NULL,
     can_manage_storage BOOLEAN NOT NULL,
     can_manage_api_keys BOOLEAN NOT NULL,
+    can_manage_cluster BOOLEAN NOT NULL,
     quota_bytes BIGINT NOT NULL,
     max_file_bytes BIGINT NOT NULL,
     archive_after_idle_days INTEGER NOT NULL,

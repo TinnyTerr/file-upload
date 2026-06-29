@@ -12,6 +12,7 @@ export const PERMISSION_FLAGS = [
   "can_manage_users",
   "can_manage_storage",
   "can_manage_api_keys",
+  "can_manage_cluster",
 ] as const;
 
 export type PermissionFlag = (typeof PERMISSION_FLAGS)[number];
@@ -45,4 +46,5 @@ export const PERMISSION_META: PermissionMeta[] = [
   { key: "can_manage_users", label: "Manage users", description: "Create, edit and delete user accounts.", group: "admin" },
   { key: "can_manage_storage", label: "Manage storage", description: "Set the global storage cap and run lifecycle jobs.", group: "admin" },
   { key: "can_manage_api_keys", label: "Manage all API keys", description: "Administer every user's API keys.", group: "admin" },
+  { key: "can_manage_cluster", label: "Manage cluster", description: "Reveal/rotate the cluster token and link this server to other nodes.", group: "admin" },
 ];

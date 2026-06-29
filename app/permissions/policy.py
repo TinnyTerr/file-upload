@@ -17,6 +17,7 @@ _BOOL_FLAGS = (
     "can_manage_users",
     "can_manage_storage",
     "can_manage_api_keys",
+    "can_manage_cluster",
 )
 
 

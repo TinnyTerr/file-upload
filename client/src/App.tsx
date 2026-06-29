@@ -28,6 +28,9 @@ const AdminPage = lazy(() =>
 const ApiKeysPage = lazy(() =>
   import("@/features/apikeys/components/ApiKeysPage").then((m) => ({ default: m.ApiKeysPage })),
 );
+const ClusterPage = lazy(() =>
+  import("@/features/cluster/components/ClusterPage").then((m) => ({ default: m.ClusterPage })),
+);
 
 function IndexRoute() {
   const [params] = useSearchParams();
@@ -88,6 +91,9 @@ export default function App() {
             <Route element={<RequirePermission flag="can_use_api_keys" />}>
               <Route path="/api-keys" element={<ApiKeysPage />} />
               <Route path="/api-docs" element={<ApiDocsPage />} />
+            </Route>
+            <Route element={<RequirePermission flag="can_manage_cluster" />}>
+              <Route path="/cluster" element={<ClusterPage />} />
             </Route>
             <Route element={<RequireMaster />}>
               <Route path="/admin" element={<AdminPage />} />
