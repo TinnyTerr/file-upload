@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 import logging
+import os
 from pathlib import Path
 import time
 
@@ -103,8 +104,26 @@ _QUIET_PATHS = frozenset({
 })
 
 
+def _install_console_logging() -> None:
+    """Send app.* logs to stdout. uvicorn only wires its own loggers, so without
+    this the root logger (where every app.* logger propagates) has no console
+    handler and our INFO logs never appear in the terminal — only in the in-memory
+    admin Logs buffer. Idempotent: tagged so repeated create_app() calls (tests,
+    multi-instance) don't stack duplicate handlers. LOG_LEVEL overrides the level."""
+    root = logging.getLogger()
+    if not any(getattr(h, "_fu_console", False) for h in root.handlers):
+        handler = logging.StreamHandler()
+        handler._fu_console = True  # type: ignore[attr-defined]
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s"))
+        root.addHandler(handler)
+    level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    root.setLevel(getattr(logging, level, logging.INFO))
+
+
 def create_app(config_path: str | None = None, database_url: str | None = None) -> FastAPI:
     install_backend_log_handler(reset=True)
+    _install_console_logging()
     settings = load_settings(config_path)
     db_url = database_url or settings.database_url
     # In-memory SQLite shares a single connection across all sessions/threads
