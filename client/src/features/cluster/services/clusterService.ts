@@ -1,10 +1,12 @@
 import { api } from "@/config/api";
-import type { ClusterNode, NewClusterNode } from "../types";
+import type { ClusterNode, ClusterSelf, NewClusterNode } from "../types";
 
 export const clusterService = {
   revealToken: () => api.get<{ token: string }>("/cluster/token").then((r) => r.token),
 
   rotateToken: () => api.post<{ token: string }>("/cluster/token/rotate").then((r) => r.token),
+
+  self: () => api.get<ClusterSelf>("/cluster/self"),
 
   listNodes: () => api.get<{ nodes: ClusterNode[] }>("/cluster/nodes").then((r) => r.nodes),
 

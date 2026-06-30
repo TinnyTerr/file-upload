@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64 as _b64
 import html
+import logging
 import re as _re
 import secrets as _secrets
 import tempfile
@@ -21,6 +22,41 @@ from app.spa import render_spa
 from app.storage.blobs import file_hashes
 
 router = APIRouter(tags=["public"])
+
+_log = logging.getLogger("app.public")
+
+
+def _recover_missing_blob(request: Request, f: FileObject, full_path) -> bool:
+    """If a file's bytes are absent locally (this node never replicated them, or
+    is a cache node, or lost them), try to pull them from a peer by content hash.
+
+    This is the read-side of cluster file sharing + failover: as long as one node
+    still holds the blob, the download succeeds. Returns True if the bytes are
+    present (already, or after a successful peer fetch)."""
+    if full_path.exists():
+        return True
+    from app.models.content_blob import ContentBlob
+    from app.cluster.blobs import fetch_blob_from_peers
+
+    state = request.app.state.app_state
+    if not f.blob_id:
+        return False
+    with state.session_factory() as s:
+        blob = s.get(ContentBlob, f.blob_id)
+        if blob is None or not blob.stored_sha256:
+            return False
+        stored_sha256 = blob.stored_sha256
+        transform_key = blob.transform_key
+    try:
+        return fetch_blob_from_peers(
+            state.session_factory,
+            stored_sha256=stored_sha256,
+            transform_key=transform_key,
+            dest=full_path,
+        )
+    except Exception:
+        _log.warning("peer blob recovery failed for file %s", f.id)
+        return False
 
 # CSP for the download experience. The page decrypts in a Web Worker and renders
 # image/video/audio/pdf previews, so worker-src/media-src/img-src/frame-src must
@@ -187,7 +223,7 @@ def download_raw(slug: str, request: Request, ek: str | None = None, db: Session
         full_path = safe_join(storage_root(), f.storage_path)
     except ValueError:
         raise HTTPException(500, detail="invalid storage path")
-    if not full_path.exists():
+    if not _recover_missing_blob(request, f, full_path):
         raise HTTPException(500, detail="file missing from storage")
 
     needs_decrypt = f.encryption_mode == "server"
@@ -350,7 +386,7 @@ def _plain_file_response(request: Request, f: FileObject, *, disposition: str | 
         full_path = safe_join(storage_root(), f.storage_path)
     except ValueError:
         raise HTTPException(500, detail="invalid storage path")
-    if not full_path.exists():
+    if not _recover_missing_blob(request, f, full_path):
         raise HTTPException(500, detail="file missing from storage")
 
     file_size = f.stored_size_bytes

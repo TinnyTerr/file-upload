@@ -91,6 +91,33 @@ export interface AuditResponse {
   offset: number;
 }
 
+export interface ClusterServer {
+  node_id: string;
+  node_name: string | null;
+}
+
+export interface ClusterAuditEntry {
+  id: number;
+  node_id: string;
+  node_name: string | null;
+  kind: string;
+  actor: string;
+  action: string;
+  target: string | null;
+  ip: string | null;
+  ts: string | null;
+}
+
+export interface ClusterAuditResponse {
+  entries: ClusterAuditEntry[];
+  actions: string[];
+  servers: ClusterServer[];
+  total_count: number;
+  filtered_count: number;
+  limit: number;
+  offset: number;
+}
+
 export interface BackendLog {
   level: string;
   logger: string;
@@ -105,6 +132,8 @@ export interface BackendLogsResponse {
   entries: BackendLog[];
   filtered_count: number;
   total_count: number;
+  servers?: ClusterServer[];
+  server?: string;
 }
 
 export interface BulkPreview {

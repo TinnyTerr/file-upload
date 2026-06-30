@@ -107,6 +107,11 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
     install_backend_log_handler(reset=True)
     settings = load_settings(config_path)
     db_url = database_url or settings.database_url
+    # In-memory SQLite shares a single connection across all sessions/threads
+    # (StaticPool), so background threads that touch the DB would race with
+    # request transactions. That mode is test-only and never a real cluster, so
+    # the cluster background workers stay off for it.
+    _cluster_runtime_enabled = not (":memory:" in db_url or db_url == "sqlite://")
     engine = make_engine(db_url)
     init_db(engine)
     install_append_only_triggers(engine)
@@ -122,6 +127,9 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
         session_manager=SessionManager(settings.secret_key, secure=secure),
         lockout=LockoutPolicy(max_attempts=5, lockout_seconds=900),
         cluster_token=settings.cluster_token,
+        node_id=settings.node_id,
+        node_name=settings.node_name,
+        cluster_enabled=_cluster_runtime_enabled,
     )
 
     def _start_backend_workers(app: FastAPI):
@@ -136,6 +144,15 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
         scheduler.add_job(temp_expiry_job, "interval", hours=1, args=[_sf, _sr], id="temp_expiry")
         scheduler.add_job(link_expiry_job, "interval", minutes=10, args=[_sf], id="link_expiry")
         scheduler.add_job(_sweep_stale_parts, "interval", hours=1, id="sweep_stale_parts")
+        # Refresh peer liveness/capacity and keep the mesh symmetric, and
+        # periodically check peers' state digests, alerting on divergence.
+        if _cluster_runtime_enabled:
+            from app.cluster.membership import heartbeat_job
+            from app.cluster.digest import sync_check_job
+            scheduler.add_job(heartbeat_job, "interval", seconds=30,
+                              args=[settings, session_factory], id="cluster_heartbeat")
+            scheduler.add_job(sync_check_job, "interval", minutes=5,
+                              args=[session_factory, settings], id="cluster_sync_check")
         scheduler.start()
         app.state.backend_scheduler = scheduler
         jobs = [job.id for job in scheduler.get_jobs()]
@@ -162,9 +179,56 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
     async def lifespan(app: FastAPI):
         _log.info("application startup begin database_url=%s", db_url)
         # Bridge the synchronous event producers to this app's running loop so
-        # the websocket firehose can deliver events from any thread.
+        # the websocket firehose can deliver events from any thread, and stamp
+        # every event with this node's identity for cluster-wide attribution.
         event_bus.reset()
         event_bus.bind_loop(asyncio.get_running_loop())
+        event_bus.bind_node(settings.node_id, settings.node_name)
+        # Upload halts are per-process state; clear any carried over between test
+        # app instances in the same interpreter.
+        from app.cluster.halt import halt_registry
+        halt_registry.reset()
+        # Local events are mirrored into the replicated ClusterEvent table inside
+        # each request's own transaction (see app.audit.log.record). The
+        # background writer below persists only PEER events arriving via the
+        # firehose consumer, which in a real multi-node deployment runs against
+        # this node's own DB connection — never the request threads' connection.
+        from app.cluster.event_store import ClusterEventWriter
+        from app.cluster.firehose_client import ClusterFirehoseConsumer
+
+        event_writer = ClusterEventWriter(session_factory)
+        event_writer.start()
+        app.state.cluster_event_writer = event_writer
+
+        # Tail every linked peer's firehose: route control events (upload halts)
+        # to the local registry, and deliver/persist the rest so this node holds a
+        # complete cluster-wide event log.
+        from app.cluster.halt import apply_halt_event
+
+        def _on_peer_event(ev):
+            if ev.get("kind") == "control":
+                apply_halt_event(ev)
+                event_bus.ingest(ev)  # live UI visibility; not persisted
+                return
+            event_bus.ingest(ev)
+            event_writer.submit(ev)
+
+        firehose = ClusterFirehoseConsumer(
+            session_factory, settings.node_id, on_event=_on_peer_event
+        )
+        if _cluster_runtime_enabled:
+            firehose.start()
+        app.state.cluster_firehose = firehose
+
+        # Non-master nodes bootstrap into the mesh on a background thread so a
+        # slow or unreachable master never blocks startup.
+        if _cluster_runtime_enabled and settings.node_role != "master" and settings.master_url:
+            import threading as _threading
+            from app.cluster.membership import join_cluster
+            _threading.Thread(
+                target=join_cluster, args=(settings, session_factory),
+                name="cluster-join", daemon=True,
+            ).start()
         storage_root().mkdir(parents=True, exist_ok=True)
         # Serialize first-run admin creation across worker processes: without
         # this, every worker's lifespan passes the "no user yet" check and races
@@ -180,6 +244,13 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
             yield
         finally:
             _shutdown_backend_workers(app)
+            firehose_consumer = getattr(app.state, "cluster_firehose", None)
+            if firehose_consumer is not None:
+                firehose_consumer.stop()
+            writer = getattr(app.state, "cluster_event_writer", None)
+            if writer is not None:
+                writer.stop()
+            event_bus.bind_sink(None)
             _log.info("application shutdown complete")
 
     # Pure ASGI middleware — never touches the receive callable so large streaming

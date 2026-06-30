@@ -7,6 +7,7 @@ import type {
   StorageDetails,
   AdminUser,
   AuditResponse,
+  ClusterAuditResponse,
   BackendLogsResponse,
   BulkPreview,
   BulkAction,
@@ -43,8 +44,13 @@ export const adminService = {
   audit: (params: { limit?: number; offset?: number; q?: string; action?: string }) =>
     api.get<AuditResponse>("/audit/", { query: params }),
 
+  // Cluster-wide event log (aggregated from every node; server-filterable).
+  clusterAudit: (params: {
+    limit?: number; offset?: number; q?: string; action?: string; kind?: string; server?: string;
+  }) => api.get<ClusterAuditResponse>("/audit/cluster", { query: params }),
+
   // Backend
-  backendLogs: (params: { limit?: number; q?: string; level?: string }) =>
+  backendLogs: (params: { limit?: number; q?: string; level?: string; server?: string }) =>
     api.get<BackendLogsResponse>("/admin/backend/logs", { query: params }),
   restartWorkers: () => api.post<{ status: string; jobs: string[] }>("/admin/backend/restart-workers"),
 

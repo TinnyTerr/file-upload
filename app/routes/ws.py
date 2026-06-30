@@ -151,6 +151,17 @@ def require_cluster_token(request: Request) -> AppState:
     return state
 
 
+@admin_router.get("/node-logs")
+def node_logs(q: str | None = None, level: str | None = None, limit: int = 200,
+              _state: AppState = Depends(require_cluster_token)) -> dict:
+    """This node's backend logs, authenticated by the cluster token so a peer's
+    admin can view them through the cluster backend-logs server filter."""
+    from app.observability.log_buffer import query_backend_logs
+
+    limit = max(1, min(limit, 1000))
+    return query_backend_logs(q=q, level=level, limit=limit)
+
+
 @admin_router.get("/events")
 def poll_events(request: Request, after: int = 0, limit: int = 200,
                 _state: AppState = Depends(require_cluster_token)) -> dict:

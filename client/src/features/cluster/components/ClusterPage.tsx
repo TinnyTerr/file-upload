@@ -1,5 +1,8 @@
 import { useState } from "react";
-import { Network, Server, Plus, Trash2, RotateCcw, Eye, ShieldCheck, Radio } from "lucide-react";
+import {
+  Network, Server, Plus, Trash2, RotateCcw, Eye, ShieldCheck, Radio,
+  Crown, Archive, HardDrive, PauseCircle, Database,
+} from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -8,9 +11,76 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
 import { CopyButton } from "@/components/ui/copy-button";
-import { useClusterNodes, useClusterToken } from "../hooks/useCluster";
+import { useClusterNodes, useClusterSelf, useClusterToken } from "../hooks/useCluster";
+import type { ClusterHalt } from "../types";
 import { useDialogs } from "@/providers/DialogProvider";
 import { formatDate, relativeTime } from "@/lib/time";
+import { formatBytes } from "@/lib/bytes";
+
+function haltLabel(scope: string): string {
+  if (scope === "global") return "All uploads halted";
+  if (scope.startsWith("user:")) return `Uploads halted for user ${scope.slice(5)}`;
+  return `Halted: ${scope}`;
+}
+
+function ThisServerCard() {
+  const { data, isLoading } = useClusterSelf();
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Database className="size-4 text-primary" />
+          This server
+        </CardTitle>
+        <CardDescription>This node's identity, capacity and any active upload halts.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {isLoading || !data ? (
+          <Skeleton className="h-20 w-full" />
+        ) : (
+          <>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-medium">{data.name}</span>
+              {data.is_master ? (
+                <Badge variant="default" className="gap-1"><Crown className="size-3" /> master</Badge>
+              ) : (
+                <Badge variant="secondary">node</Badge>
+              )}
+              <Badge variant={data.archive_enabled ? "success" : "secondary"} className="gap-1">
+                <Archive className="size-3" /> archival {data.archive_enabled ? "on" : "off"}
+              </Badge>
+              <Badge variant="outline">{data.replication_mode}</Badge>
+            </div>
+            <p className="font-mono text-xs text-muted-foreground">{data.node_id}</p>
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <HardDrive className="size-4" />
+              {formatBytes(data.used_bytes)} stored · {formatBytes(data.disk_free_bytes)} free of{" "}
+              {formatBytes(data.disk_total_bytes)}
+            </div>
+            <HaltList halts={data.halts} />
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function HaltList({ halts }: { halts: ClusterHalt[] }) {
+  if (!halts.length) {
+    return <p className="text-xs text-muted-foreground/70">No active upload halts.</p>;
+  }
+  return (
+    <ul className="space-y-1">
+      {halts.map((h) => (
+        <li key={h.scope} className="flex items-center gap-2 rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-xs">
+          <PauseCircle className="size-3.5 text-warning" />
+          <span>{haltLabel(h.scope)}</span>
+          <span className="text-muted-foreground">· until {new Date(h.until * 1000).toLocaleTimeString()}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 function LocalTokenCard() {
   const { reveal, rotate } = useClusterToken();
@@ -178,20 +248,33 @@ function LinkedNodesCard() {
               >
                 <Server className="size-4 shrink-0 text-muted-foreground" />
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="truncate text-sm font-medium">{node.name}</span>
                     {node.active ? (
                       <Badge variant="success">active</Badge>
                     ) : (
-                      <Badge variant="secondary">inactive</Badge>
+                      <Badge variant="destructive">unreachable</Badge>
                     )}
+                    {node.is_master && (
+                      <Badge variant="default" className="gap-1"><Crown className="size-3" /> master</Badge>
+                    )}
+                    <Badge variant={node.archive_enabled ? "success" : "secondary"} className="gap-1">
+                      <Archive className="size-3" /> {node.archive_enabled ? "archival" : "no archival"}
+                    </Badge>
+                    <Badge variant="outline">{node.replication_mode}</Badge>
                   </div>
                   <p className="mt-0.5 truncate text-xs text-muted-foreground">
                     {node.base_url} · token {node.token_preview}
                   </p>
+                  {node.disk_total_bytes > 0 && (
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {formatBytes(node.used_bytes)} stored · {formatBytes(node.disk_free_bytes)} free of{" "}
+                      {formatBytes(node.disk_total_bytes)}
+                    </p>
+                  )}
                   <p className="mt-0.5 text-xs text-muted-foreground/70">
-                    Linked {node.created_at ? formatDate(node.created_at) : "—"} · last seen{" "}
-                    {relativeTime(node.last_seen_at)}
+                    Linked {node.created_at ? formatDate(node.created_at) : "—"} · heartbeat{" "}
+                    {relativeTime(node.last_heartbeat_at ?? node.last_seen_at)}
                   </p>
                 </div>
                 <Button
@@ -267,6 +350,7 @@ export function ClusterPage() {
         </div>
       </div>
 
+      <ThisServerCard />
       <LocalTokenCard />
       <LinkedNodesCard />
       <ConnectingInfoCard />

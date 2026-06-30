@@ -154,6 +154,7 @@ def init_db(engine: Engine) -> None:
     from app.models import remote_upload_job as _remote_upload_job  # noqa: F401
     from app.models import directory_link as _directory_link  # noqa: F401
     from app.models import cluster_node as _cluster_node  # noqa: F401
+    from app.models import cluster_event as _cluster_event  # noqa: F401
 
     # create_all() does a non-atomic check-then-create: it inspects existing
     # tables, then issues bare CREATE TABLE. When multiple worker processes call
@@ -196,6 +197,15 @@ _ADDED_COLUMNS = [
     ("directories", "saved_from_directory_id", "INTEGER"),
     ("directories", "key_check_blob", "TEXT"),
     ("links", "hide_uploader", "BOOLEAN NOT NULL DEFAULT 0"),
+    # cluster_nodes: capabilities/identity learned at join + refreshed by heartbeat
+    ("cluster_nodes", "node_id", "TEXT"),
+    ("cluster_nodes", "is_master", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("cluster_nodes", "archive_enabled", "BOOLEAN NOT NULL DEFAULT 1"),
+    ("cluster_nodes", "replication_mode", "TEXT NOT NULL DEFAULT 'full'"),
+    ("cluster_nodes", "disk_total_bytes", "BIGINT NOT NULL DEFAULT 0"),
+    ("cluster_nodes", "disk_free_bytes", "BIGINT NOT NULL DEFAULT 0"),
+    ("cluster_nodes", "used_bytes", "BIGINT NOT NULL DEFAULT 0"),
+    ("cluster_nodes", "last_heartbeat_at", "DATETIME"),
 ]
 
 _PERMISSION_COLUMNS = (

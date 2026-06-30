@@ -293,14 +293,49 @@ def update_storage_settings(
 
 @router.get("/backend/logs")
 def backend_logs(
+    request: Request,
     q: str | None = Query(None, max_length=200),
     level: str | None = Query(None, max_length=16),
     limit: int = Query(200, ge=1, le=1000),
+    server: str | None = Query(None, max_length=64),
     _master: User = Depends(require_master),
+    db: Session = Depends(get_db),
 ) -> dict:
+    """Backend logs for this node, or — when ``server`` names a peer — proxied
+    from that peer over the cluster token. Backend logs live in each node's own
+    process buffer (never replicated), so cross-node viewing is fetch-on-demand.
+    Always returns the ``servers`` list so the UI can offer the filter."""
     from app.observability.log_buffer import query_backend_logs
+    from app.models.cluster_node import ClusterNode
 
-    return query_backend_logs(q=q, level=level, limit=limit)
+    state = request.app.state.app_state
+    servers = [{"node_id": state.node_id, "node_name": state.node_name}]
+    for n in db.query(ClusterNode).filter(ClusterNode.active == True).all():  # noqa: E712
+        if n.node_id:
+            servers.append({"node_id": n.node_id, "node_name": n.name})
+
+    if server and server != state.node_id:
+        node = db.query(ClusterNode).filter(ClusterNode.node_id == server).one_or_none()
+        if node is None or not node.base_url or not node.token:
+            raise HTTPException(404, detail="unknown or unreachable server")
+        from app.cluster.http import ClusterHTTPError, get_json
+        params = {"limit": limit}
+        if q:
+            params["q"] = q
+        if level:
+            params["level"] = level
+        qs = "&".join(f"{k}={v}" for k, v in params.items())
+        try:
+            remote = get_json(
+                f"{node.base_url.rstrip('/')}/admin/cluster/node-logs?{qs}",
+                node.token, timeout=10.0,
+            )
+        except ClusterHTTPError as exc:
+            raise HTTPException(502, detail=f"could not reach server: {exc}")
+        return {**(remote or {}), "servers": servers, "server": server}
+
+    result = query_backend_logs(q=q, level=level, limit=limit)
+    return {**result, "servers": servers, "server": state.node_id}
 
 
 @router.post("/backend/restart-workers")

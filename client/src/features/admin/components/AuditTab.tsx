@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Search, ShieldCheck, ShieldAlert, ChevronLeft, ChevronRight, ScrollText } from "lucide-react";
+import { Search, ShieldCheck, ShieldAlert, ChevronLeft, ChevronRight, ScrollText, Server } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -7,10 +7,15 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
-import { useAudit } from "../hooks/useAdminData";
+import { useAudit, useClusterAudit } from "../hooks/useAdminData";
 import { formatDateTime } from "@/lib/time";
 
 const PAGE = 50;
+
+// Sentinel server selections. "local" = this node's tamper-evident audit log;
+// "all" = the cluster-wide event log across every node; anything else = one node.
+const LOCAL = "local";
+const ALL = "all";
 
 function actionVariant(action: string): "success" | "destructive" | "warning" | "secondary" {
   if (action.includes("created")) return "success";
@@ -22,29 +27,61 @@ function actionVariant(action: string): "success" | "destructive" | "warning" | 
 export function AuditTab() {
   const [q, setQ] = useState("");
   const [action, setAction] = useState("all");
+  const [server, setServer] = useState(LOCAL);
   const [page, setPage] = useState(0);
 
-  const { data, isLoading, isPlaceholderData } = useAudit({
+  const isLocal = server === LOCAL;
+
+  const local = useAudit({
     limit: PAGE,
     offset: page * PAGE,
     q: q || undefined,
     action: action === "all" ? undefined : action,
   });
 
-  const pages = data ? Math.ceil(data.filtered_count / PAGE) : 0;
+  // Always fetch the cluster view: it powers the server dropdown options, and the
+  // table itself whenever a specific/all server is selected.
+  const cluster = useClusterAudit(
+    {
+      limit: PAGE,
+      offset: page * PAGE,
+      q: q || undefined,
+      action: action === "all" ? undefined : action,
+      server: server === ALL || server === LOCAL ? undefined : server,
+    },
+    true,
+  );
+
+  const view = isLocal ? local : cluster;
+  const isLoading = view.isLoading;
+  const isPlaceholderData = view.isPlaceholderData;
+  const filteredCount = view.data?.filtered_count ?? 0;
+  const pages = Math.ceil(filteredCount / PAGE);
+
+  // Action options + server options come from whichever query has them.
+  const actions = (isLocal ? local.data?.actions : cluster.data?.actions) ?? [];
+  const servers = cluster.data?.servers ?? [];
+
+  const resetPage = () => setPage(0);
 
   return (
     <div className="space-y-4">
-      {data && !data.chain_ok && (
+      {isLocal && local.data && !local.data.chain_ok && (
         <div className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
           <ShieldAlert className="size-4 shrink-0" />
           Audit log hash-chain is broken — possible tampering detected.
         </div>
       )}
-      {data && data.chain_ok && (
+      {isLocal && local.data && local.data.chain_ok && (
         <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 px-4 py-2.5 text-sm text-success">
           <ShieldCheck className="size-4 shrink-0" />
-          Audit chain verified · {data.total_count} entries
+          Audit chain verified · {local.data.total_count} entries
+        </div>
+      )}
+      {!isLocal && (
+        <div className="flex items-center gap-2 rounded-lg border border-border bg-secondary/20 px-4 py-2.5 text-sm text-muted-foreground">
+          <Server className="size-4 shrink-0" />
+          Cluster-wide event log (aggregated from all nodes; not hash-chain verified — switch to “This server” for the tamper-evident log).
         </div>
       )}
 
@@ -55,16 +92,30 @@ export function AuditTab() {
             className="pl-8"
             placeholder="Search actor, action, target, IP…"
             value={q}
-            onChange={(e) => { setQ(e.target.value); setPage(0); }}
+            onChange={(e) => { setQ(e.target.value); resetPage(); }}
           />
         </div>
-        <Select value={action} onValueChange={(v) => { setAction(v); setPage(0); }}>
+        <Select value={server} onValueChange={(v) => { setServer(v); resetPage(); }}>
+          <SelectTrigger className="w-52">
+            <SelectValue placeholder="Server" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={LOCAL}>This server (verified)</SelectItem>
+            <SelectItem value={ALL}>All servers</SelectItem>
+            {servers.map((s) => (
+              <SelectItem key={s.node_id} value={s.node_id}>
+                {s.node_name || s.node_id}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={action} onValueChange={(v) => { setAction(v); resetPage(); }}>
           <SelectTrigger className="w-48">
             <SelectValue placeholder="All actions" />
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All actions</SelectItem>
-            {data?.actions.map((a) => (
+            {actions.map((a) => (
               <SelectItem key={a} value={a}>
                 {a}
               </SelectItem>
@@ -75,7 +126,7 @@ export function AuditTab() {
 
       {isLoading ? (
         <Skeleton className="h-80 w-full" />
-      ) : !data || data.entries.length === 0 ? (
+      ) : !view.data || view.data.entries.length === 0 ? (
         <EmptyState icon={ScrollText} title="No audit entries" />
       ) : (
         <>
@@ -84,6 +135,7 @@ export function AuditTab() {
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-16">ID</TableHead>
+                  {!isLocal && <TableHead>Server</TableHead>}
                   <TableHead>Actor</TableHead>
                   <TableHead>Action</TableHead>
                   <TableHead>Target</TableHead>
@@ -92,25 +144,35 @@ export function AuditTab() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {data.entries.map((e) => (
-                  <TableRow key={e.id}>
-                    <TableCell className="font-mono text-xs text-muted-foreground">{e.id}</TableCell>
-                    <TableCell className="font-medium">{e.actor}</TableCell>
-                    <TableCell>
-                      <Badge variant={actionVariant(e.action)}>{e.action}</Badge>
-                    </TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">{e.target ?? "—"}</TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground">{e.ip ?? "—"}</TableCell>
-                    <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{formatDateTime(e.created_at)}</TableCell>
-                  </TableRow>
-                ))}
+                {isLocal
+                  ? local.data!.entries.map((e) => (
+                      <TableRow key={e.id}>
+                        <TableCell className="font-mono text-xs text-muted-foreground">{e.id}</TableCell>
+                        <TableCell className="font-medium">{e.actor}</TableCell>
+                        <TableCell><Badge variant={actionVariant(e.action)}>{e.action}</Badge></TableCell>
+                        <TableCell className="font-mono text-xs text-muted-foreground">{e.target ?? "—"}</TableCell>
+                        <TableCell className="font-mono text-xs text-muted-foreground">{e.ip ?? "—"}</TableCell>
+                        <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{formatDateTime(e.created_at)}</TableCell>
+                      </TableRow>
+                    ))
+                  : cluster.data!.entries.map((e) => (
+                      <TableRow key={`${e.node_id}-${e.id}`}>
+                        <TableCell className="font-mono text-xs text-muted-foreground">{e.id}</TableCell>
+                        <TableCell className="text-xs">{e.node_name || e.node_id}</TableCell>
+                        <TableCell className="font-medium">{e.actor}</TableCell>
+                        <TableCell><Badge variant={actionVariant(e.action)}>{e.action}</Badge></TableCell>
+                        <TableCell className="font-mono text-xs text-muted-foreground">{e.target ?? "—"}</TableCell>
+                        <TableCell className="font-mono text-xs text-muted-foreground">{e.ip ?? "—"}</TableCell>
+                        <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{e.ts ? formatDateTime(e.ts) : "—"}</TableCell>
+                      </TableRow>
+                    ))}
               </TableBody>
             </Table>
           </div>
 
           <div className="flex items-center justify-between text-sm">
             <span className="text-muted-foreground">
-              Page {page + 1} of {Math.max(1, pages)} · {data.filtered_count} results
+              Page {page + 1} of {Math.max(1, pages)} · {filteredCount} results
             </span>
             <div className="flex gap-1">
               <Button variant="outline" size="sm" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>

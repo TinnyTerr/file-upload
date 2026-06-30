@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String
+from sqlalchemy import BigInteger, Boolean, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base, UTCDateTime
@@ -30,8 +30,20 @@ class ClusterNode(Base):
     # clients except masked.
     token: Mapped[str] = mapped_column(String(512), nullable=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # The remote server's stable identity + capabilities, learned at join time and
+    # refreshed by heartbeats. Used for replication routing and failover.
+    node_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_master: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    archive_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    replication_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="full"
+    )
+    disk_total_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    disk_free_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    used_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     created_by_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("users.id"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_utcnow)
     last_seen_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)

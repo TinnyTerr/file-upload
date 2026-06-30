@@ -106,11 +106,28 @@ def validate_global_storage_cap(db: Session, cap_bytes: int) -> None:
         )
 
 
+def cluster_used_storage_bytes(db: Session) -> int:
+    """Cluster-wide physical usage: this node's bytes plus every active peer's
+    last-reported usage (refreshed by the heartbeat job). Lets the global storage
+    cap apply across the whole cluster so every node enforces — and displays — the
+    same figure, rather than each node only seeing its own slice."""
+    from app.models.cluster_node import ClusterNode
+
+    local = used_storage_bytes(db)
+    peer_total = int(
+        db.query(func.coalesce(func.sum(ClusterNode.used_bytes), 0))
+        .filter(ClusterNode.active == True)  # noqa: E712
+        .scalar() or 0
+    )
+    return local + peer_total
+
+
 def enforce_global_upload_capacity(db: Session, incoming_bytes: int) -> None:
     from fastapi import HTTPException
 
     settings = ensure_storage_settings(db)
-    if used_storage_bytes(db) + incoming_bytes > settings.global_storage_quota_bytes:
+    # Cluster-wide so the global cap is a true cluster total, not per-node.
+    if cluster_used_storage_bytes(db) + incoming_bytes > settings.global_storage_quota_bytes:
         raise HTTPException(413, detail="upload would exceed global storage allocation")
     try:
         if shutil.disk_usage(str(storage_root())).free < incoming_bytes:

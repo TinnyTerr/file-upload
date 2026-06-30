@@ -175,10 +175,15 @@ def remote_upload(
     job = RemoteUploadJob(owner_id=user.id, url=body.url, status="running")
     db.add(job)
     db.flush()
+    from app.routes.files import _block_if_halted
+    from app.cluster.halt import broadcast_halt, user_scope
+
+    _block_if_halted(user)
     try:
         meta = download_remote_url(body.url, work, max_bytes=perm.max_file_bytes)
         size = int(meta["size_bytes"])
         if _used_bytes(db, user.id) + size > perm.quota_bytes:
+            broadcast_halt(user_scope(user.id), reason="user quota exceeded")
             raise HTTPException(413, detail="remote upload would exceed your quota")
         result = _finalize_stored_file(
             request=request,

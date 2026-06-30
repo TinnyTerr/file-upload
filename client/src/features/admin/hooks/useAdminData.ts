@@ -45,7 +45,22 @@ export function useAudit(params: { limit: number; offset: number; q?: string; ac
   });
 }
 
-export function useBackendLogs(params: { limit: number; q?: string; level?: string }, autoRefresh: boolean) {
+export function useClusterAudit(
+  params: { limit: number; offset: number; q?: string; action?: string; server?: string },
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["admin", "cluster-audit", params],
+    queryFn: () => adminService.clusterAudit(params),
+    placeholderData: keepPreviousData,
+    enabled,
+  });
+}
+
+export function useBackendLogs(
+  params: { limit: number; q?: string; level?: string; server?: string },
+  autoRefresh: boolean,
+) {
   return useQuery({
     queryKey: ["admin", "logs", params],
     queryFn: () => adminService.backendLogs(params),

@@ -24,6 +24,14 @@ class AppState:
     # Current cluster/monitoring firehose token. Seeded from settings; may be
     # rotated at runtime by a master via the admin API.
     cluster_token: str = ""
+    # This node's stable identity within the cluster (mirrors settings; copied
+    # here so request handlers and the event bus can read it without re-parsing).
+    node_id: str = ""
+    node_name: str = ""
+    # Whether cluster background work (firehose consumer, heartbeat, replication)
+    # may run. Off for in-memory DBs (test-only) whose single shared connection
+    # can't safely take writes from background threads.
+    cluster_enabled: bool = False
 
 
 def get_state(request: Request) -> AppState:

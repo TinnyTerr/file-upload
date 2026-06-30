@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import os
 import secrets
+import socket
+import uuid
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
@@ -24,6 +26,30 @@ class Settings(BaseSettings):
     # read access to ALL events regardless of user or password, so it lives only
     # in this server-side config file and is never tied to a user login.
     cluster_token: str = ""
+    # ── cluster node identity ──────────────────────────────────────────────────
+    # Stable identifier for THIS server within the cluster. Auto-generated and
+    # persisted on first run; used to tag every event/row with its origin node.
+    node_id: str = ""
+    # Human-readable label for this node (defaults to the hostname).
+    node_name: str = ""
+    # "master" (initial source of truth every node connects to) or "node".
+    node_role: str = "master"
+    # This node's externally-reachable base URL, advertised to peers so they can
+    # reach back (tail our firehose, fetch blobs). Required to join a cluster.
+    node_url: str = ""
+    # For non-master nodes: the master's base URL + cluster token used to
+    # bootstrap/join the mesh.
+    master_url: str = ""
+    master_token: str = ""
+    # Whether this server retains archived (cold-compressed) blobs. Disable on
+    # disk-limited nodes — archived files then live only on archival nodes and are
+    # fetched on demand. This is the one intentional per-server difference.
+    archive_enabled: bool = True
+    # "full" — store every blob locally; "cache" — keep only an LRU set of hot
+    # blobs (for disk-limited nodes) and fetch the rest on demand from peers.
+    replication_mode: str = "full"
+    # LRU budget in bytes for replication_mode="cache" (0 = derive from free disk).
+    cache_max_bytes: int = 0
 
 
 def _parse_bool(value: str | None, *, default: bool = False) -> bool:
@@ -42,6 +68,8 @@ def _generate_file(path: Path) -> None:
     secret_key = secrets.token_urlsafe(32)
     master_key_b64 = base64.b64encode(secrets.token_bytes(32)).decode()
     cluster_token = secrets.token_urlsafe(32)
+    node_id = uuid.uuid4().hex
+    node_name = socket.gethostname() or node_id[:8]
     # Defaults to prod (Secure cookies, etc.) for real deployments. Tests set
     # FILEUPLOAD_DEFAULT_APP_ENV=dev so the HTTP test client can round-trip the
     # session cookie that prod's Secure flag would otherwise withhold.
@@ -51,6 +79,11 @@ def _generate_file(path: Path) -> None:
         f"SECRET_KEY={secret_key}\n"
         f"MASTER_KEY_B64={master_key_b64}\n"
         f"CLUSTER_TOKEN={cluster_token}\n"
+        f"NODE_ID={node_id}\n"
+        f"NODE_NAME={node_name}\n"
+        f"NODE_ROLE=master\n"
+        f"ARCHIVE_ENABLED=true\n"
+        f"REPLICATION_MODE=full\n"
         f"TRUST_PROXY=false\n"
     )
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -118,6 +151,20 @@ def load_settings(config_path: str | None = None) -> Settings:
             set_env_value(path, "CLUSTER_TOKEN", cluster_token)
         except OSError:
             pass
+    # Backfill a stable node identity for configs predating clustering, persisting
+    # it so this node's id is consistent across restarts and to its peers.
+    node_id = raw.get("NODE_ID", "").strip()
+    if not node_id:
+        node_id = uuid.uuid4().hex
+        try:
+            set_env_value(path, "NODE_ID", node_id)
+        except OSError:
+            pass
+    node_name = raw.get("NODE_NAME", "").strip() or (socket.gethostname() or node_id[:8])
+    try:
+        cache_max_bytes = int(raw.get("CACHE_MAX_BYTES", "0") or "0")
+    except ValueError:
+        cache_max_bytes = 0
     return Settings(
         app_env=raw.get("APP_ENV", "dev"),
         database_url=raw.get("DATABASE_URL", "sqlite:///./data/app.db"),
@@ -127,6 +174,15 @@ def load_settings(config_path: str | None = None) -> Settings:
         trust_proxy=_parse_bool(raw.get("TRUST_PROXY"), default=False),
         allowed_hosts=raw.get("ALLOWED_HOSTS", ""),
         cluster_token=cluster_token,
+        node_id=node_id,
+        node_name=node_name,
+        node_role=(raw.get("NODE_ROLE", "master").strip().lower() or "master"),
+        node_url=raw.get("NODE_URL", "").strip().rstrip("/"),
+        master_url=raw.get("MASTER_URL", "").strip().rstrip("/"),
+        master_token=raw.get("MASTER_TOKEN", "").strip(),
+        archive_enabled=_parse_bool(raw.get("ARCHIVE_ENABLED"), default=True),
+        replication_mode=(raw.get("REPLICATION_MODE", "full").strip().lower() or "full"),
+        cache_max_bytes=cache_max_bytes,
     )
 
 

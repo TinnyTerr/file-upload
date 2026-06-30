@@ -6,12 +6,16 @@ import logging
 import os
 import secrets as _secrets
 import shutil
+import tempfile
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from starlette.requests import ClientDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy import func
@@ -136,13 +140,54 @@ def _prepare_upload(
     return encryption_mode, compress, is_permanent, temp_days, randomize_filename, directory, perm
 
 
+def _maybe_replicate_file(request: Request, file_id: int) -> None:
+    """Announce + replicate a freshly-committed upload to peers, in the background.
+
+    Runs off-request so cluster latency never slows the uploader, and is a no-op
+    when clustering is disabled or there are no peers. The replication itself
+    implements the announce-the-id protocol (reserve → conflict ⇒ rebase to
+    master → otherwise push rows)."""
+    state = request.app.state.app_state
+    if not getattr(state, "cluster_enabled", False):
+        return
+    import threading
+    from app.cluster.replication import replicate_file
+
+    threading.Thread(
+        target=replicate_file,
+        args=(state.settings, state.session_factory, file_id),
+        name=f"replicate-file-{file_id}", daemon=True,
+    ).start()
+
+
+def _block_if_halted(user: User) -> None:
+    """Reject an upload while a cluster-wide or per-user halt is in effect.
+
+    Halts are raised (with a TTL) when an upload pushes a user over quota or the
+    cluster over its global storage/disk limit, and gossiped to every node — so
+    this guard stops further uploads cluster-wide until the window expires."""
+    from app.cluster.halt import halt_registry
+
+    until = halt_registry.active_until(user.id)
+    if until is not None:
+        retry = max(1, int(until - time.time()))
+        raise HTTPException(
+            status_code=423,
+            detail="uploads are temporarily halted (over quota or disk limit)",
+            headers={"Retry-After": str(retry)},
+        )
+
+
 def _precheck_declared_size(db: Session, user: User, perm, declared: int) -> None:
     """Reject obviously-too-big uploads up front, before any bytes are stored."""
+    _block_if_halted(user)
     if declared > perm.max_file_bytes + _REQUEST_OVERHEAD_ALLOWANCE:
         _log.warning("upload precheck rejected user_id=%s reason=max_file declared_bytes=%s", user.id, declared)
         raise HTTPException(413, detail="file exceeds max file size")
     if _used_bytes(db, user.id) + declared > perm.quota_bytes + _REQUEST_OVERHEAD_ALLOWANCE:
         _log.warning("upload precheck rejected user_id=%s reason=user_quota declared_bytes=%s", user.id, declared)
+        from app.cluster.halt import broadcast_halt, user_scope
+        broadcast_halt(user_scope(user.id), reason="user quota exceeded")
         raise HTTPException(413, detail="upload would exceed your quota")
 
 
@@ -182,18 +227,23 @@ def _finalize_stored_file(
     base_path = storage_root() / rel_path
     directory_id = directory.id if directory is not None else None
 
+    from app.cluster.halt import GLOBAL, broadcast_halt, user_scope
+
     try:
         plain_hashes = hash_file(work_path)
         enforce_global_upload_capacity(db, stored)
     except HTTPException:
         work_path.unlink(missing_ok=True)
         _log.warning("upload finalize rejected user_id=%s reason=global_storage stored_bytes=%s", user.id, stored)
+        # Global storage/disk threatened → halt everyone cluster-wide for a TTL.
+        broadcast_halt(GLOBAL, reason="global storage/disk capacity reached")
         raise
     # Lock the user row to serialize concurrent quota evaluations
     db.query(User).filter_by(id=user.id).with_for_update().first()
     if _used_bytes(db, user.id) + stored > perm.quota_bytes:
         work_path.unlink(missing_ok=True)
         _log.warning("upload finalize rejected user_id=%s reason=user_quota stored_bytes=%s", user.id, stored)
+        broadcast_halt(user_scope(user.id), reason="user quota exceeded")
         raise HTTPException(413, detail="upload would exceed your quota")
 
     size_bytes = stored
@@ -336,6 +386,8 @@ def _finalize_stored_file(
 
     base_url = _file_url(request, slug)
     raw_url = base_url + "/raw"
+
+    _maybe_replicate_file(request, file_obj.id)
 
     return {
         "file_id": file_obj.id,
@@ -940,6 +992,87 @@ def list_files(
         .all()
     )
     return {"files": _serialize_files(request, db, files)}
+
+
+@router.get("/files/batch-zip")
+def batch_zip(
+    request: Request,
+    ids: list[int] = Query(default=[]),
+    user: User = Depends(require_active_user),
+    db: Session = Depends(get_db),
+):
+    """Stream a single zip of several of the caller's files in one request.
+
+    This is the batch-download path: the client selects multiple files and gets
+    one archive instead of firing a download per file. Reuses the directory-zip
+    member pipeline (decompress-then-decrypt, streamed from disk via zf.write) and
+    collision-safe arcnames. Client-side E2E files are skipped (the server can't
+    assemble ciphertext it has no key for). A master may bundle any file; other
+    users only their own.
+
+    Note: members not stored on this node are not yet fetched cross-node — that
+    arrives with the blob-replication layer (subsystem D)."""
+    from app.routes.directories import _member_source, _safe_arcname
+
+    if not ids:
+        raise HTTPException(400, detail="no file ids given")
+    # De-dupe while preserving the caller's order.
+    wanted = list(dict.fromkeys(ids))
+    if len(wanted) > 500:
+        raise HTTPException(400, detail="too many files in one batch (max 500)")
+
+    files = db.query(FileObject).filter(FileObject.id.in_(wanted)).all()
+    by_id = {f.id: f for f in files}
+    is_master = user.role == "master"
+
+    selected: list[FileObject] = []
+    for fid in wanted:
+        f = by_id.get(fid)
+        if f is None:
+            continue
+        if not is_master and f.owner_id != user.id:
+            raise HTTPException(403, detail=f"not your file: {fid}")
+        if f.encryption_mode == "client":
+            # E2E members can only be assembled in the browser.
+            continue
+        selected.append(f)
+
+    if not selected:
+        raise HTTPException(404, detail="no downloadable files in selection")
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".zip")
+    os.close(fd)
+    tmp = Path(tmp_path)
+    try:
+        seen: set[str] = set()
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as zf:
+            for f in selected:
+                name = _safe_arcname(f.original_filename, seen)
+                src, is_temp = _member_source(request, f)
+                try:
+                    zf.write(src, name)
+                finally:
+                    if is_temp:
+                        src.unlink(missing_ok=True)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+    record(db, actor=user.username, action="files.batch_downloaded",
+           target=f"files:{len(selected)}", ip=client_ip(request))
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(500, detail="could not record download")
+
+    return FileResponse(
+        str(tmp),
+        media_type="application/zip",
+        filename="files.zip",
+        background=BackgroundTask(lambda p=tmp: p.unlink(missing_ok=True)),
+    )
 
 
 @router.get("/admin/files")

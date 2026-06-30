@@ -5,12 +5,26 @@ import { errorMessage } from "@/config/api";
 import type { NewClusterNode } from "../types";
 
 const NODES_QUERY = ["cluster", "nodes"] as const;
+const SELF_QUERY = ["cluster", "self"] as const;
+
+export function useClusterSelf() {
+  // Poll so node capacity + active halts stay reasonably fresh on the dashboard.
+  return useQuery({
+    queryKey: SELF_QUERY,
+    queryFn: clusterService.self,
+    refetchInterval: 15000,
+  });
+}
 
 export function useClusterNodes() {
   const qc = useQueryClient();
   const invalidate = () => qc.invalidateQueries({ queryKey: NODES_QUERY });
 
-  const list = useQuery({ queryKey: NODES_QUERY, queryFn: clusterService.listNodes });
+  const list = useQuery({
+    queryKey: NODES_QUERY,
+    queryFn: clusterService.listNodes,
+    refetchInterval: 15000,
+  });
 
   const link = useMutation({
     mutationFn: (node: NewClusterNode) => clusterService.linkNode(node),

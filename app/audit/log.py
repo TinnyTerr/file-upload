@@ -91,11 +91,19 @@ def record(session: Session, actor: str, action: str,
         action, actor, target or "-", ip or "-",
     )
     # Fan the event out to live websocket subscribers (per-user sockets and the
-    # cluster/monitoring firehose). Best-effort and decoupled from the DB commit:
-    # the recent-events replay buffer smooths over the rare rolled-back entry.
+    # cluster/monitoring firehose), and durably mirror it into the replicated
+    # ClusterEvent table within THIS session so it commits atomically with the
+    # audited mutation (no cross-thread writer touching the same connection, and
+    # no divergence if the caller's transaction rolls back).
     try:
+        from app.cluster.event_store import row_from_event
+        from app.models.cluster_event import ClusterEvent
         from app.observability.events import event_bus
-        event_bus.publish(action=action, actor=actor, target=target, ip=ip)
+        event = event_bus.publish(action=action, actor=actor, target=target, ip=ip)
+        row = row_from_event(event)
+        if row is not None:
+            session.add(ClusterEvent(**row))
+            session.flush()
     except Exception:
         pass
     return entry

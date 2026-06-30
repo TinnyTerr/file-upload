@@ -25,13 +25,21 @@ const LEVEL_COLOR: Record<string, string> = {
 export function BackendTab() {
   const [q, setQ] = useState("");
   const [level, setLevel] = useState("all");
+  const [server, setServer] = useState("local");
   const [auto, setAuto] = useState(false);
   const restart = useRestartWorkers();
 
   const { data, isLoading } = useBackendLogs(
-    { limit: 200, q: q || undefined, level: level === "all" ? undefined : level },
+    {
+      limit: 200,
+      q: q || undefined,
+      level: level === "all" ? undefined : level,
+      server: server === "local" ? undefined : server,
+    },
     auto,
   );
+
+  const servers = data?.servers ?? [];
 
   return (
     <div className="space-y-4">
@@ -40,6 +48,20 @@ export function BackendTab() {
           <Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input className="pl-8" placeholder="Search log messages…" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
+        <Select value={server} onValueChange={setServer}>
+          <SelectTrigger className="w-44">
+            <SelectValue placeholder="Server" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="local">This server</SelectItem>
+            {/* Backend lists self first; "This server" already covers it. */}
+            {servers.slice(1).map((s) => (
+              <SelectItem key={s.node_id} value={s.node_id}>
+                {s.node_name || s.node_id}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <Select value={level} onValueChange={setLevel}>
           <SelectTrigger className="w-36">
             <SelectValue />
