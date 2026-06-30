@@ -102,8 +102,16 @@ def record(session: Session, actor: str, action: str,
         event = event_bus.publish(action=action, actor=actor, target=target, ip=ip)
         row = row_from_event(event)
         if row is not None:
-            session.add(ClusterEvent(**row))
-            session.flush()
+            # Isolate the mirror write in a SAVEPOINT: if the row ever collides on
+            # the (origin_node_id, origin_seq) unique index (e.g. a duplicated seq
+            # after a misconfigured multi-worker run), only the savepoint rolls
+            # back — the caller's transaction stays alive and its commit succeeds,
+            # so a best-effort mirror can never turn an audited mutation into a 500.
+            try:
+                with session.begin_nested():
+                    session.add(ClusterEvent(**row))
+            except Exception:
+                pass
     except Exception:
         pass
     return entry

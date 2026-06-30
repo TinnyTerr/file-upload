@@ -64,6 +64,17 @@ class EventBus:
         with self._lock:
             self._sink = sink
 
+    def seed_seq(self, value: int) -> None:
+        """Advance the seq floor to ``value`` (no-op if already higher).
+
+        Called on startup with this node's highest persisted ``origin_seq`` so the
+        sequence continues monotonically across restarts instead of resetting to
+        0 and re-minting ids that collide with already-stored cluster_events rows.
+        """
+        with self._lock:
+            if value > self._seq:
+                self._seq = value
+
     def reset(self) -> None:
         """Drop all state — used between test app instances in one process."""
         with self._lock:

@@ -184,6 +184,19 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
         event_bus.reset()
         event_bus.bind_loop(asyncio.get_running_loop())
         event_bus.bind_node(settings.node_id, settings.node_name)
+        # Resume the publish sequence from this node's highest persisted seq so
+        # restarts don't re-mint ids 1,2,3… that collide with existing
+        # cluster_events rows on the (origin_node_id, origin_seq) unique index.
+        try:
+            from sqlalchemy import func
+            from app.models.cluster_event import ClusterEvent
+            with session_factory() as _s:
+                last_seq = _s.query(
+                    func.coalesce(func.max(ClusterEvent.origin_seq), 0)
+                ).filter(ClusterEvent.origin_node_id == settings.node_id).scalar()
+            event_bus.seed_seq(int(last_seq or 0))
+        except Exception:
+            _log.exception("could not seed event seq from cluster_events")
         # Upload halts are per-process state; clear any carried over between test
         # app instances in the same interpreter.
         from app.cluster.halt import halt_registry
