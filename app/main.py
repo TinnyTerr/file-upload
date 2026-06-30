@@ -233,6 +233,26 @@ def create_app(config_path: str | None = None, database_url: str | None = None) 
             firehose.start()
         app.state.cluster_firehose = firehose
 
+        # Surface the effective cluster identity/topology config on boot so a
+        # misconfigured NODE_URL / NODE_ROLE / MASTER_URL is visible in the logs
+        # instead of silently disabling join/enroll. Secrets are reported as
+        # present/absent only, never echoed.
+        _log.info(
+            "cluster config: runtime_enabled=%s node_role=%s node_id=%s node_name=%s "
+            "node_url=%s master_url=%s cluster_token=%s master_token=%s "
+            "replication_mode=%s archive_enabled=%s",
+            _cluster_runtime_enabled,
+            settings.node_role,
+            settings.node_id,
+            settings.node_name,
+            settings.node_url or "(unset)",
+            settings.master_url or "(unset)",
+            "set" if settings.cluster_token else "(unset)",
+            "set" if settings.master_token else "(unset)",
+            settings.replication_mode,
+            settings.archive_enabled,
+        )
+
         # Non-master nodes bootstrap into the mesh on a background thread so a
         # slow or unreachable master never blocks startup.
         if _cluster_runtime_enabled and settings.node_role != "master" and settings.master_url:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import secrets
 import shutil
 from datetime import datetime, timezone
@@ -25,6 +26,8 @@ from app.storage.accounting import used_storage_bytes
 from app.storage.paths import safe_join, storage_root
 
 router = APIRouter(prefix="/cluster", tags=["cluster"])
+
+_log = logging.getLogger("app.cluster.routes")
 
 
 def _utcnow() -> datetime:
@@ -190,9 +193,15 @@ def _trigger_enroll(state: AppState, *, base_url: str, token: str) -> dict:
     Only a master issues this: enrolling makes the target treat THIS server as its
     source of truth, which is only meaningful from the master."""
     if state.settings.node_role != "master":
-        return {"status": "skipped", "reason": "this server is not a master"}
+        result = {"status": "skipped", "reason": "this server is not a master"}
+        _log.info("enroll %s: %s", base_url, result["reason"])
+        return result
     if not state.settings.node_url:
-        return {"status": "skipped", "reason": "master has no NODE_URL to advertise"}
+        result = {"status": "skipped", "reason": "master has no NODE_URL to advertise"}
+        _log.warning("enroll %s: %s", base_url, result["reason"])
+        return result
+    _log.info("enroll %s: commanding node to join master %s",
+              base_url, state.settings.node_url)
     try:
         res = cluster_http.post_json(
             f"{base_url}/cluster/enroll", token,
@@ -200,8 +209,11 @@ def _trigger_enroll(state: AppState, *, base_url: str, token: str) -> dict:
              "master_token": state.cluster_token},
             timeout=20.0,
         )
-        return res or {"status": "ok"}
+        res = res or {"status": "ok"}
+        _log.info("enroll %s: node responded %s", base_url, res)
+        return res
     except ClusterHTTPError as exc:
+        _log.warning("enroll %s: command failed: %s", base_url, exc)
         return {"status": "error", "reason": str(exc)}
 
 
