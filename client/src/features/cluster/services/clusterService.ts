@@ -1,5 +1,5 @@
 import { api } from "@/config/api";
-import type { ClusterNode, ClusterSelf, NewClusterNode } from "../types";
+import type { ClusterNode, ClusterSelf, LinkedClusterNode, NewClusterNode } from "../types";
 
 export const clusterService = {
   revealToken: () => api.get<{ token: string }>("/cluster/token").then((r) => r.token),
@@ -10,7 +10,7 @@ export const clusterService = {
 
   listNodes: () => api.get<{ nodes: ClusterNode[] }>("/cluster/nodes").then((r) => r.nodes),
 
-  linkNode: (node: NewClusterNode) => api.post<ClusterNode>("/cluster/nodes", { json: node }),
+  linkNode: (node: NewClusterNode) => api.post<LinkedClusterNode>("/cluster/nodes", { json: node }),
 
   unlinkNode: (nodeId: number) => api.delete(`/cluster/nodes/${nodeId}`),
 };

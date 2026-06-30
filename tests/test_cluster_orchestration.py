@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.cluster.digest import sync_check_job
-from app.cluster.membership import heartbeat_job, join_cluster
+from app.cluster.membership import enroll_with_master, heartbeat_job, join_cluster
 from app.cluster.replication import rebase_from_master, replicate_file
 from app.cluster.blobs import fetch_blob_from_peers
 from app.models.cluster_node import ClusterNode
@@ -75,6 +75,59 @@ def test_join_cluster_is_symmetric_and_rebases(cluster_pair, monkeypatch):
     # … and B rebased the master's canonical state on join.
     with b.session_factory() as s:
         assert s.query(FileObject).filter_by(original_filename="seed.bin").count() == 1
+
+
+# ── master-initiated enrollment: master commands a node to join + rebase ────────
+
+def test_enroll_with_master_joins_and_rebases(cluster_pair, monkeypatch):
+    a, b = cluster_pair.a, cluster_pair.b  # a = master, b = the node being enrolled
+    a.upload(name="enrolled.bin", body=b"from-master")
+    monkeypatch.setattr(b.settings, "node_role", "node")
+
+    result = enroll_with_master(b.settings, b.session_factory, a.url, a.token)
+
+    assert result["status"] == "ok" and result["rebased"] is True
+    # B linked A as master …
+    with b.session_factory() as s:
+        master = s.query(ClusterNode).filter_by(node_id=a.node_id).one_or_none()
+        assert master is not None and master.is_master is True
+    # … and pulled A's canonical state.
+    with b.session_factory() as s:
+        assert s.query(FileObject).filter_by(original_filename="enrolled.bin").count() == 1
+
+
+def test_enroll_endpoint_lets_master_command_a_node(cluster_pair, monkeypatch):
+    a, b = cluster_pair.a, cluster_pair.b
+    a.upload(name="commanded.bin", body=b"truth")
+    monkeypatch.setattr(b.settings, "node_role", "node")
+
+    # The master calls B's enroll endpoint, authed by B's own cluster token, and
+    # hands B its own coordinates to call back with.
+    r = b.client.post(
+        "/cluster/enroll",
+        json={"master_url": a.url, "master_token": a.token},
+        headers={"Authorization": f"Bearer {b.token}"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "ok"
+    with b.session_factory() as s:
+        assert s.query(FileObject).filter_by(original_filename="commanded.bin").count() == 1
+
+
+def test_enroll_endpoint_rejects_wrong_token(cluster_pair):
+    b = cluster_pair.b
+    r = b.client.post(
+        "/cluster/enroll",
+        json={"master_url": "http://node-a", "master_token": "x"},
+        headers={"Authorization": "Bearer not-the-node-token"},
+    )
+    assert r.status_code == 401
+
+
+def test_enroll_is_skipped_on_a_master_node(cluster_pair):
+    a, b = cluster_pair.a, cluster_pair.b  # b defaults to master role
+    result = enroll_with_master(b.settings, b.session_factory, a.url, a.token)
+    assert result["status"] == "skipped"
 
 
 # ── heartbeat: refreshes peer stats; marks unreachable peers stale ──────────────

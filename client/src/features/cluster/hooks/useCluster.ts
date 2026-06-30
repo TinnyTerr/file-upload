@@ -28,8 +28,19 @@ export function useClusterNodes() {
 
   const link = useMutation({
     mutationFn: (node: NewClusterNode) => clusterService.linkNode(node),
-    onSuccess: () => {
-      toast.success("Node linked");
+    onSuccess: (node) => {
+      const enroll = node.enroll;
+      if (enroll?.status === "ok") {
+        toast.success("Node linked & enrolled", {
+          description: enroll.rebased ? "Node rebased onto this master." : "Node joined; no changes to rebase.",
+        });
+      } else if (enroll?.status === "error") {
+        toast.warning("Node linked, but enrollment failed", {
+          description: enroll.reason ?? "The node could not be reached to enroll.",
+        });
+      } else {
+        toast.success("Node linked");
+      }
       invalidate();
     },
     onError: (err) => toast.error("Couldn't link node", { description: errorMessage(err) }),

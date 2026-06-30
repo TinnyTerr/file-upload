@@ -64,39 +64,43 @@ def _link_locally(session_factory: Callable[[], Any], *, node_id: str, name: str
         s.commit()
 
 
-def join_cluster(settings: Settings, session_factory: Callable[[], Any]) -> None:
-    """Bootstrap this (non-master) node into the mesh.
+def enroll_with_master(settings: Settings, session_factory: Callable[[], Any],
+                       master_url: str, master_token: str) -> dict:
+    """Join the given master and rebase this node onto it, then full-mesh with its
+    peers. Returns a status dict describing the outcome.
 
-    Joins the master, links every returned peer locally, then joins each of them
-    directly so the membership is symmetric (full mesh). Safe to run repeatedly —
-    every registration is an idempotent upsert keyed by node_id. Intended to run
-    on a background thread so a slow/unreachable master never blocks startup."""
+    Shared by two callers that supply the master coordinates differently:
+      • config-driven auto-join (``join_cluster``) reads them from this node's env;
+      • master-initiated enrollment (``POST /cluster/enroll``) is handed them by the
+        master that is commanding this node to enroll.
+
+    Safe to run repeatedly — every registration is an idempotent upsert keyed by
+    node_id, and the rebase is an overwrite of locally-diverged rows."""
     if settings.node_role == "master":
-        return
-    if not settings.master_url or not settings.master_token:
-        _log.warning("node has no MASTER_URL/MASTER_TOKEN; not joining a cluster")
-        return
+        return {"status": "skipped", "reason": "this node is a master"}
+    master_url = (master_url or "").rstrip("/")
+    if not master_url or not master_token:
+        return {"status": "error", "reason": "missing master url/token"}
     if not settings.node_url:
         _log.warning("node has no NODE_URL to advertise; not joining a cluster")
-        return
+        return {"status": "error", "reason": "node has no NODE_URL configured"}
 
     payload = self_payload(settings, session_factory)
     try:
         result = post_json(
-            f"{settings.master_url}/cluster/join", settings.master_token, payload,
-            timeout=15.0,
+            f"{master_url}/cluster/join", master_token, payload, timeout=15.0,
         )
     except ClusterHTTPError as exc:
-        _log.warning("failed to join master at %s: %s", settings.master_url, exc)
-        return
+        _log.warning("failed to join master at %s: %s", master_url, exc)
+        return {"status": "error", "reason": f"join failed: {exc}"}
 
     master_self = (result or {}).get("self", {})
     _link_locally(
         session_factory,
         node_id=master_self.get("node_id", ""),
         name=master_self.get("name", "master"),
-        base_url=settings.master_url,
-        token=settings.master_token,
+        base_url=master_url,
+        token=master_token,
         is_master=True,
         archive_enabled=master_self.get("archive_enabled", True),
         replication_mode=master_self.get("replication_mode", "full"),
@@ -121,15 +125,48 @@ def join_cluster(settings: Settings, session_factory: Callable[[], Any]) -> None
             except ClusterHTTPError as exc:
                 _log.debug("could not register with peer %s: %s",
                            peer.get("base_url"), exc)
-    _log.info("joined cluster via master %s", settings.master_url)
+    _log.info("joined cluster via master %s", master_url)
 
     # Rebase onto the master so this node starts with the cluster's canonical
     # users/files/links/etc. (the source-of-truth snapshot).
+    rebased = False
     try:
         from app.cluster.replication import rebase_from_master
-        rebase_from_master(settings, session_factory)
+        rebased = rebase_from_master(settings, session_factory)
     except Exception:
         _log.warning("initial rebase from master failed", exc_info=True)
+
+    _audit_enrolled(session_factory, master_url=master_url, rebased=rebased)
+    return {"status": "ok", "master": master_url, "rebased": rebased}
+
+
+def _audit_enrolled(session_factory: Callable[[], Any], *, master_url: str,
+                    rebased: bool) -> None:
+    """Record this node's enrollment in its own audit chain / event firehose.
+    Best-effort: an audit-mirror failure must never fail the enrollment."""
+    try:
+        from app.audit.log import record
+        with session_factory() as s:
+            record(s, actor="system", action="cluster.enrolled",
+                   target=master_url)
+            s.commit()
+    except Exception:
+        _log.debug("could not record cluster.enrolled", exc_info=True)
+
+
+def join_cluster(settings: Settings, session_factory: Callable[[], Any]) -> None:
+    """Bootstrap this (non-master) node into the mesh from its own config.
+
+    Thin wrapper over ``enroll_with_master`` using the MASTER_URL/MASTER_TOKEN
+    from this node's environment. Intended to run on a background thread so a
+    slow/unreachable master never blocks startup."""
+    if settings.node_role == "master":
+        return
+    if not settings.master_url or not settings.master_token:
+        _log.warning("node has no MASTER_URL/MASTER_TOKEN; not joining a cluster")
+        return
+    enroll_with_master(settings, session_factory,
+                       settings.master_url, settings.master_token)
 
 
 def heartbeat_job(settings: Settings, session_factory: Callable[[], Any]) -> int:

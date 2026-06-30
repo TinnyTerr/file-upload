@@ -24,6 +24,19 @@ export interface NewClusterNode {
   token: string;
 }
 
+/** Outcome of the master commanding a freshly-linked node to enroll. */
+export interface EnrollResult {
+  status: "ok" | "skipped" | "error";
+  reason?: string;
+  master?: string;
+  rebased?: boolean;
+}
+
+export interface LinkedClusterNode extends ClusterNode {
+  /** Present when this server is a master that pushed an enroll command on link. */
+  enroll?: EnrollResult;
+}
+
 export interface ClusterHalt {
   scope: string;
   until: number;

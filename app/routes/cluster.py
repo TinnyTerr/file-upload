@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 from fastapi.responses import FileResponse
 
 from app.audit.log import record
+from app.cluster import http as cluster_http
+from app.cluster.http import ClusterHTTPError
 from app.config import set_env_value
 from app.deps import AppState, client_ip, get_db, get_state, require_permission
 from app.models.cluster_node import ClusterNode
@@ -179,14 +181,43 @@ def list_nodes(_user: User = Depends(require_cluster),
     return {"nodes": [_serialize_node(n) for n in nodes]}
 
 
+def _trigger_enroll(state: AppState, *, base_url: str, token: str) -> dict:
+    """Command a freshly-linked node to enroll: join this master and rebase onto
+    it. Authenticated by the node's own cluster token (which the admin supplied
+    when linking). Best-effort — a node that is unreachable or rejects the
+    command is reported in the response, never raised, so linking still succeeds.
+
+    Only a master issues this: enrolling makes the target treat THIS server as its
+    source of truth, which is only meaningful from the master."""
+    if state.settings.node_role != "master":
+        return {"status": "skipped", "reason": "this server is not a master"}
+    if not state.settings.node_url:
+        return {"status": "skipped", "reason": "master has no NODE_URL to advertise"}
+    try:
+        res = cluster_http.post_json(
+            f"{base_url}/cluster/enroll", token,
+            {"master_url": state.settings.node_url,
+             "master_token": state.cluster_token},
+            timeout=20.0,
+        )
+        return res or {"status": "ok"}
+    except ClusterHTTPError as exc:
+        return {"status": "error", "reason": str(exc)}
+
+
 @router.post("/nodes")
 def create_node(body: CreateNodeBody,
                 request: Request,
                 _csrf=Depends(require_csrf),
                 user: User = Depends(require_cluster),
+                state: AppState = Depends(get_state),
                 db: Session = Depends(get_db)) -> dict:
     """Link this server to a remote node by supplying its base URL and cluster
-    token (passing the other server's token)."""
+    token (passing the other server's token).
+
+    If this server is a master, it then commands the node to enroll — join this
+    master and rebase onto its canonical state — so one link fully provisions the
+    node. The enroll outcome is returned under ``enroll``."""
     base_url = body.base_url.strip().rstrip("/")
     if not base_url.startswith(("http://", "https://")):
         raise HTTPException(400, detail="base_url must start with http:// or https://")
@@ -200,8 +231,15 @@ def create_node(body: CreateNodeBody,
     db.flush()
     record(db, actor=user.username, action="cluster.node_linked",
            target=f"node:{node.id}", ip=client_ip(request))
+    # Commit the link BEFORE commanding the node, so we hold no write transaction
+    # while the node calls back into /join and /export (avoids SQLite lock
+    # contention against our own open transaction).
     db.commit()
-    return _serialize_node(node)
+
+    enroll = _trigger_enroll(state, base_url=node.base_url, token=node.token)
+    result = _serialize_node(node)
+    result["enroll"] = enroll
+    return result
 
 
 @router.delete("/nodes/{node_id}")
@@ -278,6 +316,28 @@ def join(body: JoinBody, request: Request,
         if n.node_id  # only fully-identified peers are mesh-routable
     ]
     return {"self": _self_stats(state, db), "peers": peers}
+
+
+class EnrollBody(BaseModel):
+    master_url: str = Field(..., min_length=1, max_length=512)
+    master_token: str = Field(..., min_length=1, max_length=512)
+
+
+@router.post("/enroll")
+def enroll(body: EnrollBody,
+           state: AppState = Depends(require_cluster_token)) -> dict:
+    """Master-initiated enrollment: a master commands THIS node to join it and
+    rebase onto its canonical state.
+
+    Authenticated by this node's own cluster token (the master holds it from the
+    link step). The master passes its own URL + token in the body so this node can
+    call back into the master's /join and /export. Mirrors the config-driven
+    auto-join, but driven by the supplied coordinates instead of local env."""
+    from app.cluster.membership import enroll_with_master
+
+    return enroll_with_master(
+        state.settings, state.session_factory, body.master_url, body.master_token,
+    )
 
 
 @router.post("/heartbeat")
