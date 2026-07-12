@@ -38,6 +38,16 @@ npm run dev            # Vite on :5173, proxies /api → :8000
 pytest
 ```
 
+**Bun + Express rewrite (`server/`, in progress):**
+
+A Bun+Express backend is being built in `server/` to eventually replace `app/` (the Python backend). It currently implements only the core skeleton — config loading, the DB abstraction layer (`server/src/db/`, `bun:sqlite` adapter, full schema in `schema.sql`), and the auth/session/CSRF/lockout flow (`/auth/login`, `/auth/logout`, `/auth/sessions`) with byte-for-byte behavioral parity (cookie name `fu_session`, `X-CSRF-Token` header, same status codes, same lockout policy). All other routes (files, directories, links, admin, keys, dropbox, remote-upload, cluster, ws, public, account, audit) are **not yet ported** — see `TODO_ROUTES.md`. The Python backend in `app/` remains the primary, feature-complete implementation until parity is reached.
+
+```bash
+cd server
+bun install
+bun run dev             # Express server on :8000, same config path (./data/app.env)
+```
+
 Config lives in `./data/app.env` and is auto-generated on first run. Environment variables:
 - `APP_ENV` — `dev` (HTTP cookies) or `prod` (Secure cookies)
 - `SECRET_KEY` — session signing key

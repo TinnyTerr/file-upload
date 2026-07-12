@@ -9,7 +9,7 @@
     "build:prod": "bun run build.ts",
     "typecheck": "tsc -b --noEmit",
     "test": "bun test",
-    "test:crypto": "node scripts/fupl-vectors.mjs",
+    "test:crypto": "bun scripts/fupl-vectors.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
