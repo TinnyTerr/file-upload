@@ -1,0 +1,181 @@
+/** Shared row shapes for schema.sql tables (SQLite: booleans are 0/1 ints,
+ * timestamps ISO8601 UTC strings). Only tables used by multiple route files
+ * live here; single-use shapes stay local to their route. */
+
+export interface UserRow {
+  id: number;
+  username: string;
+  password_hash: string;
+  role: string;
+  must_change_credentials: number;
+  avatar_data: Uint8Array | null;
+  avatar_content_type: string | null;
+  created_at: string;
+}
+
+export interface PermissionRow {
+  id: number;
+  user_id: number;
+  can_upload: number;
+  can_upload_client_encrypted: number;
+  can_delete: number;
+  can_regenerate_links: number;
+  can_delete_links: number;
+  can_create_directories: number;
+  can_manage_lifecycle: number;
+  can_use_api_keys: number;
+  can_view_admin: number;
+  can_manage_users: number;
+  can_manage_storage: number;
+  can_manage_api_keys: number;
+  can_manage_cluster: number;
+  quota_bytes: number;
+  max_file_bytes: number;
+  archive_after_idle_days: number;
+  created_at: string;
+}
+
+export interface ContentBlobRow {
+  id: number;
+  storage_path: string;
+  content_type: string;
+  size_bytes: number;
+  stored_size_bytes: number;
+  sha256: string;
+  sha1: string;
+  md5: string;
+  blake2b: string;
+  stored_sha256: string;
+  transform_key: string;
+  ref_count: number;
+  media_width: number | null;
+  media_height: number | null;
+  media_duration_seconds: number | null;
+  created_at: string;
+}
+
+export interface FileRow {
+  id: number;
+  owner_id: number;
+  blob_id: number | null;
+  directory_id: number | null;
+  storage_path: string;
+  original_filename: string;
+  source_type: string;
+  saved_from_file_id: number | null;
+  saved_from_directory_id: number | null;
+  size_bytes: number;
+  stored_size_bytes: number;
+  content_type: string;
+  encryption_mode: string;
+  enc_key_blob: Uint8Array | null;
+  enc_access_blob: Uint8Array | null;
+  compressed: number;
+  archived: number;
+  archive_codec: string | null;
+  archive_original_stored_size_bytes: number;
+  archive_saved_bytes: number;
+  archive_after_idle_days: number | null;
+  lifecycle_state: string;
+  is_permanent: number;
+  expires_at: string | null;
+  delete_if_idle_days: number | null;
+  auto_unarchive_on_download: number;
+  created_at: string;
+  last_downloaded_at: string | null;
+}
+
+export interface DirectoryRow {
+  id: number;
+  owner_id: number;
+  slug: string;
+  title: string;
+  encryption_mode: string;
+  enc_key_blob: Uint8Array | null;
+  enc_access_blob: Uint8Array | null;
+  key_check_blob: string | null;
+  total_bytes: number;
+  expires_at: string | null;
+  hide_uploader: number;
+  saved_from_directory_id: number | null;
+  created_at: string;
+}
+
+export interface LinkRow {
+  id: number;
+  file_id: number;
+  slug: string;
+  max_uses: number | null;
+  use_count: number;
+  expires_at: string | null;
+  active: number;
+  hide_uploader: number;
+  created_at: string;
+}
+
+export interface DirectoryLinkRow {
+  id: number;
+  directory_id: number;
+  slug: string;
+  max_uses: number | null;
+  use_count: number;
+  expires_at: string | null;
+  active: number;
+  hide_uploader: number;
+  created_at: string;
+}
+
+export interface ApiKeyRow {
+  id: number;
+  owner_id: number;
+  user_key_number: number;
+  key_hash: string;
+  bound_ip: string | null;
+  active: number;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export interface DropboxLinkRow {
+  id: number;
+  owner_id: number;
+  target_directory_id: number | null;
+  token_hash: string;
+  active: number;
+  expires_at: string | null;
+  used_at: string | null;
+  created_at: string;
+}
+
+export interface AuditLogRow {
+  id: number;
+  actor: string;
+  action: string;
+  target: string | null;
+  ip: string | null;
+  created_at: string;
+  prev_hash: string;
+  entry_hash: string;
+}
+
+export interface StorageSettingsRow {
+  id: number;
+  global_storage_quota_bytes: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RemoteUploadJobRow {
+  id: number;
+  owner_id: number;
+  file_id: number | null;
+  url: string;
+  status: string;
+  error: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export function nowIso(): string {
+  return new Date().toISOString();
+}

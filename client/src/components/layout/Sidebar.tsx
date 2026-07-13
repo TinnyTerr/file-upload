@@ -7,6 +7,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { NAV_ITEMS } from "@/config/navigation";
 import { useAuth } from "@/features/auth/hooks/auth";
 import { hasPermission } from "@/config/permissions";
+import { isFeatureEnabled } from "@/config/featureFlags";
 import { cn } from "@/lib/cn";
 
 export function SidebarNav({
@@ -17,7 +18,11 @@ export function SidebarNav({
   onNavigate?: () => void;
 }) {
   const { user } = useAuth();
-  const items = NAV_ITEMS.filter((item) => !item.requires || hasPermission(user, item.requires));
+  const items = NAV_ITEMS.filter(
+    (item) =>
+      (!item.requires || hasPermission(user, item.requires)) &&
+      (!item.feature || isFeatureEnabled(item.feature)),
+  );
 
   return (
     <nav className="flex flex-col gap-1">

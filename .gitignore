@@ -186,7 +186,9 @@ cython_debug/
 
 # Runtime data & secrets (never commit — regenerated/seeded at runtime)
 app/data/
+server/data/
 pytest_output.txt
 server.log
 /data/
 public/
+node_modules/

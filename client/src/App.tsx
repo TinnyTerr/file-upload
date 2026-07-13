@@ -1,10 +1,12 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, type ReactNode } from "react";
 import { Routes, Route, Navigate, useSearchParams } from "react-router-dom";
 import { AppShell } from "@/components/layout/AppShell";
 import { PublicShell } from "@/components/layout/PublicShell";
 import { RequireAuth, RequireMaster, RequirePermission, RedirectIfAuthed } from "@/components/layout/guards";
 import { FullPageSpinner } from "@/components/layout/FullPageSpinner";
+import { FeatureUnavailable } from "@/components/layout/FeatureUnavailable";
 import { useAuth } from "@/features/auth/hooks/auth";
+import { isFeatureEnabled, type FeatureFlag } from "@/config/featureFlags";
 
 import { LoginPage } from "@/features/auth/components/LoginPage";
 import { ChangePage } from "@/features/auth/components/ChangePage";
@@ -32,6 +34,12 @@ const ClusterPage = lazy(() =>
   import("@/features/cluster/components/ClusterPage").then((m) => ({ default: m.ClusterPage })),
 );
 
+/** Renders `children` if the backend feature has been ported, otherwise a placeholder. */
+function Gated({ feature, label, children }: { feature: FeatureFlag; label: string; children: ReactNode }) {
+  if (!isFeatureEnabled(feature)) return <FeatureUnavailable label={label} />;
+  return <>{children}</>;
+}
+
 function IndexRoute() {
   const [params] = useSearchParams();
   const receiveToken = params.get("receive");
@@ -42,7 +50,9 @@ function IndexRoute() {
   if (receiveToken) {
     return (
       <PublicShell>
-        <DropboxUploadPage token={receiveToken} />
+        <Gated feature="dropbox" label="Dropbox uploads">
+          <DropboxUploadPage token={receiveToken} />
+        </Gated>
       </PublicShell>
     );
   }
@@ -69,7 +79,9 @@ export default function App() {
           path="/file/:slug"
           element={
             <PublicShell>
-              <DownloadPage />
+              <Gated feature="files" label="File downloads">
+                <DownloadPage />
+              </Gated>
             </PublicShell>
           }
         />
@@ -77,7 +89,9 @@ export default function App() {
           path="/d/:slug"
           element={
             <PublicShell>
-              <FolderPage />
+              <Gated feature="directories" label="Folder downloads">
+                <FolderPage />
+              </Gated>
             </PublicShell>
           }
         />
@@ -85,18 +99,53 @@ export default function App() {
         {/* App chrome layout — all children require auth */}
         <Route element={<AppShell />}>
           <Route element={<RequireAuth />}>
-            <Route path="/files" element={<FilesPage />} />
-            <Route path="/account/change" element={<ChangePage />} />
+            <Route
+              path="/files"
+              element={
+                <Gated feature="files" label="Files">
+                  <FilesPage />
+                </Gated>
+              }
+            />
+            <Route
+              path="/account/change"
+              element={
+                <Gated feature="account" label="Account settings">
+                  <ChangePage />
+                </Gated>
+              }
+            />
             {/* API keys + docs gated behind the API-keys permission */}
             <Route element={<RequirePermission flag="can_use_api_keys" />}>
-              <Route path="/api-keys" element={<ApiKeysPage />} />
+              <Route
+                path="/api-keys"
+                element={
+                  <Gated feature="keys" label="API keys">
+                    <ApiKeysPage />
+                  </Gated>
+                }
+              />
               <Route path="/api-docs" element={<ApiDocsPage />} />
             </Route>
             <Route element={<RequirePermission flag="can_manage_cluster" />}>
-              <Route path="/cluster" element={<ClusterPage />} />
+              <Route
+                path="/cluster"
+                element={
+                  <Gated feature="cluster" label="Cluster">
+                    <ClusterPage />
+                  </Gated>
+                }
+              />
             </Route>
             <Route element={<RequireMaster />}>
-              <Route path="/admin" element={<AdminPage />} />
+              <Route
+                path="/admin"
+                element={
+                  <Gated feature="admin" label="Admin">
+                    <AdminPage />
+                  </Gated>
+                }
+              />
             </Route>
           </Route>
         </Route>

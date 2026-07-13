@@ -2,7 +2,9 @@
 
 ## Overview
 
-A self-hosted file sharing platform with end-to-end encryption, folder management, share links, API keys, dropboxes, and an admin panel. Built with FastAPI (Python) on the backend and React + TypeScript on the frontend.
+A self-hosted file sharing platform with end-to-end encryption, folder management, share links, API keys, dropboxes, and an admin panel. Built with Bun + Express on the backend and React + TypeScript on the frontend.
+
+The backend was previously a Python/FastAPI app (`app/`). That implementation is **retired** — treat it as read-only reference material for porting routes, not as something that runs in production. `server/` (Bun + Express) is the only backend going forward. It only implements the auth/session/CSRF/lockout flow so far; everything else is gated behind frontend feature flags until ported (see `TODO_ROUTES.md` and `client/src/config/featureFlags.ts`).
 
 ---
 
@@ -10,47 +12,60 @@ A self-hosted file sharing platform with end-to-end encryption, folder managemen
 
 | Layer | Technology |
 |---|---|
-| Backend | FastAPI, SQLAlchemy 2.0 (SQLite, no Alembic migrations), Pydantic v2 |
-| Frontend | React 18, TypeScript, TanStack Query, Tailwind CSS, Radix UI primitives |
+| Backend | Bun + Express, `bun:sqlite` (SQLite, no migrations) |
+| Frontend | React 18/19, TypeScript, TanStack Query, Tailwind CSS, Radix UI primitives |
 | Auth | Cookie-based sessions (`fu_session`) + CSRF tokens (`fu_csrf_token` in localStorage) |
-| Crypto | AES-GCM (server-side via `cryptography` lib), browser WebCrypto (client-side E2E) |
-| Scheduling | APScheduler (background jobs: expiry cleanup, link pruning) |
+| Crypto | AES-GCM (server-side), browser WebCrypto (client-side E2E) — not yet ported, see `TODO_ROUTES.md` |
+| Scheduling | Not yet ported (was APScheduler in `app/`; will become `node-cron`/`croner` or `setInterval` jobs) |
 
 ---
 
 ## Running the project
 
-**Backend:**
+**One command (build client + run server):**
 ```bash
-pip install -e ".[dev]"
-python -m app          # dev server on :8000
+bun install            # installs both workspaces (client/, server/)
+bun run start           # builds client → public/, then runs server on :8000
 ```
 
-**Frontend (dev):**
+**Dev (hot reload, both processes in parallel):**
 ```bash
-cd client
-npm install
-npm run dev            # Vite on :5173, proxies /api → :8000
-```
-
-**Run tests:**
-```bash
-pytest
+bun run dev             # Vite on :5173 (proxies API calls) + Express on :8000
 ```
 
 Config lives in `./data/app.env` and is auto-generated on first run. Environment variables:
 - `APP_ENV` — `dev` (HTTP cookies) or `prod` (Secure cookies)
 - `SECRET_KEY` — session signing key
 - `MASTER_KEY_B64` — base64 AES-256 key used for server-side encryption
-- `DATABASE_URL` — SQLAlchemy URL (default: `sqlite:///./data/app.db`)
+- `DATABASE_URL` — default `sqlite:///./data/app.db`
 - `TRUST_PROXY` — set `true` behind a reverse proxy for real IP detection
+
+**Legacy Python backend (`app/`, reference only — do not run in production):**
+```bash
+pip install -e ".[dev]"
+python -m app          # dev server on :8000 — kept only as a porting reference
+pytest
+```
 
 ---
 
 ## Project structure
 
 ```
-app/
+server/
+  src/
+    index.ts            # entrypoint (boot config/db, listen on :8000)
+    app.ts               # Express app factory, middleware, static SPA serving
+    config.ts            # Settings loader (./data/app.env)
+    db/                   # bun:sqlite adapter + schema.sql (Db interface, types.ts)
+    bootstrap.ts          # DB init, master user seed
+    appState.ts           # AppState (settings, db, sessionManager, lockout)
+    security/             # sessions, csrf, lockout, passwords
+    middleware/            # securityHeaders, requestLogging, httpsRedirect, auth
+    routes/
+      auth.ts             # Login, logout, CSRF, sessions management (only route ported so far)
+
+app/  (retired — Python/FastAPI reference only, do not run in production)
   main.py               # FastAPI app factory, route mounting
   config.py             # Settings (pydantic-settings, env file)
   db.py                 # SQLAlchemy engine + session

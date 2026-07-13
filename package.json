@@ -1,0 +1,15 @@
+{
+  "name": "fileupload",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "client",
+    "server"
+  ],
+  "scripts": {
+    "dev": "bun run --filter '*' --parallel dev",
+    "build": "bun run --filter './client' build",
+    "start": "bun run build && bun run --filter './server' start",
+    "typecheck": "bun run --filter '*' --parallel typecheck"
+  }
+}
