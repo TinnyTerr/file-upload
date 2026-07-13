@@ -10,6 +10,8 @@ export interface Settings {
   masterKeyB64: string;
   configPath: string;
   trustProxy: boolean;
+  /** "off" | "proxy" (generic reverse proxy) | "cloudflare" */
+  trustProxyMode: "off" | "proxy" | "cloudflare";
   allowedHosts: string;
   clusterToken: string;
   nodeId: string;
@@ -76,6 +78,11 @@ function truthy(value: string | undefined): boolean {
   return (value ?? "").toLowerCase() === "true";
 }
 
+/** Mirrors app/config.py::get_master_key. */
+export function getMasterKey(settings: Settings): Buffer {
+  return Buffer.from(settings.masterKeyB64, "base64");
+}
+
 export function loadSettings(configPathArg?: string): Settings {
   const configPath = configPathArg || process.env.FILEUPLOAD_CONFIG || "./data/app.env";
 
@@ -99,13 +106,20 @@ export function loadSettings(configPathArg?: string): Settings {
     map = parseEnvFile(readFileSync(configPath, "utf-8"));
   }
 
+  // TRUST_PROXY accepts "true" (generic reverse proxy) or "cloudflare"
+  // (prefer CF-Connecting-IP over X-Forwarded-For).
+  const trustProxyRaw = (map.get("TRUST_PROXY") ?? "").toLowerCase();
+  const trustProxyMode: Settings["trustProxyMode"] =
+    trustProxyRaw === "cloudflare" ? "cloudflare" : trustProxyRaw === "true" ? "proxy" : "off";
+
   return {
     appEnv: map.get("APP_ENV") || "dev",
     databaseUrl: map.get("DATABASE_URL") || "sqlite:///./data/app.db",
     secretKey: map.get("SECRET_KEY")!,
     masterKeyB64: map.get("MASTER_KEY_B64")!,
     configPath,
-    trustProxy: truthy(map.get("TRUST_PROXY")),
+    trustProxy: trustProxyMode !== "off",
+    trustProxyMode,
     allowedHosts: map.get("ALLOWED_HOSTS") || "",
     clusterToken: map.get("CLUSTER_TOKEN") || "",
     nodeId: map.get("NODE_ID") || "",

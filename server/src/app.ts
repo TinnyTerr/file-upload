@@ -1,4 +1,4 @@
-import express, { type Express } from "express";
+import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import cookieParser from "cookie-parser";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -7,6 +7,15 @@ import { securityHeaders } from "./middleware/securityHeaders.ts";
 import { requestLogging } from "./middleware/requestLogging.ts";
 import { httpsRedirect } from "./middleware/httpsRedirect.ts";
 import { authRouter } from "./routes/auth.ts";
+import { accountRouter } from "./routes/account.ts";
+import { keysRouter, adminKeysRouter } from "./routes/keys.ts";
+import { usersRouter } from "./routes/users.ts";
+import { auditRouter } from "./routes/audit.ts";
+import { filesRouter, adminFilesRouter, linksRouter } from "./routes/files.ts";
+import { publicRouter } from "./routes/public.ts";
+import { remoteUploadRouter } from "./routes/remoteUpload.ts";
+import { HttpError } from "./httpError.ts";
+import { getLogger } from "./logging.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SPA_DIST = join(REPO_ROOT, "public");
@@ -19,7 +28,7 @@ export function createApp(state: AppState): Express {
 
   app.use(httpsRedirect(state.settings));
   app.use(securityHeaders(secure));
-  app.use(requestLogging);
+  app.use(requestLogging(state));
   app.use(express.json());
   app.use(cookieParser());
 
@@ -28,6 +37,16 @@ export function createApp(state: AppState): Express {
   });
 
   app.use("/auth", authRouter(state));
+  app.use("/account", accountRouter(state));
+  app.use("/keys", keysRouter(state));
+  app.use("/admin/keys", adminKeysRouter(state));
+  app.use("/users", usersRouter(state));
+  app.use("/audit", auditRouter(state));
+  app.use("/files", filesRouter(state));
+  app.use("/files", remoteUploadRouter(state));
+  app.use("/admin/files", adminFilesRouter(state));
+  app.use("/links", linksRouter(state));
+  app.use(publicRouter(state));
 
   if (existsSync(SPA_DIST)) {
     app.use(
@@ -41,12 +60,26 @@ export function createApp(state: AppState): Express {
         },
       }),
     );
-    const spaRoutes = ["/", "/login", "/account/change", "/files", "/admin", "/api-docs"];
+    const spaRoutes = ["/", "/login", "/account/change", "/files", "/admin", "/api-docs", "/api-keys", "/cluster"];
     app.get(spaRoutes, (_req, res) => {
       res.set("Cache-Control", "no-cache");
       res.sendFile(join(SPA_DIST, "index.html"));
     });
   }
+
+  // Converts thrown HttpError into FastAPI-style {detail} JSON; anything else
+  // is logged with its stack and returned as an opaque 500.
+  const errorLog = getLogger("app.error");
+  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    if (err instanceof HttpError) {
+      res.status(err.status).json({ detail: err.detail });
+      return;
+    }
+    errorLog.error(`unhandled error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+    if (!res.headersSent) {
+      res.status(500).json({ detail: "internal server error" });
+    }
+  });
 
   return app;
 }
