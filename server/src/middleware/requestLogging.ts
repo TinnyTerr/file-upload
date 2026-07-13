@@ -20,7 +20,7 @@ export function requestLogging(state: AppState) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const start = performance.now();
     res.on("finish", () => {
-      const path = req.path;
+      const path = req.originalUrl.split("?")[0] ?? req.originalUrl;
       const status = res.statusCode;
       const isNoise = path.startsWith("/static") || path.startsWith("/assets") || QUIET_PATHS.has(path);
       const line = `http request method=${req.method} path=${path} status=${status} duration_ms=${(

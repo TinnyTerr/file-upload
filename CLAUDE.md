@@ -4,7 +4,7 @@
 
 A self-hosted file sharing platform with end-to-end encryption, folder management, share links, API keys, dropboxes, and an admin panel. Built with Bun + Express on the backend and React + TypeScript on the frontend.
 
-The backend was previously a Python/FastAPI app (`app/`). That implementation is **retired** — treat it as read-only reference material for porting routes, not as something that runs in production. `server/` (Bun + Express) is the only backend going forward. It only implements the auth/session/CSRF/lockout flow so far; everything else is gated behind frontend feature flags until ported (see `TODO_ROUTES.md` and `client/src/config/featureFlags.ts`).
+The backend was previously a Python/FastAPI app (`app/`). That implementation is **retired** — treat it as read-only reference material for porting routes, not as something that runs in production. `server/` (Bun + Express) is the only backend going forward, and the route port is now complete: every route in `app/routes/` has been reimplemented in `server/src/routes/` and mounted in `server/src/app.ts`, except cluster/realtime (`ws.py`, `cluster.py`), which is deferred. Correspondingly, every flag in `client/src/config/featureFlags.ts` is `true` except `cluster` (see `TODO_ROUTES.md` for the full per-route breakdown).
 
 ---
 
@@ -15,8 +15,8 @@ The backend was previously a Python/FastAPI app (`app/`). That implementation is
 | Backend | Bun + Express, `bun:sqlite` (SQLite, no migrations) |
 | Frontend | React 18/19, TypeScript, TanStack Query, Tailwind CSS, Radix UI primitives |
 | Auth | Cookie-based sessions (`fu_session`) + CSRF tokens (`fu_csrf_token` in localStorage) |
-| Crypto | AES-GCM (server-side), browser WebCrypto (client-side E2E) — not yet ported, see `TODO_ROUTES.md` |
-| Scheduling | Not yet ported (was APScheduler in `app/`; will become `node-cron`/`croner` or `setInterval` jobs) |
+| Crypto | AES-GCM (server-side, `server/src/crypto/aead.ts`), browser WebCrypto (client-side E2E) |
+| Scheduling | `server/src/jobs/scheduler.ts` — plain `setInterval` jobs (archive/delete-idle, temp/link expiry, stale-part sweep); no `node-cron`/`croner` dependency |
 
 ---
 
@@ -55,15 +55,28 @@ pytest
 server/
   src/
     index.ts            # entrypoint (boot config/db, listen on :8000)
-    app.ts               # Express app factory, middleware, static SPA serving
+    app.ts               # Express app factory, middleware, static SPA serving, route mounting
     config.ts            # Settings loader (./data/app.env)
     db/                   # bun:sqlite adapter + schema.sql (Db interface, types.ts)
     bootstrap.ts          # DB init, master user seed
     appState.ts           # AppState (settings, db, sessionManager, lockout)
-    security/             # sessions, csrf, lockout, passwords
-    middleware/            # securityHeaders, requestLogging, httpsRedirect, auth
+    security/             # sessions, csrf, lockout, passwords, apiKeys
+    middleware/            # securityHeaders, requestLogging, httpsRedirect, auth (deps.ts)
+    crypto/                # aead.ts (server-side AES-GCM), secretbox.ts (sealed tokens)
+    storage/               # paths, blobs, compress, accounting (quota), zip
+    jobs/                  # lifecycle.ts (archive/unarchive), scheduler.ts (setInterval workers)
     routes/
-      auth.ts             # Login, logout, CSRF, sessions management (only route ported so far)
+      auth.ts             # Login, logout, CSRF, sessions management
+      account.ts          # /account/me, avatar, password change, reset/delete account
+      files.ts            # Upload (single-shot + chunked), list, delete, link CRUD, admin list
+      public.ts            # Public file info/raw/preview (no auth)
+      directories.ts       # Folder CRUD, collaborators, per-folder links, admin + public /d/:slug surface
+      dropbox.ts            # Dropbox link CRUD + public token-gated uploads
+      keys.ts               # API key CRUD, admin key list
+      users.ts              # Admin: user CRUD + permissions
+      audit.ts              # Admin: audit log viewer
+      admin.ts               # Admin: storage, backend logs, lifecycle triggers, bulk actions
+      remoteUpload.ts        # Remote URL fetch-and-upload
 
 app/  (retired — Python/FastAPI reference only, do not run in production)
   main.py               # FastAPI app factory, route mounting

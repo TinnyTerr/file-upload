@@ -4,6 +4,7 @@ import { createAppState } from "./appState.ts";
 import { ensureMaster } from "./bootstrap.ts";
 import { createApp } from "./app.ts";
 import { getLogger } from "./logging.ts";
+import { startBackendWorkers } from "./jobs/scheduler.ts";
 
 const log = getLogger("app.main");
 
@@ -16,6 +17,7 @@ const db = createDb(settings.databaseUrl);
 const state = createAppState(settings, db);
 
 await ensureMaster(db);
+startBackendWorkers(state);
 
 const app = createApp(state);
 const port = Number(process.env.PORT ?? 8000);

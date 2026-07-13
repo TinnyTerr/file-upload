@@ -5,11 +5,11 @@
  */
 export const FEATURES = {
   files: true,
-  directories: false,
+  directories: true,
   account: true,
   keys: true,
-  dropbox: false,
-  admin: false,
+  dropbox: true,
+  admin: true,
   audit: true,
   remoteUpload: true,
   cluster: false,

@@ -3,6 +3,7 @@ import { ChevronDown, Trash2, Link2, Archive } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
+import { ListRow } from "@/components/ui/list-row";
 import { LinkList } from "./LinkList";
 import { CreateLinkDialog } from "./CreateLinkDialog";
 import { iconForType, EncryptionBadge } from "../lib/fileMeta";
@@ -35,35 +36,14 @@ export function FileRow({ file }: { file: FileObject }) {
   };
 
   return (
-    <div className="rounded-lg border border-border bg-secondary/20 transition-colors hover:bg-secondary/30">
-      <div className="flex items-center gap-3 p-3">
+    <ListRow
+      leading={
         <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-background/50">
           <Icon className="size-4 text-muted-foreground" />
         </div>
-
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-medium" title={file.original_filename}>
-              {file.original_filename}
-            </span>
-            <EncryptionBadge mode={file.encryption_mode} />
-            {file.compressed && (
-              <Tooltip content="zstd-compressed">
-                <Badge variant="secondary">zst</Badge>
-              </Tooltip>
-            )}
-            {file.archived && (
-              <Badge variant="secondary">
-                <Archive /> archived
-              </Badge>
-            )}
-          </div>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            {formatBytes(file.size_bytes)} · {formatDate(file.created_at)}
-          </p>
-        </div>
-
-        <div className="flex items-center gap-1.5">
+      }
+      trailing={
+        <>
           {canLinks && <CreateLinkDialog fileId={file.id} />}
           {canDelete && (
             <Tooltip content="Delete file">
@@ -95,14 +75,29 @@ export function FileRow({ file }: { file: FileObject }) {
               <ChevronDown className={cn("size-4 transition-transform", expanded && "rotate-180")} />
             </Button>
           </Tooltip>
-        </div>
+        </>
+      }
+      footer={expanded && <LinkList file={file} />}
+    >
+      <div className="flex items-center gap-2">
+        <span className="truncate text-sm font-medium" title={file.original_filename}>
+          {file.original_filename}
+        </span>
+        <EncryptionBadge mode={file.encryption_mode} />
+        {file.compressed && (
+          <Tooltip content="zstd-compressed">
+            <Badge variant="secondary">zst</Badge>
+          </Tooltip>
+        )}
+        {file.archived && (
+          <Badge variant="secondary">
+            <Archive /> archived
+          </Badge>
+        )}
       </div>
-
-      {expanded && (
-        <div className="border-t border-border px-3 py-2.5">
-          <LinkList file={file} />
-        </div>
-      )}
-    </div>
+      <p className="mt-0.5 text-xs text-muted-foreground">
+        {formatBytes(file.size_bytes)} · {formatDate(file.created_at)}
+      </p>
+    </ListRow>
   );
 }

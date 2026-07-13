@@ -30,6 +30,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tooltip } from "@/components/ui/tooltip";
+import { UserAvatar } from "@/components/ui/user-avatar";
 import { useAuth, ME_QUERY_KEY } from "@/features/auth/hooks/auth";
 import { accountService } from "@/features/account/services/accountService";
 import { errorMessage } from "@/config/api";
@@ -472,13 +473,14 @@ function ProfileTab() {
       <div className="flex items-center gap-5">
         {/* Avatar preview */}
         <div className="size-20 shrink-0 overflow-hidden rounded-full border-2 border-border/60 bg-sidebar-accent">
-          {displaySrc ? (
-            <img src={displaySrc} alt="Profile" className="size-full object-cover" />
-          ) : (
-            <div className="flex size-full items-center justify-center bg-brand-gradient text-xl font-bold text-primary-foreground">
-              {user?.username.slice(0, 2).toUpperCase()}
-            </div>
-          )}
+          <UserAvatar
+            userId={user?.id ?? 0}
+            username={user?.username ?? ""}
+            hasAvatar={!!displaySrc}
+            src={displaySrc ?? undefined}
+            size="lg"
+            className="size-full"
+          />
         </div>
 
         <div className="flex flex-col gap-2">

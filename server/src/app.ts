@@ -14,6 +14,9 @@ import { auditRouter } from "./routes/audit.ts";
 import { filesRouter, adminFilesRouter, linksRouter } from "./routes/files.ts";
 import { publicRouter } from "./routes/public.ts";
 import { remoteUploadRouter } from "./routes/remoteUpload.ts";
+import { directoriesRouter, adminDirectoriesRouter, publicDirectoriesRouter } from "./routes/directories.ts";
+import { dropboxRouter } from "./routes/dropbox.ts";
+import { adminRouter } from "./routes/admin.ts";
 import { HttpError } from "./httpError.ts";
 import { getLogger } from "./logging.ts";
 
@@ -46,7 +49,12 @@ export function createApp(state: AppState): Express {
   app.use("/files", remoteUploadRouter(state));
   app.use("/admin/files", adminFilesRouter(state));
   app.use("/links", linksRouter(state));
+  app.use("/admin/directories", adminDirectoriesRouter(state));
+  app.use(directoriesRouter(state));
+  app.use(dropboxRouter(state));
+  app.use("/admin", adminRouter(state));
   app.use(publicRouter(state));
+  app.use(publicDirectoriesRouter(state));
 
   if (existsSync(SPA_DIST)) {
     app.use(

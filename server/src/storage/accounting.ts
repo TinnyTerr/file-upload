@@ -65,6 +65,12 @@ function diskUsage(): { total: number; free: number } | null {
   }
 }
 
+/** Exported so lifecycle/admin code (e.g. the unarchive free-space guard) can
+ * read both total and free bytes without duplicating the statfs call. */
+export function diskUsageBytes(): { total: number; free: number } | null {
+  return diskUsage();
+}
+
 export function physicalStorageCapacityBytes(): number | null {
   return diskUsage()?.total ?? null;
 }

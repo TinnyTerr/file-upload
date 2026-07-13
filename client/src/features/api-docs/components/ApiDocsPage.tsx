@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { cn } from "@/lib/cn";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -195,16 +196,11 @@ export function ApiDocsPage() {
 
   return (
     <div className="space-y-6">
-      {/* header */}
-      <div className="flex items-center gap-3">
-        <div className="flex size-10 items-center justify-center rounded-lg bg-brand-gradient shadow-lg shadow-primary/20">
-          <BookText className="size-5 text-white" />
-        </div>
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">API reference</h1>
-          <p className="text-sm text-muted-foreground">Upload, download, and manage files programmatically.</p>
-        </div>
-      </div>
+      <PageHeader
+        title="API reference"
+        subtitle="Upload, download, and manage files programmatically."
+        icon={BookText}
+      />
 
       {/* nav */}
       <nav aria-label="API sections" className="flex flex-wrap gap-2 rounded-lg border border-border bg-secondary/20 p-2">
@@ -243,7 +239,7 @@ export function ApiDocsPage() {
           </div>
           <p className="text-xs text-muted-foreground">
             Keys never leave your browser — they're only used to populate the code snippets on this page.
-            Create one from <strong>API Keys</strong> in the sidebar.
+            Create one from <strong>API keys</strong> in the sidebar.
           </p>
         </CardContent>
       </Card>
@@ -256,14 +252,14 @@ export function ApiDocsPage() {
           <p>
             All API requests authenticate with a Bearer token in the <code>Authorization</code> header.
             API keys require the <Badge variant="secondary" className="text-xs">can_use_api_keys</Badge> permission
-            and are created from the <strong>API Keys</strong> page.
+            and are created from the <strong>API keys</strong> page.
           </p>
           <CodeBlock code={`Authorization: Bearer ${key}`} />
           <div className="rounded-md border border-border p-3 space-y-1.5">
             <p className="font-medium text-foreground">IP binding</p>
             <p>
               A key binds to the first IP address it is used from. If you change networks, reset the binding
-              from the API Keys page. You can also pre-bind a key to a specific CIDR or IP.
+              from the API keys page. You can also pre-bind a key to a specific CIDR or IP.
             </p>
           </div>
           <div className="rounded-md border border-border p-3 space-y-1.5">

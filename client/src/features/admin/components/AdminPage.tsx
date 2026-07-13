@@ -1,6 +1,7 @@
-import { Files, Link2, Users, HardDrive, ShieldX } from "lucide-react";
+import { Files, Link2, Users, HardDrive, ShieldX, ShieldCheck } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { OverviewTab } from "./OverviewTab";
 import { UsersTab } from "./UsersTab";
@@ -44,10 +45,11 @@ export function AdminPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Admin</h1>
-        <p className="text-sm text-muted-foreground">Users, storage, audit and maintenance controls.</p>
-      </div>
+      <PageHeader
+        title="Admin"
+        subtitle="Users, storage, audit and maintenance controls."
+        icon={ShieldCheck}
+      />
 
       {isMaster && <HeaderStats />}
 

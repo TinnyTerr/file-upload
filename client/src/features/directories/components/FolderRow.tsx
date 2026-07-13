@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ListRow } from "@/components/ui/list-row";
 import { EncryptionBadge, iconForType } from "@/features/files/lib/fileMeta";
 import { useDirMembers, useDeleteDirectory, useRemoveMember } from "../hooks/useDirectories";
 import { useAddFiles } from "../hooks/useAddFiles";
@@ -117,73 +118,121 @@ export function FolderRow({ dir }: { dir: Directory }) {
   };
 
   return (
-    <div className="rounded-lg border border-border bg-secondary/20 transition-colors hover:bg-secondary/30">
-      <div className="flex items-center gap-3 p-3">
-        <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-background/50">
-          <Folder className="size-4 text-muted-foreground" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-medium" title={dir.title}>
-              {dir.title}
-            </span>
-            <EncryptionBadge mode={dir.encryption_mode} />
-            {dir.role === "editor" && <Badge variant="secondary">shared</Badge>}
+    <>
+      <ListRow
+        leading={
+          <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-background/50">
+            <Folder className="size-4 text-muted-foreground" />
           </div>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            {dir.file_count} files · {formatBytes(dir.total_bytes)}
-          </p>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <CopyButton value={url} tooltip="Copy folder URL" />
-          <Tooltip content="Folder info & share">
-            <Button variant="ghost" size="sm" onClick={() => setInfoEntry(shareEntry())} className="gap-1.5">
-              <Info /> Info
+        }
+        trailing={
+          <>
+            <CopyButton value={url} tooltip="Copy folder URL" />
+            <Tooltip content="Folder info & share">
+              <Button variant="ghost" size="sm" onClick={() => setInfoEntry(shareEntry())} className="gap-1.5">
+                <Info /> Info
+              </Button>
+            </Tooltip>
+            <Tooltip content="Open folder">
+              <Button variant="ghost" size="icon" asChild>
+                <a href={url} target="_blank" rel="noreferrer">
+                  <ExternalLink />
+                </a>
+              </Button>
+            </Tooltip>
+            {canManageLinks && (
+              <Tooltip content="Manage links">
+                <Button variant="ghost" size="icon" onClick={() => setLinksOpen(true)}>
+                  <Link2 />
+                </Button>
+              </Tooltip>
+            )}
+            {canAddFiles && (
+              <Tooltip content="Add files">
+                <Button variant="ghost" size="icon" loading={adding} onClick={openAddFiles}>
+                  <FilePlus />
+                </Button>
+              </Tooltip>
+            )}
+            {canDelete && (
+              <Tooltip content="Delete folder">
+                <Button variant="ghost" size="icon" className="text-destructive" onClick={onDelete} loading={del.isPending}>
+                  <Trash2 />
+                </Button>
+              </Tooltip>
+            )}
+            <Button variant="ghost" size="icon" onClick={() => setExpanded((e) => !e)}>
+              <ChevronDown className={cn("size-4 transition-transform", expanded && "rotate-180")} />
             </Button>
-          </Tooltip>
-          <Tooltip content="Open folder">
-            <Button variant="ghost" size="icon" asChild>
-              <a href={url} target="_blank" rel="noreferrer">
-                <ExternalLink />
-              </a>
-            </Button>
-          </Tooltip>
-          {canManageLinks && (
-            <Tooltip content="Manage links">
-              <Button variant="ghost" size="icon" onClick={() => setLinksOpen(true)}>
-                <Link2 />
-              </Button>
-            </Tooltip>
-          )}
-          {canAddFiles && (
-            <Tooltip content="Add files">
-              <Button variant="ghost" size="icon" loading={adding} onClick={openAddFiles}>
-                <FilePlus />
-              </Button>
-            </Tooltip>
-          )}
-          {canDelete && (
-            <Tooltip content="Delete folder">
-              <Button variant="ghost" size="icon" className="text-destructive" onClick={onDelete} loading={del.isPending}>
-                <Trash2 />
-              </Button>
-            </Tooltip>
-          )}
-          <Button variant="ghost" size="icon" onClick={() => setExpanded((e) => !e)}>
-            <ChevronDown className={cn("size-4 transition-transform", expanded && "rotate-180")} />
-          </Button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            hidden
-            onChange={(e) => {
-              if (e.target.files?.length) onFilesSelected(Array.from(e.target.files));
-              e.target.value = "";
-            }}
-          />
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              hidden
+              onChange={(e) => {
+                if (e.target.files?.length) onFilesSelected(Array.from(e.target.files));
+                e.target.value = "";
+              }}
+            />
+          </>
+        }
+        footer={
+          expanded && (
+            <div className="space-y-1.5">
+              {isLoading ? (
+                <>
+                  <Skeleton className="h-8 w-full" />
+                  <Skeleton className="h-8 w-full" />
+                </>
+              ) : !members || members.length === 0 ? (
+                <p className="py-1 text-xs text-muted-foreground">This folder is empty.</p>
+              ) : (
+                members.map((m) => {
+                  const Icon = iconForType(m.content_type);
+                  return (
+                    <ListRow
+                      key={m.id}
+                      noHover
+                      className="bg-background/30"
+                      leading={<Icon className="size-4 shrink-0 text-muted-foreground" />}
+                      trailing={
+                        canDelete && (
+                          <Tooltip content="Remove from folder">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="size-6 text-destructive"
+                              onClick={() => removeMember.mutate(m.id)}
+                            >
+                              <X className="size-3.5" />
+                            </Button>
+                          </Tooltip>
+                        )
+                      }
+                    >
+                      <span className="flex items-center gap-2 truncate text-xs" title={m.filename}>
+                        <span className="truncate">{m.filename}</span>
+                        <span className="shrink-0 text-muted-foreground">{formatBytes(m.size_bytes)}</span>
+                      </span>
+                    </ListRow>
+                  );
+                })
+              )}
+            </div>
+          )
+        }
+      >
+        <div className="flex items-center gap-2">
+          <span className="truncate text-sm font-medium" title={dir.title}>
+            {dir.title}
+          </span>
+          <EncryptionBadge mode={dir.encryption_mode} />
+          {dir.role === "editor" && <Badge variant="secondary">shared</Badge>}
         </div>
-      </div>
+        <p className="mt-0.5 text-xs text-muted-foreground">
+          {dir.file_count} files · {formatBytes(dir.total_bytes)}
+        </p>
+      </ListRow>
 
       <FolderLinksModal
         open={linksOpen}
@@ -233,43 +282,6 @@ export function FolderRow({ dir }: { dir: Directory }) {
         </DialogContent>
       </Dialog>
 
-      {expanded && (
-        <div className="space-y-1.5 border-t border-border px-3 py-2.5">
-          {isLoading ? (
-            <>
-              <Skeleton className="h-8 w-full" />
-              <Skeleton className="h-8 w-full" />
-            </>
-          ) : !members || members.length === 0 ? (
-            <p className="py-1 text-xs text-muted-foreground">This folder is empty.</p>
-          ) : (
-            members.map((m) => {
-              const Icon = iconForType(m.content_type);
-              return (
-                <div key={m.id} className="flex items-center gap-2 rounded-md border border-border bg-background/30 px-2.5 py-1.5">
-                  <Icon className="size-4 shrink-0 text-muted-foreground" />
-                  <span className="flex-1 truncate text-xs" title={m.filename}>
-                    {m.filename}
-                  </span>
-                  <span className="text-xs text-muted-foreground">{formatBytes(m.size_bytes)}</span>
-                  {canDelete && (
-                    <Tooltip content="Remove from folder">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="size-6 text-destructive"
-                        onClick={() => removeMember.mutate(m.id)}
-                      >
-                        <X className="size-3.5" />
-                      </Button>
-                    </Tooltip>
-                  )}
-                </div>
-              );
-            })
-          )}
-        </div>
-      )}
-    </div>
+    </>
   );
 }

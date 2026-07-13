@@ -60,14 +60,18 @@ interface CollabRow {
   id: number;
 }
 
-function usedBytes(state: AppState, userId: number): number {
+/** Exported for reuse by dropbox.ts (owner-quota lookups on behalf of the
+ * dropbox link's owner, mirroring app/routes/dropbox.py's import from
+ * app/routes/files.py). */
+export function usedBytes(state: AppState, userId: number): number {
   return (
     state.db.get<SumRow>("SELECT SUM(size_bytes) as total FROM files WHERE owner_id = $id", { $id: userId })
       ?.total ?? 0
   );
 }
 
-function canEditDirectory(state: AppState, directoryId: number, user: UserRow): boolean {
+/** Exported for reuse by dropbox.ts. */
+export function canEditDirectory(state: AppState, directoryId: number, user: UserRow): boolean {
   const { db } = state;
   const dir = db.get<DirRow>("SELECT * FROM directories WHERE id = $id", { $id: directoryId });
   if (!dir) return false;
@@ -140,7 +144,9 @@ function prepareUpload(
   return { encryptionMode, compress, isPermanent, tempDays, randomizeFilename, directory, perm };
 }
 
-function precheckDeclaredSize(state: AppState, user: UserRow, perm: PermissionRow, declared: number): void {
+/** Exported for reuse by dropbox.ts. Mirrors
+ * app/routes/dropbox.py's import of app/routes/files.py::_precheck_declared_size. */
+export function precheckDeclaredSize(state: AppState, user: UserRow, perm: PermissionRow, declared: number): void {
   if (declared > perm.max_file_bytes + REQUEST_OVERHEAD_ALLOWANCE) {
     log.warning(`upload precheck rejected user_id=${user.id} reason=max_file declared_bytes=${declared}`);
     throw new HttpError(413, "file exceeds max file size");
@@ -436,7 +442,8 @@ function openChunkToken(state: AppState, token: string, user: UserRow): ChunkMet
   return meta;
 }
 
-function chunkUploadSize(): number {
+/** Exported for reuse by dropbox.ts. */
+export function chunkUploadSize(): number {
   const raw = process.env.FILEUPLOAD_CHUNK_SIZE;
   if (raw) {
     const v = Number(raw);
@@ -445,22 +452,26 @@ function chunkUploadSize(): number {
   return CHUNK_UPLOAD_SIZE;
 }
 
-function partsDir(relPath: string): string {
+/** Exported for reuse by dropbox.ts. */
+export function partsDir(relPath: string): string {
   return `${join(storageRoot(), relPath)}.parts`;
 }
 
-function numChunks(total: number, chunkSize: number): number {
+/** Exported for reuse by dropbox.ts. */
+export function numChunks(total: number, chunkSize: number): number {
   if (total <= 0 || chunkSize <= 0) return 0;
   return Math.ceil(total / chunkSize);
 }
 
-function expectedChunkLen(index: number, total: number, chunkSize: number, n: number): number {
+/** Exported for reuse by dropbox.ts. */
+export function expectedChunkLen(index: number, total: number, chunkSize: number, n: number): number {
   if (index < 0 || index >= n) return -1;
   if (index < n - 1) return chunkSize;
   return total - (n - 1) * chunkSize;
 }
 
-function receivedIndices(parts: string, n: number): number[] {
+/** Exported for reuse by dropbox.ts. */
+export function receivedIndices(parts: string, n: number): number[] {
   const out: number[] = [];
   try {
     for (const entry of readdirSync(parts)) {

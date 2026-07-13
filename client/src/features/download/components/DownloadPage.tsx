@@ -15,6 +15,7 @@ import {
   SelectContent,
   SelectItem,
 } from "@/components/ui/select";
+import { UserAvatar } from "@/components/ui/user-avatar";
 import { EncryptionBanner } from "./EncryptionBanner";
 import { FilePreview } from "./FilePreview";
 import { useFileInfo } from "../hooks/useFileInfo";
@@ -101,17 +102,12 @@ export function DownloadPage() {
           {/* Uploader info */}
           {info.uploader && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              {info.uploader.has_avatar ? (
-                <img
-                  src={`/account/avatar/${info.uploader.user_id}`}
-                  alt={info.uploader.username}
-                  className="size-6 rounded-full object-cover"
-                />
-              ) : (
-                <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-brand-gradient text-xs font-semibold text-white">
-                  {info.uploader.username.slice(0, 2).toUpperCase()}
-                </span>
-              )}
+              <UserAvatar
+                userId={info.uploader.user_id}
+                username={info.uploader.username}
+                hasAvatar={info.uploader.has_avatar}
+                size="sm"
+              />
               <span>Uploaded by <strong>{info.uploader.username}</strong></span>
             </div>
           )}

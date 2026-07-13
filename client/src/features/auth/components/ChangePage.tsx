@@ -23,7 +23,7 @@ export function ChangePage() {
   const mustChange = user?.must_change_credentials;
 
   return (
-    <div className="mx-auto max-w-lg py-6">
+    <div className="mx-auto max-w-lg">
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">

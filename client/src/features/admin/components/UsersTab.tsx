@@ -3,11 +3,12 @@ import { UserPlus, Pencil, Shield, Trash2, Search, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Tooltip } from "@/components/ui/tooltip";
 import { Progress } from "@/components/ui/progress";
+import { ListRow } from "@/components/ui/list-row";
+import { UserAvatar } from "@/components/ui/user-avatar";
 import { UserFormDialog } from "./UserFormDialog";
 import { PermissionsDialog } from "./PermissionsDialog";
 import { useAdminUsers } from "../hooks/useAdminUsers";
@@ -81,45 +82,22 @@ export function UsersTab() {
             const usage = usageById.get(u.id);
             const pct = usage?.quota ? percent(usage.used, usage.quota) : 0;
             return (
-              <Card key={u.id}>
-                <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center">
-                  <div className="flex min-w-0 flex-1 items-center gap-3">
-                    {u.has_avatar ? (
-                      <img
-                        src={`/account/avatar/${u.id}`}
-                        alt={u.username}
-                        className="size-9 shrink-0 rounded-full object-cover"
-                      />
-                    ) : (
-                      <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-brand-gradient text-xs font-semibold text-white">
-                        {u.username.slice(0, 2).toUpperCase()}
-                      </span>
-                    )}
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="truncate font-medium">{u.username}</span>
-                        <Badge variant={u.role === "master" ? "accent" : "secondary"}>{u.role}</Badge>
-                        {u.must_change_credentials && <Badge variant="warning">setup</Badge>}
-                      </div>
-                      <p className="text-xs text-muted-foreground">
-                        {grantedCount(u)} permissions · joined {formatDate(u.created_at)}
-                      </p>
+              <ListRow
+                key={u.id}
+                leading={<UserAvatar userId={u.id} username={u.username} hasAvatar={u.has_avatar} size="md" />}
+                trailing={
+                  <>
+                    <div className="hidden w-44 sm:block">
+                      {usage && (
+                        <>
+                          <Progress value={pct} className="h-1.5" />
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            {formatBytes(usage.used)}
+                            {usage.quota ? ` / ${formatBytes(usage.quota)}` : ""}
+                          </p>
+                        </>
+                      )}
                     </div>
-                  </div>
-
-                  <div className="w-full sm:w-44">
-                    {usage && (
-                      <>
-                        <Progress value={pct} className="h-1.5" />
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          {formatBytes(usage.used)}
-                          {usage.quota ? ` / ${formatBytes(usage.quota)}` : ""}
-                        </p>
-                      </>
-                    )}
-                  </div>
-
-                  <div className="flex items-center gap-1">
                     <Tooltip content="Edit">
                       <Button variant="ghost" size="icon" onClick={() => { setEditing(u); setFormOpen(true); }}>
                         <Pencil />
@@ -144,9 +122,27 @@ export function UsersTab() {
                         </Button>
                       </span>
                     </Tooltip>
+                  </>
+                }
+              >
+                <div className="flex items-center gap-2">
+                  <span className="truncate text-sm font-medium">{u.username}</span>
+                  <Badge variant={u.role === "master" ? "accent" : "secondary"}>{u.role}</Badge>
+                  {u.must_change_credentials && <Badge variant="warning">setup</Badge>}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {grantedCount(u)} permissions · joined {formatDate(u.created_at)}
+                </p>
+                {usage && (
+                  <div className="mt-2 max-w-44 sm:hidden">
+                    <Progress value={pct} className="h-1.5" />
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {formatBytes(usage.used)}
+                      {usage.quota ? ` / ${formatBytes(usage.quota)}` : ""}
+                    </p>
                   </div>
-                </CardContent>
-              </Card>
+                )}
+              </ListRow>
             );
           })}
         </div>

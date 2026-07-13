@@ -7,6 +7,8 @@ import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
 import { EncryptionBanner } from "@/features/download/components/EncryptionBanner";
+import { UserAvatar } from "@/components/ui/user-avatar";
+import { ListRow } from "@/components/ui/list-row";
 import { iconForType } from "@/features/files/lib/fileMeta";
 import { useDirInfo, useFolderZip, downloadMember } from "../hooks/useFolderView";
 import { readClientKeyFromHash, readServerKeyFromQuery } from "@/lib/download";
@@ -66,17 +68,12 @@ export function FolderPage() {
           {/* Uploader info */}
           {info.uploader && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              {info.uploader.has_avatar ? (
-                <img
-                  src={`/account/avatar/${info.uploader.user_id}`}
-                  alt={info.uploader.username}
-                  className="size-6 rounded-full object-cover"
-                />
-              ) : (
-                <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-brand-gradient text-xs font-semibold text-white">
-                  {info.uploader.username.slice(0, 2).toUpperCase()}
-                </span>
-              )}
+              <UserAvatar
+                userId={info.uploader.user_id}
+                username={info.uploader.username}
+                hasAvatar={info.uploader.has_avatar}
+                size="sm"
+              />
               <span>Shared by <strong>{info.uploader.username}</strong></span>
             </div>
           )}
@@ -113,28 +110,32 @@ export function FolderPage() {
           {info.files.length === 0 ? (
             <p className="py-2 text-sm text-muted-foreground">This folder is empty.</p>
           ) : (
-            <ul className="space-y-1.5">
+            <div className="space-y-1.5">
               {info.files.map((m) => {
                 const Icon = iconForType(m.content_type);
                 return (
-                  <li key={m.slug} className="flex items-center gap-2 rounded-md border border-border bg-secondary/20 px-3 py-2">
-                    <Icon className="size-4 shrink-0 text-muted-foreground" />
-                    <span className="flex-1 truncate text-sm" title={m.filename}>
-                      {m.filename}
+                  <ListRow
+                    key={m.slug}
+                    leading={<Icon className="size-4 shrink-0 text-muted-foreground" />}
+                    trailing={
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        disabled={info.encryption_mode !== "none" && !hasKey}
+                        onClick={() => downloadMember(m, info.encryption_mode, keys)}
+                      >
+                        <Download />
+                      </Button>
+                    }
+                  >
+                    <span className="flex items-center gap-2 truncate text-sm" title={m.filename}>
+                      <span className="truncate">{m.filename}</span>
+                      <span className="shrink-0 text-xs text-muted-foreground">{formatBytes(m.size_bytes)}</span>
                     </span>
-                    <span className="text-xs text-muted-foreground">{formatBytes(m.size_bytes)}</span>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      disabled={info.encryption_mode !== "none" && !hasKey}
-                      onClick={() => downloadMember(m, info.encryption_mode, keys)}
-                    >
-                      <Download />
-                    </Button>
-                  </li>
+                  </ListRow>
                 );
               })}
-            </ul>
+            </div>
           )}
         </CardContent>
       </Card>

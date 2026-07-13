@@ -73,7 +73,7 @@ export function DropboxUploadPage({ token }: { token: string }) {
           <div className="flex size-14 items-center justify-center rounded-2xl bg-success/15">
             <CheckCircle2 className="size-7 text-success" />
           </div>
-          <h1 className="text-xl font-bold">File sent</h1>
+          <h1 className="break-words text-xl font-bold">File sent</h1>
           <p className="max-w-sm text-sm text-muted-foreground">
             Your file was uploaded successfully. This one-time link is now closed.
           </p>
@@ -87,10 +87,10 @@ export function DropboxUploadPage({ token }: { token: string }) {
       <CardContent className="space-y-5 p-6">
         <div className="flex items-center gap-3">
           <div className="flex size-12 items-center justify-center rounded-xl bg-brand-gradient shadow-lg shadow-primary/20">
-            <Inbox className="size-6 text-primary-foreground" />
+            <Inbox className="size-6 text-white" />
           </div>
           <div>
-            <h1 className="text-xl font-bold">Send a file</h1>
+            <h1 className="break-words text-xl font-bold">Send a file</h1>
             <p className="text-sm text-muted-foreground">Upload one file to the person who shared this link.</p>
           </div>
         </div>

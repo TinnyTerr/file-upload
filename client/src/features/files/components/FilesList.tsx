@@ -28,11 +28,8 @@ export function FilesList() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="flex items-center justify-between">
-          Your files
-          {files && files.length > 0 && (
-            <span className="text-sm font-normal text-muted-foreground">{files.length}</span>
-          )}
+        <CardTitle>
+          {files && files.length > 0 ? `${files.length} file${files.length === 1 ? "" : "s"}` : "Files"}
         </CardTitle>
       </CardHeader>
       <CardContent>

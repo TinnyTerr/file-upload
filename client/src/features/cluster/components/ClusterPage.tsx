@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "@/components/ui/empty-state";
 import { CopyButton } from "@/components/ui/copy-button";
+import { PageHeader } from "@/components/layout/PageHeader";
 import { useClusterNodes, useClusterSelf, useClusterToken } from "../hooks/useCluster";
 import type { ClusterHalt } from "../types";
 import { useDialogs } from "@/providers/DialogProvider";
@@ -340,15 +341,11 @@ function CodeLine({ value }: { value: string }) {
 export function ClusterPage() {
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <div className="flex size-10 items-center justify-center rounded-lg bg-brand-gradient shadow-lg shadow-primary/20">
-          <Network className="size-5 text-white" />
-        </div>
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Cluster</h1>
-          <p className="text-sm text-muted-foreground">Link this server to other nodes and manage cluster tokens.</p>
-        </div>
-      </div>
+      <PageHeader
+        title="Cluster"
+        subtitle="Link this server to other nodes and manage cluster tokens."
+        icon={Network}
+      />
 
       <ThisServerCard />
       <LocalTokenCard />
