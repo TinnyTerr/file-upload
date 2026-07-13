@@ -5,6 +5,17 @@ interface AuditRow {
   entry_hash: string;
 }
 
+interface ChainRow {
+  id: number;
+  actor: string;
+  action: string;
+  target: string | null;
+  ip: string | null;
+  created_at: string;
+  prev_hash: string;
+  entry_hash: string;
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -41,4 +52,26 @@ export function recordAudit(
       $entryHash: entryHash,
     },
   );
+}
+
+/** Recomputes the hash chain over every row and checks it matches the stored
+ * entry_hash values, detecting tampering or gaps. */
+export function verifyAuditChain(db: Db): boolean {
+  const rows = db.all<ChainRow>("SELECT * FROM audit_log ORDER BY id ASC");
+  let prevHash = "";
+  for (const row of rows) {
+    if (row.prev_hash !== prevHash) return false;
+    const payload = JSON.stringify({
+      prevHash,
+      actor: row.actor,
+      action: row.action,
+      target: row.target ?? null,
+      ip: row.ip ?? null,
+      createdAt: row.created_at,
+    });
+    const expected = createHash("sha256").update(payload).digest("hex");
+    if (expected !== row.entry_hash) return false;
+    prevHash = row.entry_hash;
+  }
+  return true;
 }

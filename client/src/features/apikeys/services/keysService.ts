@@ -12,5 +12,5 @@ export const keysService = {
     api.post(`/keys/${keyId}/reset-ip`, { json: { password } }),
 
   // Admin: all users' keys
-  adminList: () => api.get<AdminApiKey[]>("/admin/keys"),
+  adminList: () => api.get<{ keys: AdminApiKey[] }>("/admin/keys").then((r) => r.keys),
 };
