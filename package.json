@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "bun run --filter '*' --parallel dev",
     "build": "bun run --filter './client' build",
-    "start": "bun run build && bun run --filter './server' start",
+    "start": "bun run build && bun --cwd=server run start",
     "typecheck": "bun run --filter '*' --parallel typecheck"
   }
 }

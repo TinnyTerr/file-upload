@@ -5,10 +5,17 @@ import { FullPageSpinner } from "./FullPageSpinner";
 /** Requires a logged-in user; redirects unauthenticated users to /login.
  *  Forces the credential-change flow when the account demands it. */
 export function RequireAuth() {
-  const { user, isLoading } = useAuth();
+  const { user, isLoading, mustChangeCredentials } = useAuth();
   const location = useLocation();
 
   if (isLoading) return <FullPageSpinner />;
+  if (mustChangeCredentials) {
+    return location.pathname === "/account/change" ? (
+      <Outlet />
+    ) : (
+      <Navigate to="/account/change" replace />
+    );
+  }
   if (!user) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   if (user.must_change_credentials && location.pathname !== "/account/change") {
     return <Navigate to="/account/change" replace />;
@@ -36,8 +43,9 @@ export function RequirePermission({ flag }: { flag: import("@/config/permissions
 
 /** Sends already-authenticated users away from public-only pages (e.g. login). */
 export function RedirectIfAuthed({ children }: { children: React.ReactNode }) {
-  const { user, isLoading } = useAuth();
+  const { user, isLoading, mustChangeCredentials } = useAuth();
   if (isLoading) return <FullPageSpinner />;
+  if (mustChangeCredentials) return <Navigate to="/account/change" replace />;
   if (user) return <Navigate to="/files" replace />;
   return <>{children}</>;
 }

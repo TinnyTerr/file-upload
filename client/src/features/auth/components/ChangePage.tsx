@@ -8,7 +8,7 @@ import { useChangeCredentials } from "../hooks/useChangeCredentials";
 import { useAuth } from "../hooks/auth";
 
 export function ChangePage() {
-  const { user } = useAuth();
+  const { user, mustChangeCredentials } = useAuth();
   const { submit, submitting, error, minPassword } = useChangeCredentials();
   const [form, setForm] = useState({
     current_password: "",
@@ -20,7 +20,7 @@ export function ChangePage() {
   const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm((f) => ({ ...f, [k]: e.target.value }));
 
-  const mustChange = user?.must_change_credentials;
+  const mustChange = mustChangeCredentials || user?.must_change_credentials;
 
   return (
     <div className="mx-auto max-w-lg">
