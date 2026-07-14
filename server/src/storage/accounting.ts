@@ -58,8 +58,8 @@ export function allocatedQuotaBytesWithOverride(db: Db, opts: { userId: number; 
 
 function diskUsage(): { total: number; free: number } | null {
   try {
-    const s = statfsSync(storageRoot());
-    return { total: s.blocks * s.bsize, free: s.bavail * s.bsize };
+    const s = statfsSync(storageRoot(), { bigint: true });
+    return { total: Number(s.blocks * s.bsize), free: Number(s.bavail * s.bsize) };
   } catch {
     return null;
   }
