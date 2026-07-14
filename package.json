@@ -7,9 +7,9 @@
     "server"
   ],
   "scripts": {
-    "dev": "bun run --filter '*' --parallel dev",
-    "build": "bun run --filter './client' build",
+    "dev": "bun --cwd=server run dev & bun --cwd=client run dev & wait",
+    "build": "bun --cwd=client run build",
     "start": "bun run build && bun --cwd=server run start",
-    "typecheck": "bun run --filter '*' --parallel typecheck"
+    "typecheck": "bun --cwd=client run typecheck && bun --cwd=server run typecheck"
   }
 }

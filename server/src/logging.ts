@@ -42,6 +42,18 @@ const PY_TO_PINO: Record<string, string> = {
   CRITICAL: "fatal",
 };
 
+// ANSI colors, keyed by Python-style level name.
+const LEVEL_COLOR: Record<string, string> = {
+  DEBUG: "\x1b[36m", // cyan
+  INFO: "\x1b[32m", // green
+  WARNING: "\x1b[33m", // yellow
+  ERROR: "\x1b[31m", // red
+  CRITICAL: "\x1b[1;31m", // bold red
+};
+const DIM = "\x1b[2m";
+const RESET = "\x1b[0m";
+const useColor = process.stdout.isTTY && process.env.NO_COLOR === undefined;
+
 function consoleLevel(): string {
   const raw = (process.env.LOG_LEVEL ?? "INFO").toUpperCase();
   return PY_TO_PINO[raw] ?? "info";
@@ -87,7 +99,10 @@ const sink = {
     if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES);
     if (rec.level >= consoleThreshold) {
       const stream = rec.level >= 50 ? process.stderr : process.stdout;
-      stream.write(`${asctime(rec.time)} ${levelName} ${logger}: ${message}\n`);
+      const line = useColor
+        ? `${DIM}${asctime(rec.time)}${RESET} ${LEVEL_COLOR[levelName] ?? ""}${levelName}${RESET} ${logger}: ${message}\n`
+        : `${asctime(rec.time)} ${levelName} ${logger}: ${message}\n`;
+      stream.write(line);
     }
   },
 };
