@@ -1,6 +1,6 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
-import { FolderX, FolderArchive, Download, Save } from "lucide-react";
+import { FolderX, FolderArchive, Download, Save, Eye } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -10,17 +10,21 @@ import { EncryptionBanner } from "@/features/download/components/EncryptionBanne
 import { UserAvatar } from "@/components/ui/user-avatar";
 import { ListRow } from "@/components/ui/list-row";
 import { iconForType } from "@/features/files/lib/fileMeta";
+import { isPreviewableType } from "@/features/download/components/FilePreview";
 import { useDirInfo, useFolderZip, downloadMember } from "../hooks/useFolderView";
 import { readClientKeyFromHash, readServerKeyFromQuery } from "@/lib/download";
 import { useAuth } from "@/features/auth/hooks/auth";
 import { useSaveFolder } from "../hooks/useSaveFolder";
 import { formatBytes } from "@/lib/bytes";
+import { FolderFilePreviewModal } from "./FolderFilePreviewModal";
+import type { PublicDirMember } from "../services/publicDirService";
 
 export function FolderPage() {
   const { slug = "" } = useParams();
   const { data: info, isLoading, isError } = useDirInfo(slug);
   const { user } = useAuth();
   const saveFolder = useSaveFolder();
+  const [previewMember, setPreviewMember] = useState<PublicDirMember | null>(null);
 
   const clientKey = useMemo(() => readClientKeyFromHash(), []);
   const serverKey = useMemo(() => readServerKeyFromQuery(), []);
@@ -113,19 +117,27 @@ export function FolderPage() {
             <div className="space-y-1.5">
               {info.files.map((m) => {
                 const Icon = iconForType(m.content_type);
+                const canView = info.encryption_mode === "none" && isPreviewableType(m.content_type);
                 return (
                   <ListRow
                     key={m.slug}
                     leading={<Icon className="size-4 shrink-0 text-muted-foreground" />}
                     trailing={
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        disabled={info.encryption_mode !== "none" && !hasKey}
-                        onClick={() => downloadMember(m, info.encryption_mode, keys)}
-                      >
-                        <Download />
-                      </Button>
+                      <div className="flex items-center gap-1">
+                        {canView && (
+                          <Button variant="ghost" size="icon" onClick={() => setPreviewMember(m)}>
+                            <Eye />
+                          </Button>
+                        )}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          disabled={info.encryption_mode !== "none" && !hasKey}
+                          onClick={() => downloadMember(m, info.encryption_mode, keys)}
+                        >
+                          <Download />
+                        </Button>
+                      </div>
                     }
                   >
                     <span className="flex items-center gap-2 truncate text-sm" title={m.filename}>
@@ -139,6 +151,12 @@ export function FolderPage() {
           )}
         </CardContent>
       </Card>
+
+      <FolderFilePreviewModal
+        member={previewMember}
+        open={previewMember !== null}
+        onOpenChange={(open) => !open && setPreviewMember(null)}
+      />
     </div>
   );
 }

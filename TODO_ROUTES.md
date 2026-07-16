@@ -2,10 +2,12 @@
 
 The Python backend (`app/`) is retired — `server/` (Bun + Express) is the only
 backend that runs. Every route in `app/routes/` has been ported to `server/`
-and mounted in `server/src/app.ts` **except** `app/routes/ws.py` and
-`app/routes/cluster.py` (cluster/realtime, deferred — see below). The Python
+and mounted in `server/src/app.ts`, including `app/routes/ws.py` and
+`app/routes/cluster.py` (cluster/realtime — see below). The Python
 tree remains read-only reference material only. Mount prefixes below match
-`app/main.py`'s `include_router` calls (kept only as a naming reference).
+`app/main.py`'s `include_router` calls (kept only as a naming reference) --
+in the actual Bun server every route is mounted under `/api/*` (see
+`server/src/app.ts`), so e.g. the `/files` row below is really `/api/files`.
 
 Foundations ported: `server/src/logging.ts` (pino-backed logger + admin log
 ring buffer), `server/src/middleware/deps.ts` (requireActiveUser/requireMaster/
@@ -14,8 +16,8 @@ requirePermission/getUploadUser/requireApiKey), `server/src/permissions.ts`,
 `server/src/storage/{paths,blobs,compress,accounting,zip}.ts`, `server/src/links.ts`
 (slug/consume-use), `server/src/spa.ts` (SPA shell + OG-meta injection).
 
-Every flag in `client/src/config/featureFlags.ts` is now `true` except
-`cluster`, which stays off until the deferred routes below land.
+Every flag in `client/src/config/featureFlags.ts` is now `true`, including
+`cluster`.
 
 | Source file | Mount prefix | Status |
 |---|---|---|
@@ -29,14 +31,17 @@ Every flag in `client/src/config/featureFlags.ts` is now `true` except
 | `app/routes/users.py` | `/users` | **Ported** (`server/src/routes/users.ts`) — CRUD + permissions, last-master guard |
 | `app/routes/audit_view.py` | `/audit` | **Ported** (`server/src/routes/audit.ts`) — `/audit/` with q/action/limit/offset + hash-chain verify; `/audit/cluster` stubbed empty (cluster deferred) |
 | `app/routes/remote_upload.py` | `/files/remote-upload*` | **Ported** (`server/src/routes/remoteUpload.ts`) — SSRF-guarded (public-IP validation + pinned-connection fetch, redirect re-validation), job status polling |
-| `app/routes/ws.py` | *(none)* + `/admin/cluster` | Realtime/websocket routes — **deferred**, cluster flag stays off |
-| `app/routes/cluster.py` | `/cluster` | Cluster node management — **deferred**, cluster flag stays off |
+| `app/routes/ws.py` | *(none)* + `/admin/cluster` | **Ported** (`server/src/ws.ts`) — `GET /api/ws/events` per-user live stream (session cookie auth, master receives the full firehose), `GET /api/admin/cluster/firehose` websocket (cluster-token auth), `GET /api/admin/cluster/events` HTTP long-poll fallback + `GET /api/admin/cluster/node-logs` (`server/src/routes/cluster.ts`'s `adminClusterRouter`) |
+| `app/routes/cluster.py` | `/cluster` | **Ported** (`server/src/routes/cluster.ts`'s `clusterRouter`, mounted at `/api/cluster`) — token reveal/rotate, self/nodes, node link (+ master-driven enroll command)/unlink, and the node-to-node membership/replication/blob handshake (`/join`, `/enroll`, `/heartbeat`, `/ping`, `/blobs/:hash`, `/digest`, `/reserve`, `/replicate`, `/export`), all backed by `server/src/cluster/*.ts` |
 
 ## Also not yet ported
 
-- Scheduled jobs (`app/jobs/`): **Ported** (`server/src/jobs/lifecycle.ts` + `server/src/jobs/scheduler.ts`) — archive_idle/delete_idle/temp_expiry/sweep_stale_parts run hourly, link_expiry every 10 min, plain `setInterval` timers (no `node-cron`/`croner` dependency needed). `reconcile_stale_states` has no interval in Python either and stays manual-trigger-only via `admin.ts`. `startBackendWorkers(state)` is called from `server/src/index.ts` at boot, after `ensureMaster`; `restartBackendWorkers(state)` backs `POST /admin/backend/restart-workers`.
-- Cluster runtime (event bus, firehose consumer, heartbeat/sync jobs) — deferred, `cluster` flag stays off.
+- Scheduled jobs (`app/jobs/`): **Ported** (`server/src/jobs/lifecycle.ts` + `server/src/jobs/scheduler.ts`) — archive_idle/delete_idle/temp_expiry/sweep_stale_parts run hourly, link_expiry every 10 min, cluster_heartbeat every minute, cluster_sync_check every 5 minutes, plain `setInterval` timers (no `node-cron`/`croner` dependency needed). `reconcile_stale_states` has no interval in Python either and stays manual-trigger-only via `admin.ts`. `startBackendWorkers(state)` is called from `server/src/index.ts` at boot, after `ensureMaster`; `restartBackendWorkers(state)` backs `POST /admin/backend/restart-workers`.
+- Cluster runtime (event bus, firehose consumer, heartbeat/sync jobs) — **Ported**, see `server/src/cluster/{eventBus,eventStore,firehoseClient,membership,digest}.ts`. `cluster` flag is on.
 - Static asset minification at boot (`rjsmin`/`rcssmin`) — likely skip in favor of pre-built minified Vite output.
 - Archive/lifecycle (`archived` files, `_archive_file_core` zstd repack) — **Ported**: the shared archive/unarchive logic lives in `server/src/jobs/lifecycle.ts` (`archiveFileCore`/`unarchiveFileCore`, `archiveIdleJob`), used by both the hourly job and `admin.ts`'s manual/bulk routes.
 
-Cluster runtime (`ws.py`, `cluster.py`) is the only remaining gap — its frontend surface (the Cluster nav item and page) stays gated off via the `cluster` flag in `client/src/config/featureFlags.ts` until it's ported.
+Nothing from `app/routes/` remains unported. `/admin/cluster/node-logs` cluster
+peer log proxying (from `admin.ts`'s `GET /backend/logs?server=`) is still not
+wired up -- see the note on that line above -- everything else, including the
+full cluster/realtime subsystem, is ported and the `cluster` feature flag is on.

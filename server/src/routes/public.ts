@@ -15,6 +15,8 @@ import { decryptStream } from "../crypto/aead.ts";
 import { openBox } from "../crypto/secretbox.ts";
 import { renderSpa } from "../spa.ts";
 import { nowIso, type FileRow, type UserRow } from "../db/rows.ts";
+import { fetchBlobFromPeers } from "../cluster/blobs.ts";
+import { getOrCreateThumbnail } from "../storage/thumbnail.ts";
 
 const log = getLogger("app.public");
 const CHUNK = 256 * 1024;
@@ -35,6 +37,25 @@ const SECURITY_HEADERS: Record<string, string> = {
   "Referrer-Policy": "no-referrer",
   "Content-Security-Policy": CSP,
 };
+
+/** Read-time cluster failover: if this file is a deduped, content-addressed
+ * blob (blob_id set) and the local bytes are missing, try pulling them from
+ * any active peer that still has them (see server/src/cluster/blobs.ts).
+ * Best-effort and silent on failure -- the caller re-checks existsSync and
+ * falls back to its usual "file missing from storage" 500. */
+async function ensureBlobAvailable(state: AppState, f: FileRow, fullPath: string): Promise<void> {
+  if (!f.blob_id) return;
+  const blob = state.db.get<{ stored_sha256: string; transform_key: string }>(
+    "SELECT stored_sha256, transform_key FROM content_blobs WHERE id = $id",
+    { $id: f.blob_id },
+  );
+  if (!blob) return;
+  try {
+    await fetchBlobFromPeers(state, { storedSha256: blob.stored_sha256, transformKey: blob.transform_key, dest: fullPath });
+  } catch {
+    // best-effort -- caller falls back to a 500 if this didn't help
+  }
+}
 
 function contentDisposition(filename: string): string {
   const cleaned = [...filename].filter((c) => c.codePointAt(0)! >= 0x20).join("");
@@ -207,6 +228,13 @@ export function publicRouter(state: AppState): Router {
       return;
     }
     if (!existsSync(fullPath)) {
+      // Cluster read-time failover: this node's copy is missing (e.g. a
+      // cache-mode node that never held it, or local disk loss) -- try
+      // pulling it from any active peer before giving up. No-op / cheap
+      // when unclustered (fetchBlobFromPeers iterates zero rows).
+      await ensureBlobAvailable(state, f, fullPath);
+    }
+    if (!existsSync(fullPath)) {
       res.status(500).json({ detail: "file missing from storage" });
       return;
     }
@@ -311,7 +339,7 @@ export function publicRouter(state: AppState): Router {
     createReadStream(fullPath, { highWaterMark: CHUNK }).pipe(res);
   });
 
-  router.get("/file/:slug/preview", (req, res) => {
+  router.get("/file/:slug/preview", async (req, res) => {
     const link = resolveActiveLink(db, req.params.slug);
     if (!link) {
       res.status(404).json({ detail: "not found" });
@@ -351,6 +379,9 @@ export function publicRouter(state: AppState): Router {
       return;
     }
     if (!existsSync(fullPath)) {
+      await ensureBlobAvailable(state, f, fullPath);
+    }
+    if (!existsSync(fullPath)) {
       res.status(500).json({ detail: "file missing from storage" });
       return;
     }
@@ -375,6 +406,51 @@ export function publicRouter(state: AppState): Router {
     }
     res.writeHead(200, { ...headers, "Content-Type": f.content_type, "Content-Length": String(fileSize) });
     createReadStream(fullPath, { highWaterMark: CHUNK }).pipe(res);
+  });
+
+  /** Small, size-capped JPEG for og:image -- unlike /preview this never streams the
+   * raw original, so link-preview crawlers (which cap fetch size, e.g. ~8MB on
+   * Discord) can always render it regardless of how large the source file is. */
+  router.get("/file/:slug/thumbnail", async (req, res) => {
+    const link = resolveActiveLink(db, req.params.slug);
+    if (!link) {
+      res.status(404).json({ detail: "not found" });
+      return;
+    }
+    const f = db.get<FileRow>("SELECT * FROM files WHERE id = $id", { $id: link.file_id });
+    if (!f) {
+      res.status(404).json({ detail: "not found" });
+      return;
+    }
+    const ct = f.content_type || "";
+    if ((!ct.startsWith("image/") && !ct.startsWith("video/")) || f.encryption_mode !== "none" || f.compressed || f.archived) {
+      res.status(403).json({ detail: "thumbnail unavailable" });
+      return;
+    }
+    let fullPath: string;
+    try {
+      fullPath = safeJoin(storageRoot(), f.storage_path);
+    } catch {
+      res.status(500).json({ detail: "invalid storage path" });
+      return;
+    }
+    if (!existsSync(fullPath)) {
+      res.status(500).json({ detail: "file missing from storage" });
+      return;
+    }
+    const thumbPath = await getOrCreateThumbnail(f.id, fullPath, ct);
+    if (!thumbPath) {
+      res.status(403).json({ detail: "thumbnail unavailable" });
+      return;
+    }
+    const size = statSync(thumbPath).size;
+    res.writeHead(200, {
+      ...SECURITY_HEADERS,
+      "Content-Type": "image/jpeg",
+      "Content-Length": String(size),
+      "Cache-Control": "public, max-age=86400",
+    });
+    createReadStream(thumbPath, { highWaterMark: CHUNK }).pipe(res);
   });
 
   router.get("/file/:slug", (req, res) => {

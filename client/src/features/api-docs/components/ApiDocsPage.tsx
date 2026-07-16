@@ -283,14 +283,14 @@ export function ApiDocsPage() {
       <Endpoint
         id="ep-list-files"
         method="GET"
-        path="/files/"
+        path="/api/files/"
         title="List files"
         description="Returns all files owned by or shared with the authenticated user."
       >
         <LangTabs examples={{
-          curl: `curl "${origin}/files/" \\\n  -H "Authorization: Bearer ${key}"`,
-          python: `import requests\n\nresp = requests.get(\n    "${origin}/files/",\n    headers={"Authorization": "Bearer ${key}"}\n)\nfiles = resp.json()["files"]\nfor f in files:\n    print(f["original_filename"], f["size_bytes"])`,
-          node: `const res = await fetch("${origin}/files/", {\n  headers: { "Authorization": "Bearer ${key}" }\n});\nconst { files } = await res.json();\nconsole.log(files);`,
+          curl: `curl "${origin}/api/files/" \\\n  -H "Authorization: Bearer ${key}"`,
+          python: `import requests\n\nresp = requests.get(\n    "${origin}/api/files/",\n    headers={"Authorization": "Bearer ${key}"}\n)\nfiles = resp.json()["files"]\nfor f in files:\n    print(f["original_filename"], f["size_bytes"])`,
+          node: `const res = await fetch("${origin}/api/files/", {\n  headers: { "Authorization": "Bearer ${key}" }\n});\nconst { files } = await res.json();\nconsole.log(files);`,
         }} />
         <ResponseBlock json={{
           files: [
@@ -310,7 +310,7 @@ export function ApiDocsPage() {
       <Endpoint
         id="ep-upload"
         method="POST"
-        path="/files/upload"
+        path="/api/files/upload"
         title="Upload a file"
         description="Upload a file using multipart/form-data. Returns a shareable link and metadata."
       >
@@ -327,15 +327,15 @@ export function ApiDocsPage() {
           ]}
         />
         <LangTabs examples={{
-          curl: `curl -X POST "${origin}/files/upload" \\\n  -H "Authorization: Bearer ${key}" \\\n  -F "file=@./report.pdf" \\\n  -F "original_filename=report.pdf" \\\n  -F "encryption_mode=none"`,
-          python: `import requests\n\nwith open("report.pdf", "rb") as f:\n    resp = requests.post(\n        "${origin}/files/upload",\n        headers={"Authorization": "Bearer ${key}"},\n        files={"file": f},\n        data={\n            "original_filename": "report.pdf",\n            "encryption_mode": "none",\n        },\n    )\nprint(resp.json())`,
-          node: `import { createReadStream } from "fs";\nimport FormData from "form-data";\nimport fetch from "node-fetch";\n\nconst form = new FormData();\nform.append("file", createReadStream("report.pdf"));\nform.append("original_filename", "report.pdf");\nform.append("encryption_mode", "none");\n\nconst res = await fetch("${origin}/files/upload", {\n  method: "POST",\n  headers: { "Authorization": "Bearer ${key}", ...form.getHeaders() },\n  body: form,\n});\nconsole.log(await res.json());`,
+          curl: `curl -X POST "${origin}/api/files/upload" \\\n  -H "Authorization: Bearer ${key}" \\\n  -F "file=@./report.pdf" \\\n  -F "original_filename=report.pdf" \\\n  -F "encryption_mode=none"`,
+          python: `import requests\n\nwith open("report.pdf", "rb") as f:\n    resp = requests.post(\n        "${origin}/api/files/upload",\n        headers={"Authorization": "Bearer ${key}"},\n        files={"file": f},\n        data={\n            "original_filename": "report.pdf",\n            "encryption_mode": "none",\n        },\n    )\nprint(resp.json())`,
+          node: `import { createReadStream } from "fs";\nimport FormData from "form-data";\nimport fetch from "node-fetch";\n\nconst form = new FormData();\nform.append("file", createReadStream("report.pdf"));\nform.append("original_filename", "report.pdf");\nform.append("encryption_mode", "none");\n\nconst res = await fetch("${origin}/api/files/upload", {\n  method: "POST",\n  headers: { "Authorization": "Bearer ${key}", ...form.getHeaders() },\n  body: form,\n});\nconsole.log(await res.json());`,
         }} />
         <ResponseBlock json={{
           id: 1,
           slug: "ab12cd34",
-          url: `${origin}/file/ab12cd34`,
-          raw_url: `${origin}/file/ab12cd34/raw`,
+          url: `${origin}/api/file/ab12cd34`,
+          raw_url: `${origin}/api/file/ab12cd34/raw`,
           encryption_mode: "none",
           access_key: null,
         }} />
@@ -344,7 +344,7 @@ export function ApiDocsPage() {
       <Endpoint
         id="ep-delete-file"
         method="DELETE"
-        path="/files/{file_id}"
+        path="/api/files/{file_id}"
         title="Delete a file"
         description="Permanently deletes the file and all its share links. Requires can_delete permission."
       >
@@ -355,9 +355,9 @@ export function ApiDocsPage() {
           ]}
         />
         <LangTabs examples={{
-          curl: `curl -X DELETE "${origin}/files/1" \\\n  -H "Authorization: Bearer ${key}"`,
-          python: `requests.delete(\n    "${origin}/files/1",\n    headers={"Authorization": "Bearer ${key}"}\n)`,
-          node: `await fetch("${origin}/files/1", {\n  method: "DELETE",\n  headers: { "Authorization": "Bearer ${key}" }\n});`,
+          curl: `curl -X DELETE "${origin}/api/files/1" \\\n  -H "Authorization: Bearer ${key}"`,
+          python: `requests.delete(\n    "${origin}/api/files/1",\n    headers={"Authorization": "Bearer ${key}"}\n)`,
+          node: `await fetch("${origin}/api/files/1", {\n  method: "DELETE",\n  headers: { "Authorization": "Bearer ${key}" }\n});`,
         }} />
         <ResponseBlock json={{ status: "deleted" }} />
       </Endpoint>
@@ -368,7 +368,7 @@ export function ApiDocsPage() {
       <Endpoint
         id="ep-create-link"
         method="POST"
-        path="/files/{file_id}/links"
+        path="/api/files/{file_id}/links"
         title="Create a share link"
         description="Mints a new share link for a file. You can create multiple links with different limits."
       >
@@ -387,14 +387,14 @@ export function ApiDocsPage() {
           ]}
         />
         <LangTabs examples={{
-          curl: `curl -X POST "${origin}/files/1/links" \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"max_uses": 10, "expires_in_seconds": 86400, "hide_uploader": false}'`,
-          python: `resp = requests.post(\n    "${origin}/files/1/links",\n    headers={"Authorization": "Bearer ${key}"},\n    json={"max_uses": 10, "expires_in_seconds": 86400}\n)\nprint(resp.json()["url"])`,
-          node: `const res = await fetch("${origin}/files/1/links", {\n  method: "POST",\n  headers: {\n    "Authorization": "Bearer ${key}",\n    "Content-Type": "application/json",\n  },\n  body: JSON.stringify({ max_uses: 10, expires_in_seconds: 86400 }),\n});\nconsole.log(await res.json());`,
+          curl: `curl -X POST "${origin}/api/files/1/links" \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"max_uses": 10, "expires_in_seconds": 86400, "hide_uploader": false}'`,
+          python: `resp = requests.post(\n    "${origin}/api/files/1/links",\n    headers={"Authorization": "Bearer ${key}"},\n    json={"max_uses": 10, "expires_in_seconds": 86400}\n)\nprint(resp.json()["url"])`,
+          node: `const res = await fetch("${origin}/api/files/1/links", {\n  method: "POST",\n  headers: {\n    "Authorization": "Bearer ${key}",\n    "Content-Type": "application/json",\n  },\n  body: JSON.stringify({ max_uses: 10, expires_in_seconds: 86400 }),\n});\nconsole.log(await res.json());`,
         }} />
         <ResponseBlock json={{
           slug: "ab12cd34",
-          url: `${origin}/file/ab12cd34`,
-          raw_url: `${origin}/file/ab12cd34/raw`,
+          url: `${origin}/api/file/ab12cd34`,
+          raw_url: `${origin}/api/file/ab12cd34/raw`,
           encryption_mode: "none",
           access_key: null,
         }} />
@@ -403,7 +403,7 @@ export function ApiDocsPage() {
       <Endpoint
         id="ep-edit-link"
         method="PATCH"
-        path="/links/{link_id}"
+        path="/api/links/{link_id}"
         title="Edit a share link"
         description="Update a link's limits, active state, or uploader visibility. Only supply fields you want to change."
       >
@@ -417,9 +417,9 @@ export function ApiDocsPage() {
           ]}
         />
         <LangTabs examples={{
-          curl: `curl -X PATCH "${origin}/links/1" \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"active": false}'`,
-          python: `requests.patch(\n    "${origin}/links/1",\n    headers={"Authorization": "Bearer ${key}"},\n    json={"active": False}\n)`,
-          node: `await fetch("${origin}/links/1", {\n  method: "PATCH",\n  headers: {\n    "Authorization": "Bearer ${key}",\n    "Content-Type": "application/json",\n  },\n  body: JSON.stringify({ active: false }),\n});`,
+          curl: `curl -X PATCH "${origin}/api/links/1" \\\n  -H "Authorization: Bearer ${key}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"active": false}'`,
+          python: `requests.patch(\n    "${origin}/api/links/1",\n    headers={"Authorization": "Bearer ${key}"},\n    json={"active": False}\n)`,
+          node: `await fetch("${origin}/api/links/1", {\n  method: "PATCH",\n  headers: {\n    "Authorization": "Bearer ${key}",\n    "Content-Type": "application/json",\n  },\n  body: JSON.stringify({ active: false }),\n});`,
         }} />
         <ResponseBlock json={{ status: "updated" }} />
       </Endpoint>
@@ -427,14 +427,14 @@ export function ApiDocsPage() {
       <Endpoint
         id="ep-delete-link"
         method="DELETE"
-        path="/links/{link_id}"
+        path="/api/links/{link_id}"
         title="Delete a share link"
         description="Permanently removes a share link. Existing users with the URL can no longer download."
       >
         <LangTabs examples={{
-          curl: `curl -X DELETE "${origin}/links/1" \\\n  -H "Authorization: Bearer ${key}"`,
-          python: `requests.delete("${origin}/links/1", headers={"Authorization": "Bearer ${key}"})`,
-          node: `await fetch("${origin}/links/1", {\n  method: "DELETE",\n  headers: { "Authorization": "Bearer ${key}" }\n});`,
+          curl: `curl -X DELETE "${origin}/api/links/1" \\\n  -H "Authorization: Bearer ${key}"`,
+          python: `requests.delete("${origin}/api/links/1", headers={"Authorization": "Bearer ${key}"})`,
+          node: `await fetch("${origin}/api/links/1", {\n  method: "DELETE",\n  headers: { "Authorization": "Bearer ${key}" }\n});`,
         }} />
         <ResponseBlock json={{ status: "deleted" }} />
       </Endpoint>
@@ -445,7 +445,7 @@ export function ApiDocsPage() {
       <Endpoint
         id="ep-file-info"
         method="GET"
-        path="/file/{slug}/info"
+        path="/api/file/{slug}/info"
         title="File metadata"
         description="Fetch metadata for a public file link without consuming a download or requiring auth."
       >
@@ -456,9 +456,9 @@ export function ApiDocsPage() {
           ]}
         />
         <LangTabs examples={{
-          curl: `curl "${origin}/file/ab12cd34/info"`,
-          python: `resp = requests.get("${origin}/file/ab12cd34/info")\ninfo = resp.json()\nprint(info["original_filename"], info["size_bytes"])`,
-          node: `const res = await fetch("${origin}/file/ab12cd34/info");\nconsole.log(await res.json());`,
+          curl: `curl "${origin}/api/file/ab12cd34/info"`,
+          python: `resp = requests.get("${origin}/api/file/ab12cd34/info")\ninfo = resp.json()\nprint(info["original_filename"], info["size_bytes"])`,
+          node: `const res = await fetch("${origin}/api/file/ab12cd34/info");\nconsole.log(await res.json());`,
         }} />
         <ResponseBlock json={{
           original_filename: "report.pdf",
@@ -477,7 +477,7 @@ export function ApiDocsPage() {
       <Endpoint
         id="ep-download"
         method="GET"
-        path="/file/{slug}/raw"
+        path="/api/file/{slug}/raw"
         title="Download file"
         description="Download the raw file content. For server-encrypted files, include the access key. For client-encrypted files, you receive ciphertext that must be decrypted locally."
       >
@@ -488,9 +488,9 @@ export function ApiDocsPage() {
           ]}
         />
         <LangTabs examples={{
-          curl: `# Unencrypted\ncurl -L -O "${origin}/file/ab12cd34/raw"\n\n# Server-encrypted\ncurl -L -O "${origin}/file/ab12cd34/raw?ek=<access_key>"`,
-          python: `import shutil, requests\n\nwith requests.get("${origin}/file/ab12cd34/raw", stream=True) as r:\n    r.raise_for_status()\n    with open("download.pdf", "wb") as f:\n        shutil.copyfileobj(r.raw, f)`,
-          node: `import { createWriteStream } from "fs";\nimport fetch from "node-fetch";\n\nconst res = await fetch("${origin}/file/ab12cd34/raw");\nconst dest = createWriteStream("download.pdf");\nawait new Promise((resolve, reject) => {\n  res.body.pipe(dest);\n  res.body.on("error", reject);\n  dest.on("finish", resolve);\n});`,
+          curl: `# Unencrypted\ncurl -L -O "${origin}/api/file/ab12cd34/raw"\n\n# Server-encrypted\ncurl -L -O "${origin}/api/file/ab12cd34/raw?ek=<access_key>"`,
+          python: `import shutil, requests\n\nwith requests.get("${origin}/api/file/ab12cd34/raw", stream=True) as r:\n    r.raise_for_status()\n    with open("download.pdf", "wb") as f:\n        shutil.copyfileobj(r.raw, f)`,
+          node: `import { createWriteStream } from "fs";\nimport fetch from "node-fetch";\n\nconst res = await fetch("${origin}/api/file/ab12cd34/raw");\nconst dest = createWriteStream("download.pdf");\nawait new Promise((resolve, reject) => {\n  res.body.pipe(dest);\n  res.body.on("error", reject);\n  dest.on("finish", resolve);\n});`,
         }} />
       </Endpoint>
 
@@ -500,14 +500,14 @@ export function ApiDocsPage() {
       <Endpoint
         id="ep-list-folders"
         method="GET"
-        path="/directories/"
+        path="/api/directories/"
         title="List folders"
         description="Returns all folders you own or are a collaborator on."
       >
         <LangTabs examples={{
-          curl: `curl "${origin}/directories/" \\\n  -H "Authorization: Bearer ${key}"`,
-          python: `resp = requests.get(\n    "${origin}/directories/",\n    headers={"Authorization": "Bearer ${key}"}\n)\nfor d in resp.json()["directories"]:\n    print(d["title"], d["file_count"])`,
-          node: `const res = await fetch("${origin}/directories/", {\n  headers: { "Authorization": "Bearer ${key}" }\n});\nconst { directories } = await res.json();\nconsole.log(directories);`,
+          curl: `curl "${origin}/api/directories/" \\\n  -H "Authorization: Bearer ${key}"`,
+          python: `resp = requests.get(\n    "${origin}/api/directories/",\n    headers={"Authorization": "Bearer ${key}"}\n)\nfor d in resp.json()["directories"]:\n    print(d["title"], d["file_count"])`,
+          node: `const res = await fetch("${origin}/api/directories/", {\n  headers: { "Authorization": "Bearer ${key}" }\n});\nconst { directories } = await res.json();\nconsole.log(directories);`,
         }} />
         <ResponseBlock json={{
           directories: [
@@ -524,7 +524,7 @@ export function ApiDocsPage() {
       <Endpoint
         id="ep-download-zip"
         method="GET"
-        path="/d/{slug}/zip"
+        path="/api/d/{slug}/zip"
         title="Download folder as ZIP"
         description="Streams all files in a folder as a ZIP archive. Server-encrypted folders require the access key."
       >
@@ -535,9 +535,9 @@ export function ApiDocsPage() {
           ]}
         />
         <LangTabs examples={{
-          curl: `curl -L -O "${origin}/d/xy99zz/zip"`,
-          python: `with requests.get("${origin}/d/xy99zz/zip", stream=True) as r:\n    r.raise_for_status()\n    with open("folder.zip", "wb") as f:\n        for chunk in r.iter_content(chunk_size=8192):\n            f.write(chunk)`,
-          node: `const res = await fetch("${origin}/d/xy99zz/zip");\nconst buffer = await res.arrayBuffer();\nimport { writeFileSync } from "fs";\nwriteFileSync("folder.zip", Buffer.from(buffer));`,
+          curl: `curl -L -O "${origin}/api/d/xy99zz/zip"`,
+          python: `with requests.get("${origin}/api/d/xy99zz/zip", stream=True) as r:\n    r.raise_for_status()\n    with open("folder.zip", "wb") as f:\n        for chunk in r.iter_content(chunk_size=8192):\n            f.write(chunk)`,
+          node: `const res = await fetch("${origin}/api/d/xy99zz/zip");\nconst buffer = await res.arrayBuffer();\nimport { writeFileSync } from "fs";\nwriteFileSync("folder.zip", Buffer.from(buffer));`,
         }} />
       </Endpoint>
 
@@ -547,7 +547,7 @@ export function ApiDocsPage() {
       <Endpoint
         id="ep-dropbox-upload"
         method="POST"
-        path="/dropbox/{slug}"
+        path="/api/dropbox/{slug}"
         title="Upload to a dropbox"
         description="Upload a file to a dropbox link without authentication. The link owner receives it in their account. Supports the same form fields as the regular upload endpoint."
       >
@@ -560,9 +560,9 @@ export function ApiDocsPage() {
           ]}
         />
         <LangTabs examples={{
-          curl: `curl -X POST "${origin}/dropbox/<dropbox-slug>" \\\n  -F "file=@./document.pdf" \\\n  -F "original_filename=document.pdf"`,
-          python: `with open("document.pdf", "rb") as f:\n    resp = requests.post(\n        "${origin}/dropbox/<dropbox-slug>",\n        files={"file": f},\n        data={"original_filename": "document.pdf"},\n    )\nprint(resp.json())`,
-          node: `const form = new FormData();\nform.append("file", createReadStream("document.pdf"));\nform.append("original_filename", "document.pdf");\n\nawait fetch("${origin}/dropbox/<dropbox-slug>", {\n  method: "POST",\n  body: form,\n});`,
+          curl: `curl -X POST "${origin}/api/dropbox/<dropbox-slug>" \\\n  -F "file=@./document.pdf" \\\n  -F "original_filename=document.pdf"`,
+          python: `with open("document.pdf", "rb") as f:\n    resp = requests.post(\n        "${origin}/api/dropbox/<dropbox-slug>",\n        files={"file": f},\n        data={"original_filename": "document.pdf"},\n    )\nprint(resp.json())`,
+          node: `const form = new FormData();\nform.append("file", createReadStream("document.pdf"));\nform.append("original_filename", "document.pdf");\n\nawait fetch("${origin}/api/dropbox/<dropbox-slug>", {\n  method: "POST",\n  body: form,\n});`,
         }} />
         <ResponseBlock json={{ status: "received", file_id: 42 }} />
       </Endpoint>
@@ -573,14 +573,14 @@ export function ApiDocsPage() {
       <Endpoint
         id="ep-me"
         method="GET"
-        path="/account/me"
+        path="/api/account/me"
         title="Get current user"
         description="Returns the authenticated user's profile, permissions, and quota."
       >
         <LangTabs examples={{
-          curl: `curl "${origin}/account/me" \\\n  -H "Authorization: Bearer ${key}"`,
-          python: `resp = requests.get(\n    "${origin}/account/me",\n    headers={"Authorization": "Bearer ${key}"}\n)\nme = resp.json()\nprint(me["username"], me["used_bytes"], "/", me["quota_bytes"])`,
-          node: `const res = await fetch("${origin}/account/me", {\n  headers: { "Authorization": "Bearer ${key}" }\n});\nconsole.log(await res.json());`,
+          curl: `curl "${origin}/api/account/me" \\\n  -H "Authorization: Bearer ${key}"`,
+          python: `resp = requests.get(\n    "${origin}/api/account/me",\n    headers={"Authorization": "Bearer ${key}"}\n)\nme = resp.json()\nprint(me["username"], me["used_bytes"], "/", me["quota_bytes"])`,
+          node: `const res = await fetch("${origin}/api/account/me", {\n  headers: { "Authorization": "Bearer ${key}" }\n});\nconsole.log(await res.json());`,
         }} />
         <ResponseBlock json={{
           id: 5,
@@ -633,7 +633,7 @@ export function ApiDocsPage() {
       <Endpoint
         id="ep-user-ws"
         method="GET"
-        path="/ws/events"
+        path="/api/ws/events"
         title="Per-user event stream (WebSocket)"
         description="Authenticated by your session cookie — open it from the browser app. A regular user receives only their own events (across every session and node); a master receives the full firehose."
       >
@@ -644,9 +644,9 @@ export function ApiDocsPage() {
           ]}
         />
         <LangTabs examples={{
-          curl: `# WebSockets aren't curl-friendly; use websocat with your session cookie:\nwebsocat "${origin.replace(/^http/, "ws")}/ws/events" \\\n  -H "Cookie: fu_session=<your-session-cookie>"`,
-          python: `import json, websockets, asyncio\n\nasync def main():\n    url = "${origin.replace(/^http/, "ws")}/ws/events"\n    async with websockets.connect(url, additional_headers={"Cookie": "fu_session=<cookie>"}) as ws:\n        async for raw in ws:\n            evt = json.loads(raw)\n            if evt["type"] == "event":\n                print(evt["action"], evt["actor"])\n\nasyncio.run(main())`,
-          node: `const ws = new WebSocket("${origin.replace(/^http/, "ws")}/ws/events");\nws.onmessage = (m) => {\n  const evt = JSON.parse(m.data);\n  if (evt.type === "event") console.log(evt.action, evt.actor);\n};`,
+          curl: `# WebSockets aren't curl-friendly; use websocat with your session cookie:\nwebsocat "${origin.replace(/^http/, "ws")}/api/ws/events" \\\n  -H "Cookie: fu_session=<your-session-cookie>"`,
+          python: `import json, websockets, asyncio\n\nasync def main():\n    url = "${origin.replace(/^http/, "ws")}/api/ws/events"\n    async with websockets.connect(url, additional_headers={"Cookie": "fu_session=<cookie>"}) as ws:\n        async for raw in ws:\n            evt = json.loads(raw)\n            if evt["type"] == "event":\n                print(evt["action"], evt["actor"])\n\nasyncio.run(main())`,
+          node: `const ws = new WebSocket("${origin.replace(/^http/, "ws")}/api/ws/events");\nws.onmessage = (m) => {\n  const evt = JSON.parse(m.data);\n  if (evt.type === "event") console.log(evt.action, evt.actor);\n};`,
         }} />
         <p className="text-xs">Closes with code <code>4401</code> if the session cookie is missing or invalid.</p>
       </Endpoint>
@@ -678,19 +678,19 @@ export function ApiDocsPage() {
                 name: "none",
                 title: "No encryption",
                 detail: "The link slug is the only credential. Anyone with the link can download the file. Fast and simple for non-sensitive content.",
-                download: `${origin}/file/<slug>/raw`,
+                download: `${origin}/api/file/<slug>/raw`,
               },
               {
                 name: "server",
                 title: "Server-side encryption",
                 detail: "The server encrypts the file at rest. An access key (?ek=...) is required to download. The server holds the key — use this when you need convenient sharing but don't require end-to-end security.",
-                download: `${origin}/file/<slug>/raw?ek=<access_key>`,
+                download: `${origin}/api/file/<slug>/raw?ek=<access_key>`,
               },
               {
                 name: "client",
                 title: "End-to-end (client-side) encryption",
                 detail: "The file is encrypted in the browser before upload. The server never sees the plaintext. The #ek= fragment is never sent to the server. Ideal for maximum privacy — but the server cannot decrypt even if compelled.",
-                download: `${origin}/file/<slug>#ek=<client_key>`,
+                download: `${origin}/api/file/<slug>#ek=<client_key>`,
               },
             ].map((e) => (
               <div key={e.name} className="rounded-md border border-border p-3 space-y-1.5">

@@ -27,7 +27,10 @@ export function FilesMode() {
 
   return (
     <div className="space-y-4">
-      <Dropzone onFiles={(f) => setFiles((prev) => [...prev, ...f])} hint="Up to your per-file size limit" />
+      <Dropzone
+        onFiles={(f) => setFiles((prev) => [...prev, ...f])}
+        hint="Select multiple files at once — up to your per-file size limit each"
+      />
 
       {files.length > 0 && (
         <>

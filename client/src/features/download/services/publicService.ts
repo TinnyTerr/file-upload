@@ -1,4 +1,4 @@
-import { api } from "@/config/api";
+import { api, apiPath } from "@/config/api";
 import type { EncryptionMode } from "@/features/files/types";
 
 export interface UploaderInfo {
@@ -28,7 +28,7 @@ export const publicService = {
 
   /** Fetch raw (possibly ciphertext) bytes as a Blob, with progress. */
   fetchRaw: async (slug: string, onProgress?: (loaded: number, total: number) => void): Promise<Blob> => {
-    const res = await fetch(`/file/${slug}/raw`, { credentials: "same-origin" });
+    const res = await fetch(apiPath(`/file/${slug}/raw`), { credentials: "same-origin" });
     if (!res.ok) {
       const msg = res.status === 404 ? "Link not found, expired, or exhausted." : `Download failed (${res.status})`;
       throw new Error(msg);
@@ -51,6 +51,6 @@ export const publicService = {
 };
 
 export const rawPath = (slug: string, accessKey?: string | null) =>
-  accessKey ? `/file/${slug}/raw?ek=${encodeURIComponent(accessKey)}` : `/file/${slug}/raw`;
+  apiPath(accessKey ? `/file/${slug}/raw?ek=${encodeURIComponent(accessKey)}` : `/file/${slug}/raw`);
 
-export const previewPath = (slug: string) => `/file/${slug}/preview`;
+export const previewPath = (slug: string) => apiPath(`/file/${slug}/preview`);

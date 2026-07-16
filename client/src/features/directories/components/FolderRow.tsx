@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { ChevronDown, Folder, Trash2, ExternalLink, X, FilePlus, Link2, Info, KeyRound } from "lucide-react";
+import { ChevronDown, Folder, Trash2, ExternalLink, X, FilePlus, Link2, Info, KeyRound, Eye } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -19,8 +19,10 @@ import { ShareModal, type ShareEntry } from "@/features/files/components/ShareMo
 import { verifyFolderKey } from "../lib/folderKey";
 import { formatBytes } from "@/lib/bytes";
 import { cn } from "@/lib/cn";
-import type { Directory } from "../types";
+import type { Directory, DirectoryMember } from "../types";
 import { FolderLinksModal } from "./FolderLinksModal";
+import { isPreviewableType, PreviewMedia } from "@/features/download/components/FilePreview";
+import { previewPath } from "@/features/download/services/publicService";
 
 function extractClientKey(value: string): string {
   const trimmed = value.trim();
@@ -41,6 +43,7 @@ export function FolderRow({ dir }: { dir: Directory }) {
   const [clientKey, setClientKey] = useState<Uint8Array | null>(null);
   const [clientKeyB64, setClientKeyB64] = useState<string | null>(null);
   const [pendingFiles, setPendingFiles] = useState<File[] | null>(null);
+  const [previewMember, setPreviewMember] = useState<DirectoryMember | null>(null);
   const { data: members, isLoading } = useDirMembers(dir.id, expanded);
   const del = useDeleteDirectory();
   const removeMember = useRemoveMember(dir.id);
@@ -189,6 +192,7 @@ export function FolderRow({ dir }: { dir: Directory }) {
               ) : (
                 members.map((m) => {
                   const Icon = iconForType(m.content_type);
+                  const canView = !!m.slug && m.encryption_mode === "none" && isPreviewableType(m.content_type);
                   return (
                     <ListRow
                       key={m.id}
@@ -196,18 +200,32 @@ export function FolderRow({ dir }: { dir: Directory }) {
                       className="bg-background/30"
                       leading={<Icon className="size-4 shrink-0 text-muted-foreground" />}
                       trailing={
-                        canDelete && (
-                          <Tooltip content="Remove from folder">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="size-6 text-destructive"
-                              onClick={() => removeMember.mutate(m.id)}
-                            >
-                              <X className="size-3.5" />
-                            </Button>
-                          </Tooltip>
-                        )
+                        <>
+                          {canView && (
+                            <Tooltip content="View">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="size-6"
+                                onClick={() => setPreviewMember(m)}
+                              >
+                                <Eye className="size-3.5" />
+                              </Button>
+                            </Tooltip>
+                          )}
+                          {canDelete && (
+                            <Tooltip content="Remove from folder">
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="size-6 text-destructive"
+                                onClick={() => removeMember.mutate(m.id)}
+                              >
+                                <X className="size-3.5" />
+                              </Button>
+                            </Tooltip>
+                          )}
+                        </>
                       }
                     >
                       <span className="flex items-center gap-2 truncate text-xs" title={m.filename}>
@@ -282,6 +300,22 @@ export function FolderRow({ dir }: { dir: Directory }) {
         </DialogContent>
       </Dialog>
 
+      <Dialog open={previewMember !== null} onOpenChange={(o) => !o && setPreviewMember(null)}>
+        <DialogContent className="max-w-2xl">
+          {previewMember && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="truncate">{previewMember.filename}</DialogTitle>
+              </DialogHeader>
+              <PreviewMedia
+                src={previewPath(previewMember.slug!)}
+                contentType={previewMember.content_type}
+                filename={previewMember.filename}
+              />
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

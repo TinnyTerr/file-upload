@@ -17,6 +17,7 @@ import { remoteUploadRouter } from "./routes/remoteUpload.ts";
 import { directoriesRouter, adminDirectoriesRouter, publicDirectoriesRouter } from "./routes/directories.ts";
 import { dropboxRouter } from "./routes/dropbox.ts";
 import { adminRouter } from "./routes/admin.ts";
+import { clusterRouter, adminClusterRouter } from "./routes/cluster.ts";
 import { HttpError } from "./httpError.ts";
 import { getLogger } from "./logging.ts";
 
@@ -35,26 +36,31 @@ export function createApp(state: AppState): Express {
   app.use(express.json());
   app.use(cookieParser());
 
-  app.get("/health", (_req, res) => {
+  app.get("/api/health", (_req, res) => {
     res.json({ status: "ok" });
   });
 
-  app.use("/auth", authRouter(state));
-  app.use("/account", accountRouter(state));
-  app.use("/keys", keysRouter(state));
-  app.use("/admin/keys", adminKeysRouter(state));
-  app.use("/users", usersRouter(state));
-  app.use("/audit", auditRouter(state));
-  app.use("/files", filesRouter(state));
-  app.use("/files", remoteUploadRouter(state));
-  app.use("/admin/files", adminFilesRouter(state));
-  app.use("/links", linksRouter(state));
-  app.use("/admin/directories", adminDirectoriesRouter(state));
-  app.use(directoriesRouter(state));
-  app.use(dropboxRouter(state));
-  app.use("/admin", adminRouter(state));
-  app.use(publicRouter(state));
-  app.use(publicDirectoriesRouter(state));
+  // Every JSON/data-returning endpoint lives under /api/* so it can never
+  // collide with an SPA client-side route (e.g. /files, /admin, /cluster are
+  // both page routes and route prefixes here) -- see spaRoutes below.
+  app.use("/api/auth", authRouter(state));
+  app.use("/api/account", accountRouter(state));
+  app.use("/api/keys", keysRouter(state));
+  app.use("/api/admin/keys", adminKeysRouter(state));
+  app.use("/api/users", usersRouter(state));
+  app.use("/api/audit", auditRouter(state));
+  app.use("/api/files", filesRouter(state));
+  app.use("/api/files", remoteUploadRouter(state));
+  app.use("/api/admin/files", adminFilesRouter(state));
+  app.use("/api/links", linksRouter(state));
+  app.use("/api/admin/directories", adminDirectoriesRouter(state));
+  app.use("/api", directoriesRouter(state));
+  app.use("/api", dropboxRouter(state));
+  app.use("/api/admin", adminRouter(state));
+  app.use("/api/cluster", clusterRouter(state));
+  app.use("/api/admin/cluster", adminClusterRouter(state));
+  app.use("/api", publicRouter(state));
+  app.use("/api", publicDirectoriesRouter(state));
 
   if (existsSync(SPA_DIST)) {
     app.use(

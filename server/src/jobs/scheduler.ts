@@ -2,18 +2,23 @@ import type { AppState } from "../appState.ts";
 import { getLogger } from "../logging.ts";
 import { archiveIdleJob, deleteIdleJob, tempExpiryJob, linkExpiryJob } from "./lifecycle.ts";
 import { sweepStaleParts } from "../routes/files.ts";
+import { heartbeatJob } from "../cluster/membership.ts";
+import { syncCheckJob } from "../cluster/digest.ts";
 
 /** setInterval-based scheduler mirroring app/main.py's BackgroundScheduler
  * wiring: archive_idle/delete_idle/temp_expiry/sweep_stale_parts hourly,
  * link_expiry every 10 minutes. reconcile_stale_states has no interval in
- * Python either -- it's manual-trigger only (see routes/admin.ts). Cluster
- * heartbeat/sync jobs are deferred along with the rest of the cluster
- * runtime, so they're not registered here. */
+ * Python either -- it's manual-trigger only (see routes/admin.ts).
+ * cluster_heartbeat and cluster_sync_check run alongside them; they are
+ * cheap no-ops on a single, unlinked node (no rows in cluster_nodes), so
+ * registering them unconditionally matches the Python scheduler's approach
+ * of always running the jobs rather than gating on cluster configuration. */
 
 const log = getLogger("app.jobs.scheduler");
 
 const HOUR_MS = 60 * 60 * 1000;
 const TEN_MIN_MS = 10 * 60 * 1000;
+const MINUTE_MS = 60 * 1000;
 
 interface JobSpec {
   id: string;
@@ -31,6 +36,8 @@ function buildJobSpecs(state: AppState): JobSpec[] {
     { id: "temp_expiry", intervalMs: HOUR_MS, run: () => tempExpiryJob(db) },
     { id: "link_expiry", intervalMs: TEN_MIN_MS, run: () => linkExpiryJob(db) },
     { id: "sweep_stale_parts", intervalMs: HOUR_MS, run: () => sweepStaleParts() },
+    { id: "cluster_heartbeat", intervalMs: MINUTE_MS, run: () => heartbeatJob(state) },
+    { id: "cluster_sync_check", intervalMs: 5 * MINUTE_MS, run: () => syncCheckJob(state) },
   ];
 }
 

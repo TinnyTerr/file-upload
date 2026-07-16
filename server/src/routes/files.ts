@@ -33,6 +33,7 @@ import { encryptFile } from "../crypto/aead.ts";
 import { seal, openBox } from "../crypto/secretbox.ts";
 import { ensurePermissions } from "../permissions.ts";
 import { enforceGlobalUploadCapacity, usedStorageBytes } from "../storage/accounting.ts";
+import { replicateFile } from "../cluster/replication.ts";
 import { nowIso, type FileRow, type LinkRow, type PermissionRow, type UserRow } from "../db/rows.ts";
 
 const log = getLogger("app.routes.files");
@@ -142,6 +143,19 @@ function prepareUpload(
   }
 
   return { encryptionMode, compress, isPermanent, tempDays, randomizeFilename, directory, perm };
+}
+
+/** Rejects new uploads while a cluster-wide or per-user halt is active (see
+ * server/src/cluster/halt.ts). Checked at the start of every upload entry
+ * point -- single-shot and chunked-init -- so a storage-emergency halt
+ * gossiped over the firehose takes effect immediately without needing to
+ * touch each in-flight request individually. Exported for reuse by
+ * dropbox.ts, mirroring precheckDeclaredSize below. */
+export function checkUploadHalt(state: AppState, userId: number): void {
+  const until = state.haltRegistry.activeUntil(userId);
+  if (until !== null) {
+    throw new HttpError(503, "uploads are temporarily halted on this cluster; try again shortly");
+  }
 }
 
 /** Exported for reuse by dropbox.ts. Mirrors
@@ -345,6 +359,12 @@ export async function finalizeStoredFile(opts: FinalizeOpts): Promise<Record<str
     log.info(
       `upload finalized file_id=${fileObj.id} owner_id=${user.id} stored_bytes=${blob.stored_size_bytes} size_bytes=${sizeBytes} encryption=${opts.encryptionMode} compressed=${fileCompressed} directory_id=${directoryId}`,
     );
+    // Best-effort, fire-and-forget cluster replication -- never adds peer
+    // round-trip latency to the upload response, and a no-op without any
+    // linked peers (see cluster/replication.ts::replicateFile).
+    void replicateFile(state, fileObj.id).catch((err) => {
+      log.warning(`cluster replication failed file_id=${fileObj.id}: ${err instanceof Error ? err.message : String(err)}`);
+    });
 
     const baseUrl = fileUrl(req, slug);
     return {
@@ -599,6 +619,10 @@ export function filesRouter(state: AppState): Router {
 
   router.post("/upload", getUploadUser(state), (req, res, next) => {
     const user = req.currentUser!;
+    if (state.haltRegistry.activeUntil(user.id) !== null) {
+      res.status(503).json({ detail: "uploads are temporarily halted on this cluster; try again shortly" });
+      return;
+    }
     const bb = busboy({ headers: req.headers, limits: { fileSize: ABSOLUTE_UPLOAD_CEILING } });
     const fields: Record<string, string> = {};
     let handled = false;
@@ -720,6 +744,7 @@ export function filesRouter(state: AppState): Router {
   router.post("/upload/init", getUploadUser(state), (req, res) => {
     try {
       const user = req.currentUser!;
+      checkUploadHalt(state, user.id);
       const body = req.body ?? {};
       const prepared = prepareUpload(state, user, {
         encryptionMode: body.encryption_mode || "none",

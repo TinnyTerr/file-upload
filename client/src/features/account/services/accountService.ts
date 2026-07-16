@@ -1,4 +1,4 @@
-import { api } from "@/config/api";
+import { api, apiPath } from "@/config/api";
 import type { CurrentUser } from "../types";
 
 export const accountService = {
@@ -26,5 +26,5 @@ export const accountService = {
 
   /** URL to serve the avatar for a given user id. Cache-busted by version param. */
   avatarUrl: (userId: number, v?: number) =>
-    `/account/avatar/${userId}${v !== undefined ? `?v=${v}` : ""}`,
+    apiPath(`/account/avatar/${userId}${v !== undefined ? `?v=${v}` : ""}`),
 };

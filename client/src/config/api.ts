@@ -39,14 +39,24 @@ export interface RequestOptions extends Omit<RequestInit, "body"> {
   query?: Record<string, string | number | boolean | null | undefined>;
 }
 
+/** Every backend route lives under /api/* -- kept out of the SPA's own
+ * client-side route namespace so a page route (e.g. /files, /admin,
+ * /cluster) can never collide with an API route of the same name. */
+export const API_PREFIX = "/api";
+
+export function apiPath(path: string): string {
+  return path.startsWith(API_PREFIX) ? path : `${API_PREFIX}${path}`;
+}
+
 function buildUrl(path: string, query?: RequestOptions["query"]): string {
-  if (!query) return path;
+  const prefixed = apiPath(path);
+  if (!query) return prefixed;
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(query)) {
     if (v !== null && v !== undefined) params.set(k, String(v));
   }
   const qs = params.toString();
-  return qs ? `${path}?${qs}` : path;
+  return qs ? `${prefixed}?${qs}` : prefixed;
 }
 
 async function parseError(res: Response): Promise<ApiError> {

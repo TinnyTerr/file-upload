@@ -13,7 +13,9 @@
     "busboy": "^1.6.0",
     "cookie-parser": "^1.4.7",
     "express": "^4.21.2",
-    "pino": "^10.3.1"
+    "pino": "^10.3.1",
+    "sharp": "^0.35.3",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/archiver": "^8.0.0",
@@ -21,6 +23,7 @@
     "@types/cookie-parser": "^1.4.8",
     "@types/express": "^4.17.21",
     "@types/express-serve-static-core": "^4.17",
+    "@types/ws": "^8.5.13",
     "bun-types": "latest",
     "typescript": "^5.7.3"
   }

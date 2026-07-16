@@ -7,6 +7,10 @@ export function storageRoot(): string {
   return process.env.FILEUPLOAD_STORAGE || "./data/storage";
 }
 
+export function thumbnailRoot(): string {
+  return process.env.FILEUPLOAD_THUMBNAILS || "./data/thumbnails";
+}
+
 /** Random fan-out path relative to the storage root, e.g. "ab/cd/…". */
 export function newInternalRelPath(): string {
   const rand = randomBytes(32).toString("hex");

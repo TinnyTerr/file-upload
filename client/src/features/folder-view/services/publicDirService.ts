@@ -1,4 +1,4 @@
-import { api } from "@/config/api";
+import { api, apiPath } from "@/config/api";
 import type { EncryptionMode } from "@/features/files/types";
 import type { UploaderInfo } from "@/features/download/services/publicService";
 
@@ -24,4 +24,4 @@ export const publicDirService = {
 };
 
 export const dirZipPath = (slug: string, accessKey?: string | null) =>
-  accessKey ? `/d/${slug}/zip?ek=${encodeURIComponent(accessKey)}` : `/d/${slug}/zip`;
+  apiPath(accessKey ? `/d/${slug}/zip?ek=${encodeURIComponent(accessKey)}` : `/d/${slug}/zip`);

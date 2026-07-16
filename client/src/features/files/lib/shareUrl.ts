@@ -9,8 +9,10 @@ export function fileUrl(slug: string): string {
   return `${origin()}/file/${slug}`;
 }
 
+/** The actual download endpoint (backend, under /api) -- distinct from
+ * fileUrl(), which is the SPA page that shows this file's info. */
 export function rawUrl(slug: string): string {
-  return `${fileUrl(slug)}/raw`;
+  return `${origin()}/api/file/${slug}/raw`;
 }
 
 export function folderUrl(slug: string): string {

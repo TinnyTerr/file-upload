@@ -176,6 +176,39 @@ export interface RemoteUploadJobRow {
   completed_at: string | null;
 }
 
+export interface ClusterNodeRow {
+  id: number;
+  name: string;
+  base_url: string;
+  token: string;
+  active: number;
+  node_id: string | null;
+  is_master: number;
+  archive_enabled: number;
+  replication_mode: string;
+  disk_total_bytes: number;
+  disk_free_bytes: number;
+  used_bytes: number;
+  created_by_id: number | null;
+  created_at: string;
+  last_seen_at: string | null;
+  last_heartbeat_at: string | null;
+}
+
+export interface ClusterEventRow {
+  id: number;
+  origin_node_id: string;
+  origin_seq: number;
+  origin_node_name: string | null;
+  ts: string;
+  kind: string;
+  action: string;
+  actor: string;
+  target: string | null;
+  ip: string | null;
+  created_at: string;
+}
+
 export function nowIso(): string {
   return new Date().toISOString();
 }

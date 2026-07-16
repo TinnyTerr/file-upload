@@ -4,7 +4,21 @@
 
 A self-hosted file sharing platform with end-to-end encryption, folder management, share links, API keys, dropboxes, and an admin panel. Built with Bun + Express on the backend and React + TypeScript on the frontend.
 
-The backend was previously a Python/FastAPI app (`app/`). That implementation is **retired** — treat it as read-only reference material for porting routes, not as something that runs in production. `server/` (Bun + Express) is the only backend going forward, and the route port is now complete: every route in `app/routes/` has been reimplemented in `server/src/routes/` and mounted in `server/src/app.ts`, except cluster/realtime (`ws.py`, `cluster.py`), which is deferred. Correspondingly, every flag in `client/src/config/featureFlags.ts` is `true` except `cluster` (see `TODO_ROUTES.md` for the full per-route breakdown).
+The backend was previously a Python/FastAPI app (`app/`). That implementation is **retired** — treat it as read-only reference material for porting routes, not as something that runs in production. `server/` (Bun + Express) is the only backend going forward, and the route port is now complete: every route in `app/routes/` has been reimplemented in `server/src/routes/` and mounted in `server/src/app.ts`, including cluster/realtime (`ws.py` → `server/src/ws.ts`, `cluster.py` → `server/src/routes/cluster.ts` + `server/src/cluster/*`). Correspondingly, every flag in `client/src/config/featureFlags.ts` is `true` (see `TODO_ROUTES.md` for the full per-route breakdown).
+
+### Cluster subsystem
+
+Multi-node replication, ported to `server/src/cluster/*.ts`:
+- `membership.ts` — join/heartbeat/enroll handshake, full-mesh peer topology
+- `replication.ts` — announce-id row replication (reserve/replicate/export) + rebase-from-master conflict fallback
+- `blobs.ts` — content-addressed blob fetch-on-miss from peers (used by `routes/public.ts`'s raw/preview handlers as read-time failover)
+- `halt.ts` — in-memory TTL'd upload halt registry (user-scope + global), gossiped over the event firehose
+- `digest.ts` — cluster state digest + drift-detection job (`syncCheckJob`, registered in `jobs/scheduler.ts`)
+- `eventBus.ts` / `eventStore.ts` / `firehoseClient.ts` — in-memory live event bus, durable `cluster_events` mirror, and the peer-polling consumer
+
+`server/src/routes/cluster.ts` exports `clusterRouter` (mounted at `/api/cluster`: session-authenticated management endpoints plus cluster-token-authenticated node-to-node endpoints) and `adminClusterRouter` (mounted at `/api/admin/cluster`: node-logs + HTTP long-poll event fallback). `server/src/ws.ts` attaches the websocket firehose (`/api/ws/events` per-user, `/api/admin/cluster/firehose` cluster-token full firehose) directly to the `http.Server` returned by `app.listen()` in `index.ts`, since Express has no native websocket support.
+
+The in-memory event sequence counter in `eventBus.ts` assumes **one process per node** (matches this server's single `app.listen()` call, no worker forking) — this was the exact bug class (`uvicorn --workers=4` colliding `origin_seq`) that broke logins in the old Python deployment. Don't reintroduce multi-process scaling for this server without revisiting cluster event sequencing.
 
 ---
 
@@ -59,12 +73,14 @@ server/
     config.ts            # Settings loader (./data/app.env)
     db/                   # bun:sqlite adapter + schema.sql (Db interface, types.ts)
     bootstrap.ts          # DB init, master user seed
-    appState.ts           # AppState (settings, db, sessionManager, lockout)
+    appState.ts           # AppState (settings, db, sessionManager, lockout, clusterToken, eventBus, eventWriter, haltRegistry)
+    ws.ts                  # Websocket firehose (/api/ws/events, /api/admin/cluster/firehose), attached to the raw http.Server
     security/             # sessions, csrf, lockout, passwords, apiKeys
     middleware/            # securityHeaders, requestLogging, httpsRedirect, auth (deps.ts)
     crypto/                # aead.ts (server-side AES-GCM), secretbox.ts (sealed tokens)
     storage/               # paths, blobs, compress, accounting (quota), zip
-    jobs/                  # lifecycle.ts (archive/unarchive), scheduler.ts (setInterval workers)
+    cluster/                # membership, replication, blobs, halt, digest, eventBus/eventStore/firehoseClient
+    jobs/                  # lifecycle.ts (archive/unarchive), scheduler.ts (setInterval workers, incl. cluster_heartbeat/cluster_sync_check)
     routes/
       auth.ts             # Login, logout, CSRF, sessions management
       account.ts          # /account/me, avatar, password change, reset/delete account
@@ -76,6 +92,7 @@ server/
       users.ts              # Admin: user CRUD + permissions
       audit.ts              # Admin: audit log viewer
       admin.ts               # Admin: storage, backend logs, lifecycle triggers, bulk actions
+      cluster.ts              # Cluster node linking + node-to-node membership/replication/blob handshake
       remoteUpload.ts        # Remote URL fetch-and-upload
 
 app/  (retired — Python/FastAPI reference only, do not run in production)

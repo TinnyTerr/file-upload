@@ -54,7 +54,11 @@ export function Dropzone({
         <UploadCloud className="size-6 text-white" />
       </div>
       <p className="text-sm font-medium">
-        {directory ? "Drop a folder or click to choose" : "Drop files or click to browse"}
+        {directory
+          ? "Drop a folder or click to choose — its whole file tree uploads as one bundle"
+          : multiple
+            ? "Drop one or more files or click to browse"
+            : "Drop a file or click to browse"}
       </p>
       {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
       <input

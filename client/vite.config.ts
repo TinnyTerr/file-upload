@@ -1,36 +1,9 @@
-import { defineConfig, type ProxyOptions } from "vite";
+import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath, URL } from "node:url";
 
 const BACKEND = process.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8000";
-
-// Pure API prefixes: every path under them belongs to the backend.
-const API_PREFIXES = [
-  "/auth",
-  "/account",
-  "/files",
-  "/directories",
-  "/links",
-  "/keys",
-  "/users",
-  "/admin",
-  "/audit",
-  "/dropbox-links",
-  "/dropbox",
-  "/health",
-];
-
-// `/file/:slug` and `/d/:slug` are SPA page routes, but their sub-resources
-// (/info, /raw, /preview, /zip, /save, /preview-manifest) are backend APIs.
-// Proxy only the API sub-resources; let bare page routes fall through to the
-// SPA (index.html) so React Router renders them.
-const apiSubResource = /\/(info|raw|preview|preview-manifest|zip|save)(\?.*)?$/;
-const dualRouteBypass: ProxyOptions = {
-  target: BACKEND,
-  changeOrigin: true,
-  bypass: (req) => (apiSubResource.test(req.url ?? "") ? undefined : "/index.html"),
-};
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
@@ -42,11 +15,11 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      ...Object.fromEntries(
-        API_PREFIXES.map((p) => [p, { target: BACKEND, changeOrigin: true } as ProxyOptions]),
-      ),
-      "/file": dualRouteBypass,
-      "/d": dualRouteBypass,
+      // Every backend endpoint lives under /api/*; everything else falls
+      // through to the SPA (index.html) so React Router renders it, with no
+      // regex-based sub-resource guessing needed. ws:true also proxies the
+      // /api/ws/events and /api/admin/cluster/firehose websocket upgrades.
+      "/api": { target: BACKEND, changeOrigin: true, ws: true },
     },
   },
   build: {
