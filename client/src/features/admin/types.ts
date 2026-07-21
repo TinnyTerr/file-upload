@@ -68,6 +68,8 @@ export interface AdminUser {
   role: Role;
   has_avatar: boolean;
   must_change_credentials: boolean;
+  mfa_required: boolean;
+  mfa_enrolled: boolean;
   created_at: string;
   permissions: UserPermissions | null;
 }

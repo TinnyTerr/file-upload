@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS users (
   must_change_credentials INTEGER NOT NULL DEFAULT 0,
   avatar_data BLOB,
   avatar_content_type TEXT,
+  mfa_required INTEGER NOT NULL DEFAULT 0,
+  webauthn_user_handle TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -184,7 +186,9 @@ CREATE TABLE IF NOT EXISTS credentials (
   webauthn_public_key BLOB,
   sign_count INTEGER NOT NULL DEFAULT 0,
   label TEXT,
-  created_at TEXT NOT NULL
+  transports TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS storage_settings (

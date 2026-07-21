@@ -26,7 +26,7 @@ export function useAdminUsers() {
   });
 
   const update = useMutation({
-    mutationFn: (vars: { id: number; username?: string; password?: string; role?: string }) =>
+    mutationFn: (vars: { id: number; username?: string; password?: string; role?: string; mfa_required?: boolean }) =>
       adminService.updateUser(vars.id, vars),
     onSuccess: () => {
       toast.success("User updated");

@@ -31,7 +31,7 @@ export const adminService = {
   users: () => api.get<{ users: AdminUser[] }>("/users/").then((r) => r.users),
   createUser: (body: { username: string; password: string; role: string; can_upload: boolean }) =>
     api.post("/users/", { json: body }),
-  updateUser: (id: number, body: { username?: string; password?: string; role?: string }) =>
+  updateUser: (id: number, body: { username?: string; password?: string; role?: string; mfa_required?: boolean }) =>
     api.patch(`/users/${id}`, { json: body }),
   deleteUser: (id: number) => api.delete(`/users/${id}`),
   setPermissions: (id: number, body: Partial<UserPermissions>) =>

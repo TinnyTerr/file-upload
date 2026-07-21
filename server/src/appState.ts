@@ -5,6 +5,8 @@ import { LockoutPolicy } from "./security/lockout.ts";
 import { EventBus } from "./cluster/eventBus.ts";
 import { ClusterEventWriter } from "./cluster/eventStore.ts";
 import { HaltRegistry } from "./cluster/halt.ts";
+import { LoginChallengeRegistry, WsTokenRateLimiter } from "./security/loginChallenges.ts";
+import { SecondFactorTicketRegistry } from "./security/secondFactorTickets.ts";
 
 export interface AppState {
   settings: Settings;
@@ -18,6 +20,9 @@ export interface AppState {
   eventBus: EventBus;
   eventWriter: ClusterEventWriter;
   haltRegistry: HaltRegistry;
+  loginChallenges: LoginChallengeRegistry;
+  secondFactorTickets: SecondFactorTicketRegistry;
+  wsTokenRateLimiter: WsTokenRateLimiter;
 }
 
 export function createAppState(settings: Settings, db: Db): AppState {
@@ -34,5 +39,8 @@ export function createAppState(settings: Settings, db: Db): AppState {
     eventBus,
     eventWriter,
     haltRegistry: new HaltRegistry(),
+    loginChallenges: new LoginChallengeRegistry(),
+    secondFactorTickets: new SecondFactorTicketRegistry(),
+    wsTokenRateLimiter: new WsTokenRateLimiter(),
   };
 }

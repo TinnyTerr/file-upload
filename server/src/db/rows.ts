@@ -10,7 +10,23 @@ export interface UserRow {
   must_change_credentials: number;
   avatar_data: Uint8Array | null;
   avatar_content_type: string | null;
+  mfa_required: number;
+  webauthn_user_handle: string | null;
   created_at: string;
+}
+
+export interface CredentialRow {
+  id: number;
+  user_id: number;
+  kind: string;
+  secret_blob: Uint8Array | null;
+  webauthn_id: string | null;
+  webauthn_public_key: Uint8Array | null;
+  sign_count: number;
+  label: string | null;
+  transports: string | null;
+  created_at: string;
+  updated_at: string | null;
 }
 
 export interface PermissionRow {

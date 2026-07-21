@@ -64,12 +64,15 @@ export function usersRouter(state: AppState): Router {
     res.json({
       users: users.map((u) => {
         const perm = db.get<PermissionRow>("SELECT * FROM permissions WHERE user_id = $id", { $id: u.id });
+        const mfaCount = db.get<CountRow>("SELECT COUNT(*) as n FROM credentials WHERE user_id = $id", { $id: u.id })!.n;
         return {
           id: u.id,
           username: u.username,
           role: u.role,
           has_avatar: u.avatar_data !== null,
           must_change_credentials: !!u.must_change_credentials,
+          mfa_required: !!u.mfa_required,
+          mfa_enrolled: mfaCount > 0,
           created_at: u.created_at,
           permissions: perm ? serializePermissions(perm) : null,
         };
@@ -221,9 +224,14 @@ export function usersRouter(state: AppState): Router {
         }
       }
 
+      if (body.mfa_required !== undefined) {
+        db.run("UPDATE users SET mfa_required = $v WHERE id = $id", { $v: body.mfa_required ? 1 : 0, $id: user.id });
+        recordAudit(db, { actor: master.username, action: "admin.mfa_required_changed", target: `user:${userId}`, ip: clientIp(state, req) });
+      }
+
       recordAudit(db, { actor: master.username, action: "user.updated", target: `user:${userId}`, ip: clientIp(state, req) });
       const updated = db.get<UserRow>("SELECT * FROM users WHERE id = $id", { $id: userId })!;
-      res.json({ id: updated.id, username: updated.username, role: updated.role });
+      res.json({ id: updated.id, username: updated.username, role: updated.role, mfa_required: !!updated.mfa_required });
     } catch (err) {
       if (!res.headersSent) {
         res

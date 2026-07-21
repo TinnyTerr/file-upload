@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Db, Row, SqlParams } from "./types.ts";
+import { ensureColumn } from "./backfill.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -19,6 +20,11 @@ export function createSqliteDb(path: string): Db {
 
   const schema = readFileSync(join(__dirname, "schema.sql"), "utf-8");
   sqlite.exec(schema);
+
+  ensureColumn(sqlite, "users", "mfa_required", "mfa_required INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(sqlite, "users", "webauthn_user_handle", "webauthn_user_handle TEXT");
+  ensureColumn(sqlite, "credentials", "updated_at", "updated_at TEXT");
+  ensureColumn(sqlite, "credentials", "transports", "transports TEXT");
 
   return {
     run(sql: string, params: SqlParams = {}) {

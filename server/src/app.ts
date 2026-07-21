@@ -8,6 +8,7 @@ import { requestLogging } from "./middleware/requestLogging.ts";
 import { httpsRedirect } from "./middleware/httpsRedirect.ts";
 import { authRouter } from "./routes/auth.ts";
 import { accountRouter } from "./routes/account.ts";
+import { mfaRouter } from "./routes/mfa.ts";
 import { keysRouter, adminKeysRouter } from "./routes/keys.ts";
 import { usersRouter } from "./routes/users.ts";
 import { auditRouter } from "./routes/audit.ts";
@@ -45,6 +46,7 @@ export function createApp(state: AppState): Express {
   // both page routes and route prefixes here) -- see spaRoutes below.
   app.use("/api/auth", authRouter(state));
   app.use("/api/account", accountRouter(state));
+  app.use("/api/account/mfa", mfaRouter(state));
   app.use("/api/keys", keysRouter(state));
   app.use("/api/admin/keys", adminKeysRouter(state));
   app.use("/api/users", usersRouter(state));

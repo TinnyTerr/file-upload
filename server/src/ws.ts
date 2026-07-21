@@ -12,13 +12,17 @@ import { getLogger } from "./logging.ts";
  * http.Server (Express itself has no websocket support -- see index.ts,
  * which captures app.listen()'s return value and passes it here).
  *
- * Two endpoints:
+ * Three endpoints:
  *  - GET /api/ws/events -- per-user live stream, authenticated by the
  *    session cookie. A master receives every event; a regular user only
  *    their own (actor === username).
  *  - GET /api/admin/cluster/firehose -- the full, password-independent
  *    firehose for cluster nodes and external monitoring, authenticated by
- *    the cluster token (?token= or Authorization: Bearer). */
+ *    the cluster token (?token= or Authorization: Bearer).
+ *  - GET /api/auth -- pre-login, opened by the /login page before any
+ *    credentials exist. Authenticated by a short-lived conn_id minted via
+ *    GET /api/auth/ws-token (see routes/auth.ts and security/loginChallenges.ts);
+ *    pushes real-time login-state transitions during a login attempt. */
 
 const log = getLogger("app.ws");
 
@@ -67,6 +71,7 @@ function safeTokenEqual(presented: string, expected: string): boolean {
 export function setupWebSockets(server: HttpServer, state: AppState): void {
   const userWss = new WebSocketServer({ noServer: true });
   const firehoseWss = new WebSocketServer({ noServer: true });
+  const authWss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", (req: IncomingMessage, socket, head) => {
     const url = new URL(req.url ?? "/", "http://internal");
@@ -106,8 +111,23 @@ export function setupWebSockets(server: HttpServer, state: AppState): void {
       return;
     }
 
+    if (url.pathname === "/api/auth") {
+      const connId = url.searchParams.get("conn_id") ?? "";
+      const entry = state.loginChallenges.get(connId);
+      if (!entry) {
+        socket.destroy();
+        return;
+      }
+      authWss.handleUpgrade(req, socket, head, (ws) => {
+        state.loginChallenges.attach(connId, ws);
+        ws.send(JSON.stringify({ type: "ready", state: entry.state }));
+        ws.on("close", () => state.loginChallenges.detach(connId));
+      });
+      return;
+    }
+
     socket.destroy();
   });
 
-  log.info("websocket routes attached: /api/ws/events, /api/admin/cluster/firehose");
+  log.info("websocket routes attached: /api/ws/events, /api/admin/cluster/firehose, /api/auth");
 }

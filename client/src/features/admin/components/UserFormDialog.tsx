@@ -29,6 +29,7 @@ export function UserFormDialog({ open, onClose, editing }: Props) {
   const [password, setPassword] = useState("");
   const [role, setRole] = useState("user");
   const [canUpload, setCanUpload] = useState(true);
+  const [mfaRequired, setMfaRequired] = useState(false);
 
   useEffect(() => {
     if (open) {
@@ -36,6 +37,7 @@ export function UserFormDialog({ open, onClose, editing }: Props) {
       setPassword("");
       setRole(editing?.role ?? "user");
       setCanUpload(editing?.permissions?.can_upload ?? true);
+      setMfaRequired(editing?.mfa_required ?? false);
     }
   }, [open, editing]);
 
@@ -46,6 +48,7 @@ export function UserFormDialog({ open, onClose, editing }: Props) {
         username: username || undefined,
         password: password || undefined,
         role,
+        mfa_required: mfaRequired,
       });
     } else {
       await create.mutateAsync({ username, password, role, can_upload: canUpload });
@@ -91,6 +94,22 @@ export function UserFormDialog({ open, onClose, editing }: Props) {
               <Label>Can upload</Label>
               <Switch checked={canUpload} onCheckedChange={setCanUpload} />
             </div>
+          )}
+          {isEdit && role !== "master" && (
+            <div className="flex items-center justify-between">
+              <div>
+                <Label>Require multi-factor authentication</Label>
+                <p className="text-xs text-muted-foreground">
+                  {editing?.mfa_enrolled
+                    ? "Blocks password-only login once enabled."
+                    : "Password-only login stays allowed until they enroll a passkey or authenticator."}
+                </p>
+              </div>
+              <Switch checked={mfaRequired} onCheckedChange={setMfaRequired} />
+            </div>
+          )}
+          {isEdit && role === "master" && (
+            <p className="text-xs text-muted-foreground">Master accounts always require MFA once enrolled.</p>
           )}
         </div>
 

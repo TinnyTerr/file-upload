@@ -129,6 +129,11 @@ export function UsersTab() {
                   <span className="truncate text-sm font-medium">{u.username}</span>
                   <Badge variant={u.role === "master" ? "accent" : "secondary"}>{u.role}</Badge>
                   {u.must_change_credentials && <Badge variant="warning">setup</Badge>}
+                  {(u.mfa_required || u.role === "master") && (
+                    <Tooltip content={u.mfa_enrolled ? "MFA required and enrolled" : "MFA required, not yet enrolled"}>
+                      <Badge variant={u.mfa_enrolled ? "accent" : "warning"}>MFA</Badge>
+                    </Tooltip>
+                  )}
                 </div>
                 <p className="text-xs text-muted-foreground">
                   {grantedCount(u)} permissions · joined {formatDate(u.created_at)}

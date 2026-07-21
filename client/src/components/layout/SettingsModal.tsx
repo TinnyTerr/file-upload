@@ -33,6 +33,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { UserAvatar } from "@/components/ui/user-avatar";
 import { useAuth, ME_QUERY_KEY } from "@/features/auth/hooks/auth";
 import { accountService } from "@/features/account/services/accountService";
+import { SecurityTab } from "@/features/account/components/SecurityTab";
 import { errorMessage } from "@/config/api";
 import { toast } from "sonner";
 import { cn } from "@/lib/cn";
@@ -42,7 +43,7 @@ import { useNavigate } from "react-router-dom";
 // Shared primitives
 // ---------------------------------------------------------------------------
 
-function ErrorMsg({ message }: { message: string }) {
+export function ErrorMsg({ message }: { message: string }) {
   return (
     <p className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
       <AlertCircle className="size-4 shrink-0" />
@@ -51,7 +52,7 @@ function ErrorMsg({ message }: { message: string }) {
   );
 }
 
-function PasswordInput({ className, ...props }: React.ComponentProps<"input">) {
+export function PasswordInput({ className, ...props }: React.ComponentProps<"input">) {
   const [show, setShow] = useState(false);
   return (
     <div className="relative">
@@ -77,7 +78,7 @@ function PasswordInput({ className, ...props }: React.ComponentProps<"input">) {
 // Generic sub-modal shell (z-70 so it layers above the z-50 settings modal)
 // ---------------------------------------------------------------------------
 
-function SubModal({
+export function SubModal({
   open,
   onOpenChange,
   title,
@@ -938,11 +939,12 @@ function SessionsTab() {
 // Settings sidebar nav
 // ---------------------------------------------------------------------------
 
-type SettingsTab = "profile" | "account" | "sessions" | "preferences" | "danger";
+type SettingsTab = "profile" | "account" | "security" | "sessions" | "preferences" | "danger";
 
 const SETTINGS_TABS: { id: SettingsTab; label: string; icon: React.ElementType; danger?: boolean }[] = [
   { id: "profile", label: "Profile", icon: Camera },
   { id: "account", label: "Account", icon: UserIcon },
+  { id: "security", label: "Security", icon: ShieldCheck },
   { id: "sessions", label: "Sessions", icon: Laptop },
   { id: "preferences", label: "Preferences", icon: SlidersHorizontal },
   { id: "danger", label: "Danger Zone", icon: TriangleAlert, danger: true },
@@ -1020,6 +1022,7 @@ export function SettingsModal({
             <div className="flex-1 overflow-y-auto p-6">
               {activeTab === "profile" && <ProfileTab />}
               {activeTab === "account" && <AccountTab />}
+              {activeTab === "security" && <SecurityTab />}
               {activeTab === "sessions" && <SessionsTab />}
               {activeTab === "preferences" && <PreferencesTab />}
               {activeTab === "danger" && <DangerZoneTab />}
