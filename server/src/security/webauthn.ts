@@ -85,6 +85,7 @@ export async function verifyRegistration(
     expectedChallenge,
     expectedOrigin: rpContext.origin,
     expectedRPID: rpContext.rpID,
+    requireUserVerification: false,
   });
 }
 
@@ -107,5 +108,6 @@ export async function verifyAuthentication(
     expectedOrigin: rpContext.origin,
     expectedRPID: rpContext.rpID,
     credential,
+    requireUserVerification: false,
   });
 }
