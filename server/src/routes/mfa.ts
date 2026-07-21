@@ -29,7 +29,7 @@ export function mfaRouter(state: AppState): Router {
   const router = Router();
   const { db } = state;
 
-  router.get("/", requireSession(state), requireCsrf, (req, res) => {
+  router.get("/", requireSession(state), (req, res) => {
     const userId = req.sessionRow!.user_id;
     const rows = credentials.listForUser(db, userId);
     res.json({
