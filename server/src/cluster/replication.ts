@@ -266,20 +266,36 @@ function activePeers(db: Db): Array<{ baseUrl: string; token: string }> {
 export async function rebaseFromMaster(state: AppState): Promise<boolean> {
   const master = resolveMaster(state);
   if (!master) {
-    log.warning("rebase requested but no current master is known");
+    log.warning(
+      "Rebase-from-master requested, but no current master could be resolved (no cluster node is flagged as master and no live epoch owner was found) -- skipping rebase, local state is left as-is.",
+    );
     return false;
   }
+  log.info(`Rebase-from-master starting: fetching the full canonical row export from master node ${master.baseUrl} ...`);
   let payload: { rows?: SerializedRow[] } | null;
   try {
     payload = (await getJson(`${master.baseUrl}/api/cluster/export`, master.token, 30_000)) as { rows?: SerializedRow[] };
   } catch (err) {
     const reason = err instanceof ClusterHTTPError ? err.message : String(err);
-    log.warning(`rebase: master export fetch failed: ${reason}`);
+    log.warning(
+      `Rebase-from-master FAILED: could not fetch the export snapshot from master ${master.baseUrl} (reason: ${reason}). ` +
+        `Local rows are unchanged; a later sync/rebase attempt will retry this.`,
+    );
     return false;
   }
   const rows = payload?.rows ?? [];
+  const byTable = new Map<string, number>();
+  for (const row of rows) byTable.set(row.table, (byTable.get(row.table) ?? 0) + 1);
+  const breakdown = [...byTable.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([table, count]) => `${table}=${count}`)
+    .join(", ");
   applyRows(state.db, rows);
-  log.info(`rebased ${rows.length} rows from master ${master.baseUrl}`);
+  log.info(
+    `Rebase-from-master complete: applied ${rows.length} row(s) from master ${master.baseUrl} onto local state` +
+      (breakdown ? ` (breakdown: ${breakdown})` : " (export was empty -- nothing to apply)") +
+      ". Local divergence at these ids has been overwritten with the master's canonical copy.",
+  );
   return true;
 }
 
@@ -294,11 +310,24 @@ export type ReplicateResult = "ok" | "conflict" | "noop";
  * single-node behaviour is unchanged. */
 export async function replicateFile(state: AppState, fileId: number): Promise<ReplicateResult> {
   const peers = activePeers(state.db);
-  if (peers.length === 0) return "noop";
+  if (peers.length === 0) {
+    log.debug(`Replicate file ${fileId}: no active cluster peers configured -- nothing to do, treating as single-node.`);
+    return "noop";
+  }
 
   const rows = collectFileRows(state.db, fileId);
   const fileIdentity = localIdentity(state.db, "files", fileId);
-  if (rows.length === 0 || fileIdentity === null) return "noop";
+  if (rows.length === 0 || fileIdentity === null) {
+    log.debug(
+      `Replicate file ${fileId}: local row lookup came back empty (file missing or already deleted) -- nothing to replicate.`,
+    );
+    return "noop";
+  }
+
+  log.info(
+    `Replicate file ${fileId}: announcing to ${peers.length} peer(s) [${peers.map((p) => p.baseUrl).join(", ")}] ` +
+      `with a payload of ${rows.length} row(s) before pushing.`,
+  );
 
   // 1) Announce: reserve the file id on every peer. Each peer fences the
   // request against its own epoch (cluster/election.ts) -- a `stale_epoch`
@@ -323,12 +352,19 @@ export async function replicateFile(state: AppState, fileId: number): Promise<Re
       } catch (err) {
         // Treat an unreachable peer as non-blocking; heartbeat will mark it
         // stale and a later sync/rebase reconciles it.
-        log.debug(`reserve: peer ${peer.baseUrl} unreachable: ${err instanceof Error ? err.message : String(err)}`);
+        log.debug(
+          `Reserve file ${fileId} on peer ${peer.baseUrl}: peer is unreachable ` +
+            `(${err instanceof Error ? err.message : String(err)}). Skipping this peer for now -- ` +
+            "heartbeat will flag it stale and a later sync/rebase will reconcile it once it's back.",
+        );
         res = null;
         break;
       }
       if (res.stale_epoch && attempt === 0 && typeof res.current_epoch === "number") {
-        log.debug(`reserve: peer ${peer.baseUrl} reports higher epoch=${res.current_epoch}; adopting and retrying once`);
+        log.debug(
+          `Reserve file ${fileId} on peer ${peer.baseUrl}: peer reports a higher epoch (${res.current_epoch}) than ours ` +
+            `(${epoch}), meaning we're the stale side of a past election -- adopting its epoch and retrying the reservation once.`,
+        );
         adoptEpochIfHigher(state, res.current_epoch, {});
         continue;
       }
@@ -336,19 +372,36 @@ export async function replicateFile(state: AppState, fileId: number): Promise<Re
     }
     if (res === null) continue;
     if (!res.ok) {
-      log.warning(`file id ${fileId} conflicts on peer ${peer.baseUrl} -- rebasing to master`);
+      log.warning(
+        `Reserve file ${fileId} on peer ${peer.baseUrl}: CONFLICT -- the peer already holds a different row at this id. ` +
+          "Falling back to the announce-id protocol's conflict resolution: rebasing this node from the current master " +
+          "to discard local divergence, then reporting the upload as conflicted rather than replicated.",
+      );
       await rebaseFromMaster(state);
       return "conflict";
     }
   }
 
   // 2) Replicate: push the rows to every peer.
+  let delivered = 0;
+  let unreachable = 0;
   for (const peer of peers) {
     try {
       await postJson(`${peer.baseUrl}/api/cluster/replicate`, peer.token, { rows }, 15_000);
+      delivered++;
     } catch (err) {
-      log.debug(`replicate: peer ${peer.baseUrl} unreachable: ${err instanceof Error ? err.message : String(err)}`);
+      unreachable++;
+      log.debug(
+        `Replicate file ${fileId} to peer ${peer.baseUrl}: peer is unreachable ` +
+          `(${err instanceof Error ? err.message : String(err)}). Rows were NOT delivered to this peer; ` +
+          "it will catch up via heartbeat-triggered sync once reachable again.",
+      );
     }
   }
+  log.info(
+    `Replicate file ${fileId} complete: delivered ${rows.length} row(s) to ${delivered}/${peers.length} peer(s)` +
+      (unreachable > 0 ? ` (${unreachable} peer(s) unreachable, will reconcile later)` : "") +
+      ".",
+  );
   return "ok";
 }

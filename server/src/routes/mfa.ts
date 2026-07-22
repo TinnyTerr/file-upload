@@ -70,7 +70,13 @@ export function mfaRouter(state: AppState): Router {
     const userId = req.sessionRow!.user_id;
     const encrypted = sealSecret(getMasterKey(state.settings), Buffer.from(secret));
     const id = credentials.createTotp(db, userId, encrypted, typeof label === "string" && label ? label : "Authenticator app");
-    recordAudit(db, { actor: String(userId), action: "mfa.totp_enrolled", target: `credential:${id}`, ip: clientIp(state, req) });
+    const enrolledUser = db.get<UserRow>("SELECT * FROM users WHERE id = $id", { $id: userId });
+    recordAudit(db, {
+      actor: enrolledUser?.username ?? String(userId),
+      action: "mfa.totp_enrolled",
+      target: `credential:${id}`,
+      ip: clientIp(state, req),
+    });
     res.json({ status: "enrolled", id });
   });
 
@@ -134,7 +140,13 @@ export function mfaRouter(state: AppState): Router {
       credential.transports ?? null,
       typeof label === "string" && label ? label : "Passkey",
     );
-    recordAudit(db, { actor: String(userId), action: "mfa.webauthn_enrolled", target: `credential:${id}`, ip: clientIp(state, req) });
+    const enrolledUser = db.get<UserRow>("SELECT * FROM users WHERE id = $id", { $id: userId });
+    recordAudit(db, {
+      actor: enrolledUser?.username ?? String(userId),
+      action: "mfa.webauthn_enrolled",
+      target: `credential:${id}`,
+      ip: clientIp(state, req),
+    });
     res.json({ status: "enrolled", id });
   });
 
@@ -152,7 +164,7 @@ export function mfaRouter(state: AppState): Router {
       res.status(404).json({ detail: "credential not found" });
       return;
     }
-    recordAudit(db, { actor: String(user.id), action: "mfa.credential_removed", target: `credential:${id}`, ip: clientIp(state, req) });
+    recordAudit(db, { actor: user.username, action: "mfa.credential_removed", target: `credential:${id}`, ip: clientIp(state, req) });
     res.json({ status: "removed" });
   });
 

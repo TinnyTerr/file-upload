@@ -88,7 +88,7 @@ export function authRouter(state: AppState): Router {
       return;
     }
 
-    recordAudit(db, { actor: String(user.id), action: "login.success", ip });
+    recordAudit(db, { actor: username, action: "login.success", ip });
     issueSession(req, res, user, ip, mfaEnforced && credRows.length === 0);
   });
 
@@ -121,7 +121,7 @@ export function authRouter(state: AppState): Router {
     });
 
     if (!matched) {
-      recordAudit(db, { actor: String(userId), action: "login.mfa_failure", ip });
+      recordAudit(db, { actor: user.username, action: "login.mfa_failure", ip });
       res.status(401).json({ detail: "invalid code" });
       return;
     }
@@ -131,7 +131,7 @@ export function authRouter(state: AppState): Router {
     if (typeof connId === "string" && connId) {
       state.loginChallenges.transition(connId, { state: "done" });
     }
-    recordAudit(db, { actor: String(userId), action: "login.mfa_success", ip });
+    recordAudit(db, { actor: user.username, action: "login.mfa_success", ip });
     issueSession(req, res, user, ip, false);
   });
 
@@ -209,7 +209,8 @@ export function authRouter(state: AppState): Router {
   router.post("/logout", requireSession(state), requireCsrf, (req, res) => {
     const cookieValue = req.cookies?.[COOKIE_NAME] as string | undefined;
     sessionManager.destroy(db, cookieValue);
-    recordAudit(db, { actor: String(req.sessionRow!.user_id), action: "logout" });
+    const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", { $id: req.sessionRow!.user_id });
+    recordAudit(db, { actor: user?.username ?? String(req.sessionRow!.user_id), action: "logout" });
     res.clearCookie(COOKIE_NAME, { path: "/" });
     res.json({ status: "logged_out" });
   });
@@ -247,7 +248,7 @@ export function authRouter(state: AppState): Router {
       return;
     }
     db.run("DELETE FROM sessions WHERE id = $id", { $id: target.id });
-    recordAudit(db, { actor: String(current.user_id), action: "session.revoked", target: target.id });
+    recordAudit(db, { actor: user.username, action: "session.revoked", target: target.id });
     res.json({ status: "revoked" });
   });
 
@@ -260,7 +261,7 @@ export function authRouter(state: AppState): Router {
       return;
     }
     db.run("DELETE FROM sessions WHERE user_id = $userId", { $userId: current.user_id });
-    recordAudit(db, { actor: String(current.user_id), action: "session.revoked_all" });
+    recordAudit(db, { actor: user.username, action: "session.revoked_all" });
     res.clearCookie(COOKIE_NAME, { path: "/" });
     res.json({ status: "all_revoked" });
   });
