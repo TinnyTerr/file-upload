@@ -56,6 +56,14 @@ export class EventBus {
     return this.subscribers.size;
   }
 
+  /** This node's current sequence watermark. Used by cluster/election.ts to
+   * fold "how far has this node itself gotten" into the applied-sequence
+   * vector compared during vote-grant, alongside peers' watermarks read from
+   * the cluster_events mirror. */
+  currentSeq(): number {
+    return this.seq;
+  }
+
   /** Publish a locally-originated event: assigns this node's next sequence
    * id, stamps identity + timestamp, buffers it, notifies live subscribers,
    * and (if wired) durably persists it. */

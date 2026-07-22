@@ -4,6 +4,7 @@ import { nowIso } from "../db/rows.ts";
 import { recordAudit } from "../audit.ts";
 import { diskUsageBytes, usedStorageBytes } from "../storage/accounting.ts";
 import { ClusterHTTPError, postJson } from "./http.ts";
+import { adoptEpochIfHigher, getSelfState, learnMasterPointer, touchMasterContact } from "./election.ts";
 import { getLogger } from "../logging.ts";
 
 /** Mirrors app/cluster/membership.py. */
@@ -21,22 +22,36 @@ export interface SelfPayload {
   disk_total_bytes: number;
   disk_free_bytes: number;
   used_bytes: number;
+  /** Live election state (cluster/election.ts) -- "master" is now an
+   * elected, epoch-versioned role, not the static NODE_ROLE this field was
+   * historically read from. is_master above is kept as role === "master"
+   * for callers/UI that only care about the boolean. */
+  role: string;
+  epoch: number;
+  current_master_id: string | null;
+  current_master_url: string | null;
 }
 
-/** The identity + capacity this node advertises to peers. */
+/** The identity + capacity + live election state this node advertises to
+ * peers. */
 export function selfPayload(state: AppState): SelfPayload {
   const usage = diskUsageBytes();
+  const self = getSelfState(state.db);
   return {
     node_id: state.settings.nodeId,
     name: state.settings.nodeName,
     base_url: state.settings.nodeUrl,
     token: state.clusterToken,
-    is_master: state.settings.nodeRole === "master",
+    is_master: self.role === "master",
     archive_enabled: state.settings.archiveEnabled,
     replication_mode: state.settings.replicationMode,
     disk_total_bytes: usage?.total ?? 0,
     disk_free_bytes: usage?.free ?? 0,
     used_bytes: usedStorageBytes(state.db),
+    role: self.role,
+    epoch: self.epoch,
+    current_master_id: self.current_master_id,
+    current_master_url: self.current_master_url,
   };
 }
 
@@ -48,6 +63,8 @@ interface LinkLocallyOpts {
   isMaster: boolean;
   archiveEnabled?: boolean;
   replicationMode?: string;
+  role?: string;
+  epoch?: number;
 }
 
 function linkLocally(state: AppState, opts: LinkLocallyOpts): void {
@@ -58,11 +75,13 @@ function linkLocally(state: AppState, opts: LinkLocallyOpts): void {
     $nodeId: opts.nodeId,
   });
   const now = nowIso();
+  const role = opts.role ?? (opts.isMaster ? "master" : "follower");
+  const epoch = opts.epoch ?? 0;
   if (!existing) {
     db.run(
       `INSERT INTO cluster_nodes
-         (name, base_url, token, active, node_id, is_master, archive_enabled, replication_mode, created_at, last_seen_at)
-       VALUES ($name, $baseUrl, $token, 1, $nodeId, $isMaster, $archiveEnabled, $replicationMode, $now, $now)`,
+         (name, base_url, token, active, node_id, is_master, archive_enabled, replication_mode, role, epoch, created_at, last_seen_at)
+       VALUES ($name, $baseUrl, $token, 1, $nodeId, $isMaster, $archiveEnabled, $replicationMode, $role, $epoch, $now, $now)`,
       {
         $name: opts.name || opts.nodeId,
         $baseUrl: baseUrl,
@@ -71,6 +90,8 @@ function linkLocally(state: AppState, opts: LinkLocallyOpts): void {
         $isMaster: opts.isMaster ? 1 : 0,
         $archiveEnabled: opts.archiveEnabled === false ? 0 : 1,
         $replicationMode: opts.replicationMode || "full",
+        $role: role,
+        $epoch: epoch,
         $now: now,
       },
     );
@@ -80,6 +101,7 @@ function linkLocally(state: AppState, opts: LinkLocallyOpts): void {
     `UPDATE cluster_nodes SET
        name = $name, base_url = $baseUrl, token = COALESCE(NULLIF($token, ''), token),
        is_master = $isMaster, archive_enabled = $archiveEnabled, replication_mode = $replicationMode,
+       role = $role, epoch = $epoch,
        active = 1, last_seen_at = $now
      WHERE node_id = $nodeId`,
     {
@@ -89,6 +111,8 @@ function linkLocally(state: AppState, opts: LinkLocallyOpts): void {
       $isMaster: opts.isMaster ? 1 : 0,
       $archiveEnabled: opts.archiveEnabled === false ? 0 : 1,
       $replicationMode: opts.replicationMode || "full",
+      $role: role,
+      $epoch: epoch,
       $now: now,
       $nodeId: opts.nodeId,
     },
@@ -113,8 +137,8 @@ export interface EnrollResult {
  * Safe to run repeatedly -- every registration is an idempotent upsert keyed
  * by node_id, and the rebase is an overwrite of locally-diverged rows. */
 export async function enrollWithMaster(state: AppState, masterUrlArg: string, masterToken: string): Promise<EnrollResult> {
-  if (state.settings.nodeRole === "master") {
-    return { status: "skipped", reason: "this node is a master" };
+  if (getSelfState(state.db).role === "master") {
+    return { status: "skipped", reason: "this node is currently master" };
   }
   const masterUrl = (masterUrlArg || "").replace(/\/$/, "");
   if (!masterUrl || !masterToken) {
@@ -135,16 +159,34 @@ export async function enrollWithMaster(state: AppState, masterUrlArg: string, ma
     return { status: "error", reason: `join failed: ${reason}` };
   }
 
+  // The seed we dialed may not currently BE master (mid-election, or
+  // demoted since MASTER_URL was configured) -- trust its reported election
+  // state over the fact that we dialed it via MASTER_URL.
   const masterSelf = (result?.self ?? {}) as Partial<SelfPayload>;
   linkLocally(state, {
     nodeId: masterSelf.node_id ?? "",
     name: masterSelf.name ?? "master",
     baseUrl: masterUrl,
     token: masterToken,
-    isMaster: true,
+    isMaster: masterSelf.role === "master",
     archiveEnabled: masterSelf.archive_enabled ?? true,
     replicationMode: masterSelf.replication_mode ?? "full",
+    role: masterSelf.role ?? "follower",
+    epoch: masterSelf.epoch ?? 0,
   });
+  // Learn whatever epoch/master pointer the seed reports, even if the seed
+  // itself isn't master -- it still knows (from its own election state) who
+  // currently holds the role, or that nobody does yet (mid-election). Uses
+  // learnMasterPointer (not adoptEpochIfHigher) because at bootstrap both
+  // sides typically start at epoch 0 -- a strict "higher epoch" check would
+  // never let a joiner learn who master is until the first real election.
+  if (typeof masterSelf.epoch === "number") {
+    const knownMasterId = masterSelf.role === "master" ? masterSelf.node_id : masterSelf.current_master_id;
+    const knownMasterUrl = masterSelf.role === "master" ? masterUrl : masterSelf.current_master_url;
+    if (knownMasterId) {
+      learnMasterPointer(state, masterSelf.epoch, knownMasterId, knownMasterUrl ?? "");
+    }
+  }
 
   const peers = (result?.peers as Array<Record<string, unknown>>) ?? [];
   for (const peer of peers) {
@@ -156,6 +198,8 @@ export async function enrollWithMaster(state: AppState, masterUrlArg: string, ma
       isMaster: !!peer.is_master,
       archiveEnabled: peer.archive_enabled !== false,
       replicationMode: (peer.replication_mode as string) ?? "full",
+      role: (peer.role as string) ?? (peer.is_master ? "master" : "follower"),
+      epoch: (peer.epoch as number) ?? 0,
     });
     // Register ourselves with the peer too, so the mesh is symmetric.
     if (peer.base_url && peer.token) {
@@ -224,11 +268,14 @@ export async function heartbeatJob(state: AppState): Promise<number> {
     if (stats === null) {
       db.run("UPDATE cluster_nodes SET active = 0 WHERE id = $id", { $id: node.id });
     } else {
+      const role = (stats.role as string) ?? (stats.is_master ? "master" : "follower");
+      const epoch = Number(stats.epoch ?? 0);
       db.run(
         `UPDATE cluster_nodes SET
            active = 1, last_heartbeat_at = $now, last_seen_at = $now,
            disk_total_bytes = $diskTotal, disk_free_bytes = $diskFree, used_bytes = $used,
-           archive_enabled = $archiveEnabled, replication_mode = $replicationMode, is_master = $isMaster
+           archive_enabled = $archiveEnabled, replication_mode = $replicationMode,
+           is_master = $isMaster, role = $role, epoch = $epoch
          WHERE id = $id`,
         {
           $now: now,
@@ -237,10 +284,29 @@ export async function heartbeatJob(state: AppState): Promise<number> {
           $used: Number(stats.used_bytes ?? 0),
           $archiveEnabled: stats.archive_enabled === false ? 0 : 1,
           $replicationMode: (stats.replication_mode as string) ?? node.replication_mode,
-          $isMaster: stats.is_master ? 1 : 0,
+          $isMaster: role === "master" ? 1 : 0,
+          $role: role,
+          $epoch: epoch,
           $id: node.id,
         },
       );
+      // A higher epoch reported by ANY peer means we're behind; adopt it
+      // (self-demoting if we mistakenly still think we're master). At epoch
+      // parity, still learn the master pointer this peer reports -- e.g. we
+      // rejoined at the current epoch but haven't heard who holds it yet.
+      const reportedMasterId = (stats.role === "master" ? node.node_id : (stats.current_master_id as string | null)) ?? null;
+      const reportedMasterUrl = (stats.role === "master" ? node.base_url : (stats.current_master_url as string | null)) ?? "";
+      if (Number.isFinite(epoch) && reportedMasterId) {
+        learnMasterPointer(state, epoch, reportedMasterId, reportedMasterUrl);
+      } else if (Number.isFinite(epoch)) {
+        adoptEpochIfHigher(state, epoch, {});
+      }
+      // Confirmed contact with a live node -- if it's the master we
+      // currently believe in, reset our liveness timer so
+      // checkMasterLivenessJob doesn't call an unnecessary election.
+      if (node.node_id && node.node_id === getSelfState(db).current_master_id) {
+        touchMasterContact(db);
+      }
     }
   }
   return reached;
@@ -262,6 +328,8 @@ export function upsertPeer(
     diskTotalBytes?: number;
     diskFreeBytes?: number;
     usedBytes?: number;
+    role?: string;
+    epoch?: number;
   },
 ): ClusterNodeRow {
   const { db } = state;
@@ -270,24 +338,28 @@ export function upsertPeer(
     $nodeId: opts.nodeId,
   });
   const now = nowIso();
+  const role = opts.role ?? (opts.isMaster ? "master" : "follower");
+  const epoch = opts.epoch ?? 0;
   if (!existing) {
     db.run(
       `INSERT INTO cluster_nodes
          (name, base_url, token, active, node_id, is_master, archive_enabled, replication_mode,
-          disk_total_bytes, disk_free_bytes, used_bytes, created_at, last_seen_at, last_heartbeat_at)
+          disk_total_bytes, disk_free_bytes, used_bytes, role, epoch, created_at, last_seen_at, last_heartbeat_at)
        VALUES ($name, $baseUrl, $token, 1, $nodeId, $isMaster, $archiveEnabled, $replicationMode,
-               $diskTotal, $diskFree, $used, $now, $now, $now)`,
+               $diskTotal, $diskFree, $used, $role, $epoch, $now, $now, $now)`,
       {
         $name: opts.name || opts.nodeId,
         $baseUrl: baseUrl,
         $token: opts.token || "",
         $nodeId: opts.nodeId,
-        $isMaster: opts.isMaster ? 1 : 0,
+        $isMaster: role === "master" ? 1 : 0,
         $archiveEnabled: opts.archiveEnabled ? 1 : 0,
         $replicationMode: opts.replicationMode || "full",
         $diskTotal: opts.diskTotalBytes ?? 0,
         $diskFree: opts.diskFreeBytes ?? 0,
         $used: opts.usedBytes ?? 0,
+        $role: role,
+        $epoch: epoch,
         $now: now,
       },
     );
@@ -297,22 +369,32 @@ export function upsertPeer(
          name = $name, base_url = $baseUrl, token = COALESCE(NULLIF($token, ''), token),
          is_master = $isMaster, archive_enabled = $archiveEnabled, replication_mode = $replicationMode,
          disk_total_bytes = $diskTotal, disk_free_bytes = $diskFree, used_bytes = $used,
+         role = $role, epoch = $epoch,
          active = 1, last_seen_at = $now, last_heartbeat_at = $now
        WHERE node_id = $nodeId`,
       {
         $name: opts.name || existing.name,
         $baseUrl: baseUrl,
         $token: opts.token || "",
-        $isMaster: opts.isMaster ? 1 : 0,
+        $isMaster: role === "master" ? 1 : 0,
         $archiveEnabled: opts.archiveEnabled ? 1 : 0,
         $replicationMode: opts.replicationMode || "full",
         $diskTotal: opts.diskTotalBytes ?? 0,
         $diskFree: opts.diskFreeBytes ?? 0,
         $used: opts.usedBytes ?? 0,
+        $role: role,
+        $epoch: epoch,
         $now: now,
         $nodeId: opts.nodeId,
       },
     );
+  }
+  // A peer announcing itself with a higher epoch than ours means we're
+  // behind (e.g. we were offline for an election) -- adopt it here too, not
+  // just from heartbeat responses, since /join and /heartbeat requests also
+  // carry the sender's live epoch.
+  if (Number.isFinite(epoch)) {
+    adoptEpochIfHigher(state, epoch, {});
   }
   return db.get<ClusterNodeRow>("SELECT * FROM cluster_nodes WHERE node_id = $nodeId", { $nodeId: opts.nodeId })!;
 }

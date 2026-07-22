@@ -4,21 +4,26 @@ import { archiveIdleJob, deleteIdleJob, tempExpiryJob, linkExpiryJob } from "./l
 import { sweepStaleParts } from "../routes/files.ts";
 import { heartbeatJob } from "../cluster/membership.ts";
 import { syncCheckJob } from "../cluster/digest.ts";
+import { checkMasterLivenessJob } from "../cluster/election.ts";
+import { cacheEvictionJob } from "../cluster/cacheEviction.ts";
 
 /** setInterval-based scheduler mirroring app/main.py's BackgroundScheduler
  * wiring: archive_idle/delete_idle/temp_expiry/sweep_stale_parts hourly,
  * link_expiry every 10 minutes. reconcile_stale_states has no interval in
  * Python either -- it's manual-trigger only (see routes/admin.ts).
- * cluster_heartbeat and cluster_sync_check run alongside them; they are
- * cheap no-ops on a single, unlinked node (no rows in cluster_nodes), so
- * registering them unconditionally matches the Python scheduler's approach
- * of always running the jobs rather than gating on cluster configuration. */
+ * cluster_heartbeat, cluster_sync_check, cluster_election_liveness and
+ * cluster_cache_eviction run alongside them; they are cheap no-ops on a
+ * single, unlinked node (no rows in cluster_nodes) or on a REPLICATION_MODE
+ * != cache node, so registering them unconditionally matches the Python
+ * scheduler's approach of always running the jobs rather than gating on
+ * cluster configuration. */
 
 const log = getLogger("app.jobs.scheduler");
 
 const HOUR_MS = 60 * 60 * 1000;
 const TEN_MIN_MS = 10 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
+const FIFTEEN_SEC_MS = 15 * 1000;
 
 interface JobSpec {
   id: string;
@@ -38,6 +43,8 @@ function buildJobSpecs(state: AppState): JobSpec[] {
     { id: "sweep_stale_parts", intervalMs: HOUR_MS, run: () => sweepStaleParts() },
     { id: "cluster_heartbeat", intervalMs: MINUTE_MS, run: () => heartbeatJob(state) },
     { id: "cluster_sync_check", intervalMs: 5 * MINUTE_MS, run: () => syncCheckJob(state) },
+    { id: "cluster_election_liveness", intervalMs: FIFTEEN_SEC_MS, run: () => checkMasterLivenessJob(state) },
+    { id: "cluster_cache_eviction", intervalMs: TEN_MIN_MS, run: () => cacheEvictionJob(state) },
   ];
 }
 

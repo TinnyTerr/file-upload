@@ -209,6 +209,20 @@ export interface ClusterNodeRow {
   created_at: string;
   last_seen_at: string | null;
   last_heartbeat_at: string | null;
+  role: string;
+  epoch: number;
+}
+
+export interface ClusterSelfStateRow {
+  id: 1;
+  role: string;
+  epoch: number;
+  voted_epoch: number;
+  voted_for: string | null;
+  current_master_id: string | null;
+  current_master_url: string | null;
+  last_master_contact_at: string | null;
+  updated_at: string;
 }
 
 export interface ClusterEventRow {

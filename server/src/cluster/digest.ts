@@ -3,6 +3,7 @@ import type { AppState } from "../appState.ts";
 import type { ClusterNodeRow } from "../db/rows.ts";
 import { ensureStorageSettings } from "../storage/accounting.ts";
 import { ClusterHTTPError, getJson } from "./http.ts";
+import { getSelfState } from "./election.ts";
 import { getLogger } from "../logging.ts";
 
 /** Mirrors app/api/cluster/digest.py. */
@@ -13,6 +14,8 @@ export interface ClusterDigest {
   hash: string;
   global_quota: number;
   members: string[];
+  role: string;
+  epoch: number;
 }
 
 /** A small, comparable summary of state that SHOULD be identical on every
@@ -28,9 +31,13 @@ export function computeDigest(state: AppState): ClusterDigest {
     .map((n) => n.node_id)
     .filter((id): id is string => !!id);
   const members = [...new Set([state.settings.nodeId, ...peerIds])].sort();
+  // role/epoch are deliberately excluded from the hash -- they legitimately
+  // differ between "who is master" and "master vs. follower", but ARE
+  // reported alongside it for the split-brain cross-check below.
   const body = { global_quota: globalQuota, members };
   const hash = createHash("sha256").update(JSON.stringify(body)).digest("hex");
-  return { hash, ...body };
+  const self = getSelfState(state.db);
+  return { hash, ...body, role: self.role, epoch: self.epoch };
 }
 
 /** Compare this node's digest against every peer's and alert on divergence.
@@ -64,6 +71,26 @@ export async function syncCheckJob(state: AppState): Promise<number> {
           kind: "system",
           local_hash: local.hash,
           remote_hash: remote?.hash ?? null,
+        });
+      } catch {
+        // best-effort
+      }
+    }
+
+    // Split-brain safety net: election fencing (cluster/election.ts) should
+    // make two nodes both holding role=master at the SAME epoch structurally
+    // impossible. If it happens anyway, that's a bug worth paging on, not
+    // something to silently reconcile -- alert loudly rather than picking a
+    // winner here.
+    if (remote && local.role === "master" && remote.role === "master" && remote.epoch === local.epoch) {
+      log.error(`SPLIT BRAIN: both this node and node=${node.node_id ?? node.id} report role=master at epoch=${local.epoch}`);
+      try {
+        state.eventBus.publish({
+          action: "cluster.split_brain_detected",
+          actor: "system",
+          target: `node:${node.node_id ?? node.id}`,
+          kind: "system",
+          epoch: local.epoch,
         });
       } catch {
         // best-effort

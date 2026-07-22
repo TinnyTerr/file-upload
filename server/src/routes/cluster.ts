@@ -15,6 +15,7 @@ import { ClusterHTTPError } from "../cluster/http.ts";
 import { enrollWithMaster, upsertPeer } from "../cluster/membership.ts";
 import { applyRows, exportAll, localIdentity, type SerializedRow } from "../cluster/replication.ts";
 import { computeDigest } from "../cluster/digest.ts";
+import { adoptEpochIfHigher, getSelfState, handleMasterAssumed, handleVoteRequest, resolveMaster } from "../cluster/election.ts";
 import { queryBackendLogs } from "../logging.ts";
 import { existsSync, statSync } from "node:fs";
 import { createReadStream } from "node:fs";
@@ -37,15 +38,20 @@ interface ContentBlobRow {
 
 function selfStats(state: AppState) {
   const usage = diskUsageBytes();
+  const self = getSelfState(state.db);
   return {
     node_id: state.settings.nodeId,
     name: state.settings.nodeName,
-    is_master: state.settings.nodeRole === "master",
+    is_master: self.role === "master",
     archive_enabled: state.settings.archiveEnabled,
     replication_mode: state.settings.replicationMode,
     disk_total_bytes: usage?.total ?? 0,
     disk_free_bytes: usage?.free ?? 0,
     used_bytes: usedStorageBytes(state.db),
+    role: self.role,
+    epoch: self.epoch,
+    current_master_id: self.current_master_id,
+    current_master_url: self.current_master_url,
   };
 }
 
@@ -64,6 +70,8 @@ function serializeNode(node: ClusterNodeRow) {
     token_preview: mask(node.token),
     active: !!node.active,
     is_master: !!node.is_master,
+    role: node.role,
+    epoch: node.epoch,
     archive_enabled: !!node.archive_enabled,
     replication_mode: node.replication_mode,
     disk_total_bytes: node.disk_total_bytes,
@@ -240,6 +248,8 @@ export function clusterRouter(state: AppState): Router {
     disk_total_bytes?: number;
     disk_free_bytes?: number;
     used_bytes?: number;
+    role?: string;
+    epoch?: number;
   }
 
   router.post("/join", clusterAuth, (req, res) => {
@@ -259,6 +269,8 @@ export function clusterRouter(state: AppState): Router {
       diskTotalBytes: body.disk_total_bytes ?? 0,
       diskFreeBytes: body.disk_free_bytes ?? 0,
       usedBytes: body.used_bytes ?? 0,
+      role: body.role,
+      epoch: body.epoch,
     });
     recordAudit(db, { actor: `node:${body.node_id}`, action: "cluster.node_joined", target: `node:${peer.id}`, ip: clientIp(state, req) });
 
@@ -273,6 +285,8 @@ export function clusterRouter(state: AppState): Router {
       is_master: !!n.is_master,
       archive_enabled: !!n.archive_enabled,
       replication_mode: n.replication_mode,
+      role: n.role,
+      epoch: n.epoch,
     }));
     res.json({ self: selfStats(state), peers });
   });
@@ -304,6 +318,8 @@ export function clusterRouter(state: AppState): Router {
       diskTotalBytes: body.disk_total_bytes ?? 0,
       diskFreeBytes: body.disk_free_bytes ?? 0,
       usedBytes: body.used_bytes ?? 0,
+      role: body.role,
+      epoch: body.epoch,
     });
     res.json(selfStats(state));
   });
@@ -312,17 +328,41 @@ export function clusterRouter(state: AppState): Router {
     res.json(selfStats(state));
   });
 
-  router.get("/blobs/:storedSha256", clusterAuth, (req, res) => {
-    const transform = typeof req.query.transform === "string" ? req.query.transform : null;
-    let blob: ContentBlobRow | undefined;
+  function findLocalBlob(storedSha256: string, transform: string | null): ContentBlobRow | undefined {
     if (transform) {
-      blob = db.get<ContentBlobRow>("SELECT * FROM content_blobs WHERE stored_sha256 = $hash AND transform_key = $t", {
-        $hash: req.params.storedSha256,
+      return db.get<ContentBlobRow>("SELECT * FROM content_blobs WHERE stored_sha256 = $hash AND transform_key = $t", {
+        $hash: storedSha256,
         $t: transform,
       });
-    } else {
-      blob = db.get<ContentBlobRow>("SELECT * FROM content_blobs WHERE stored_sha256 = $hash", { $hash: req.params.storedSha256 });
     }
+    return db.get<ContentBlobRow>("SELECT * FROM content_blobs WHERE stored_sha256 = $hash", { $hash: storedSha256 });
+  }
+
+  // Cheap existence probe used by cluster/cacheEviction.ts before evicting a
+  // locally-cached blob -- confirms a full-replica peer already has these
+  // exact bytes without transferring them. No response body (just the
+  // status code), so a large eviction pass never streams file content just
+  // to check durability.
+  router.head("/blobs/:storedSha256", clusterAuth, (req, res) => {
+    const transform = typeof req.query.transform === "string" ? req.query.transform : null;
+    const blob = findLocalBlob(req.params.storedSha256, transform);
+    if (!blob) {
+      res.status(404).end();
+      return;
+    }
+    let path: string;
+    try {
+      path = safeJoin(storageRoot(), blob.storage_path);
+    } catch {
+      res.status(404).end();
+      return;
+    }
+    res.status(existsSync(path) ? 200 : 404).end();
+  });
+
+  router.get("/blobs/:storedSha256", clusterAuth, (req, res) => {
+    const transform = typeof req.query.transform === "string" ? req.query.transform : null;
+    const blob = findLocalBlob(req.params.storedSha256, transform);
     if (!blob) {
       res.status(404).json({ detail: "blob not found" });
       return;
@@ -356,14 +396,37 @@ export function clusterRouter(state: AppState): Router {
   // ── row metadata replication (announce-id protocol) ─────────────────────
 
   router.post("/reserve", clusterAuth, (req, res) => {
-    const body = req.body as { table?: string; id?: number; identity?: string };
+    const body = req.body as { table?: string; id?: number; identity?: string; epoch?: number };
     if (!body?.table || body.id === undefined || !body.identity) {
       res.status(400).json({ detail: "table, id and identity are required" });
       return;
     }
+
+    // Epoch fencing: a requester behind the epoch we already know about is
+    // stale (told to re-resolve current epoch/master and retry); a
+    // requester AHEAD of us means WE'RE behind (e.g. missed an election
+    // while partitioned) -- adopt the higher epoch and self-demote if we
+    // mistakenly still believe we're master, but let the request proceed
+    // once adopted rather than bouncing it needlessly.
+    const requestEpoch = Number(body.epoch ?? 0);
+    const self = getSelfState(db);
+    if (Number.isFinite(requestEpoch) && requestEpoch < self.epoch) {
+      res.json({
+        ok: false,
+        conflict: false,
+        stale_epoch: true,
+        current_epoch: self.epoch,
+        current_master: resolveMaster(state),
+      });
+      return;
+    }
+    if (Number.isFinite(requestEpoch) && requestEpoch > self.epoch) {
+      adoptEpochIfHigher(state, requestEpoch, {});
+    }
+
     const existing = localIdentity(db, body.table, body.id);
     const ok = existing === null || existing === body.identity;
-    res.json({ ok, conflict: !ok });
+    res.json({ ok, conflict: !ok, epoch: getSelfState(db).epoch });
   });
 
   router.post("/replicate", clusterAuth, (req, res) => {
@@ -374,6 +437,40 @@ export function clusterRouter(state: AppState): Router {
 
   router.get("/export", clusterAuth, (_req, res) => {
     res.json({ rows: exportAll(db) });
+  });
+
+  // ── leader election (cluster-token auth, same as the rest of the
+  // node-to-node handshake -- consensus traffic is deliberately NOT routed
+  // through ws.ts's firehose; that's an audit/event fan-out mechanism and
+  // conflating it with leadership messaging would couple two things that
+  // should be able to fail independently) ────────────────────────────────
+
+  router.post("/vote-request", clusterAuth, (req, res) => {
+    const body = req.body as { candidate_id?: string; candidate_url?: string; epoch?: number; vector?: Record<string, number> };
+    const result = handleVoteRequest(state, body);
+    if (result.granted) {
+      recordAudit(db, {
+        actor: `node:${body.candidate_id}`,
+        action: "cluster.vote_granted",
+        target: `epoch:${body.epoch}`,
+        ip: clientIp(state, req),
+      });
+    }
+    res.json(result);
+  });
+
+  router.post("/master-assumed", clusterAuth, (req, res) => {
+    const body = req.body as { node_id?: string; node_url?: string; epoch?: number };
+    const result = handleMasterAssumed(state, body);
+    if (result.accepted) {
+      recordAudit(db, {
+        actor: `node:${body.node_id}`,
+        action: "cluster.master_assumed",
+        target: `epoch:${body.epoch}`,
+        ip: clientIp(state, req),
+      });
+    }
+    res.json(result);
   });
 
   return router;

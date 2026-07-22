@@ -4,6 +4,7 @@ import { statSync } from "node:fs";
 import type { Db } from "../db/types.ts";
 import { nowIso, type ContentBlobRow, type FileRow } from "../db/rows.ts";
 import { safeJoin, storageRoot } from "./paths.ts";
+import { touchBlobAccess } from "../cluster/cacheEviction.ts";
 
 /** Mirrors app/storage/blobs.py: content-addressed dedup with ref counting. */
 
@@ -65,6 +66,7 @@ export function attachBlob(
       // best-effort cleanup; orphaned bytes are reconciled by lifecycle jobs
     }
     existing.ref_count += 1;
+    touchBlobAccess(db, existing.id);
     return existing;
   }
 
@@ -87,7 +89,9 @@ export function attachBlob(
       $createdAt: nowIso(),
     },
   );
-  return db.get<ContentBlobRow>("SELECT * FROM content_blobs WHERE id = last_insert_rowid()")!;
+  const created = db.get<ContentBlobRow>("SELECT * FROM content_blobs WHERE id = last_insert_rowid()")!;
+  touchBlobAccess(db, created.id);
+  return created;
 }
 
 export function fileHashes(db: Db, file: FileRow): Partial<FileHashes> {

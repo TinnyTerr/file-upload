@@ -3,6 +3,7 @@ import type { AppState } from "../appState.ts";
 import type { Db, Row, SqlParams } from "../db/types.ts";
 import type { ClusterNodeRow } from "../db/rows.ts";
 import { ClusterHTTPError, getJson, postJson } from "./http.ts";
+import { adoptEpochIfHigher, getSelfState, resolveMaster } from "./election.ts";
 import { getLogger } from "../logging.ts";
 
 /** Mirrors app/cluster/replication.py, adapted from SQLAlchemy ORM merge()
@@ -247,36 +248,39 @@ export function collectFileRows(db: Db, fileId: number): SerializedRow[] {
 
 // ── outbound client helpers ────────────────────────────────────────────────
 
-function activePeers(db: Db): Array<{ baseUrl: string; token: string; isMaster: boolean }> {
+function activePeers(db: Db): Array<{ baseUrl: string; token: string }> {
   return db
     .all<ClusterNodeRow>("SELECT * FROM cluster_nodes WHERE active = 1")
     .filter((n) => n.base_url && n.token)
-    .map((n) => ({ baseUrl: n.base_url.replace(/\/$/, ""), token: n.token, isMaster: !!n.is_master }));
+    .map((n) => ({ baseUrl: n.base_url.replace(/\/$/, ""), token: n.token }));
 }
 
 /** Pull the master's canonical snapshot and overwrite local divergence.
  *
  * This is the conflict sledgehammer the announce-id protocol falls back to:
  * after a reservation conflict (or at join time) the node re-derives shared
- * state from the single source of truth. Returns true on success. */
+ * state from the single source of truth. "The master" is resolved via
+ * cluster/election.ts's live, epoch-versioned pointer rather than a
+ * statically-flagged peer row -- who holds the role can change over the
+ * node's lifetime. Returns true on success. */
 export async function rebaseFromMaster(state: AppState): Promise<boolean> {
-  for (const peer of activePeers(state.db)) {
-    if (!peer.isMaster) continue;
-    let payload: { rows?: SerializedRow[] } | null;
-    try {
-      payload = (await getJson(`${peer.baseUrl}/api/cluster/export`, peer.token, 30_000)) as { rows?: SerializedRow[] };
-    } catch (err) {
-      const reason = err instanceof ClusterHTTPError ? err.message : String(err);
-      log.warning(`rebase: master export fetch failed: ${reason}`);
-      return false;
-    }
-    const rows = payload?.rows ?? [];
-    applyRows(state.db, rows);
-    log.info(`rebased ${rows.length} rows from master ${peer.baseUrl}`);
-    return true;
+  const master = resolveMaster(state);
+  if (!master) {
+    log.warning("rebase requested but no current master is known");
+    return false;
   }
-  log.warning("rebase requested but no reachable master is linked");
-  return false;
+  let payload: { rows?: SerializedRow[] } | null;
+  try {
+    payload = (await getJson(`${master.baseUrl}/api/cluster/export`, master.token, 30_000)) as { rows?: SerializedRow[] };
+  } catch (err) {
+    const reason = err instanceof ClusterHTTPError ? err.message : String(err);
+    log.warning(`rebase: master export fetch failed: ${reason}`);
+    return false;
+  }
+  const rows = payload?.rows ?? [];
+  applyRows(state.db, rows);
+  log.info(`rebased ${rows.length} rows from master ${master.baseUrl}`);
+  return true;
 }
 
 export type ReplicateResult = "ok" | "conflict" | "noop";
@@ -296,20 +300,42 @@ export async function replicateFile(state: AppState, fileId: number): Promise<Re
   const fileIdentity = localIdentity(state.db, "files", fileId);
   if (rows.length === 0 || fileIdentity === null) return "noop";
 
-  // 1) Announce: reserve the file id on every peer.
+  // 1) Announce: reserve the file id on every peer. Each peer fences the
+  // request against its own epoch (cluster/election.ts) -- a `stale_epoch`
+  // response means WE'RE behind, so adopt the epoch it reports and retry
+  // against that same peer once before giving up on it.
+  interface ReserveResponse {
+    ok?: boolean;
+    stale_epoch?: boolean;
+    current_epoch?: number;
+  }
   for (const peer of peers) {
-    let res: { ok?: boolean } | null;
-    try {
-      res = (await postJson(`${peer.baseUrl}/api/cluster/reserve`, peer.token, { table: "files", id: fileId, identity: fileIdentity }, 10_000)) as {
-        ok?: boolean;
-      };
-    } catch (err) {
-      // Treat an unreachable peer as non-blocking; heartbeat will mark it
-      // stale and a later sync/rebase reconciles it.
-      log.debug(`reserve: peer ${peer.baseUrl} unreachable: ${err instanceof Error ? err.message : String(err)}`);
-      continue;
+    let res: ReserveResponse | null = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const epoch = getSelfState(state.db).epoch;
+      try {
+        res = (await postJson(
+          `${peer.baseUrl}/api/cluster/reserve`,
+          peer.token,
+          { table: "files", id: fileId, identity: fileIdentity, epoch },
+          10_000,
+        )) as ReserveResponse;
+      } catch (err) {
+        // Treat an unreachable peer as non-blocking; heartbeat will mark it
+        // stale and a later sync/rebase reconciles it.
+        log.debug(`reserve: peer ${peer.baseUrl} unreachable: ${err instanceof Error ? err.message : String(err)}`);
+        res = null;
+        break;
+      }
+      if (res.stale_epoch && attempt === 0 && typeof res.current_epoch === "number") {
+        log.debug(`reserve: peer ${peer.baseUrl} reports higher epoch=${res.current_epoch}; adopting and retrying once`);
+        adoptEpochIfHigher(state, res.current_epoch, {});
+        continue;
+      }
+      break;
     }
-    if (!res?.ok) {
+    if (res === null) continue;
+    if (!res.ok) {
       log.warning(`file id ${fileId} conflicts on peer ${peer.baseUrl} -- rebasing to master`);
       await rebaseFromMaster(state);
       return "conflict";

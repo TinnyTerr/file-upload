@@ -252,7 +252,39 @@ CREATE TABLE IF NOT EXISTS cluster_nodes (
   created_by_id INTEGER REFERENCES users(id),
   created_at TEXT NOT NULL,
   last_seen_at TEXT,
-  last_heartbeat_at TEXT
+  last_heartbeat_at TEXT,
+  role TEXT NOT NULL DEFAULT 'follower',
+  epoch INTEGER NOT NULL DEFAULT 0
+);
+
+-- Singleton row (id=1) holding THIS node's own election state: elected,
+-- epoch-versioned leadership layered under the existing full-mesh
+-- reserve/replicate/export protocol. `role`/`epoch` are this node's live
+-- view of itself; `voted_epoch`/`voted_for` enforce "one vote per epoch"
+-- durably (must survive a crash between granting a vote and a restart, or a
+-- rejoin could double-vote and produce two masters at the same epoch).
+CREATE TABLE IF NOT EXISTS cluster_self_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  role TEXT NOT NULL DEFAULT 'follower',
+  epoch INTEGER NOT NULL DEFAULT 0,
+  voted_epoch INTEGER NOT NULL DEFAULT 0,
+  voted_for TEXT,
+  current_master_id TEXT,
+  current_master_url TEXT,
+  last_master_contact_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
+-- Local-only cache bookkeeping for REPLICATION_MODE=cache nodes. Deliberately
+-- NOT in cluster/replication.ts's REPLICATED_TABLES -- content_blobs rows
+-- (the metadata) are replicated everywhere, but whether THIS node physically
+-- holds a given blob's bytes right now, and when it last served them, is a
+-- per-node fact. Every locally-present blob is tracked here, not just
+-- peer-fetched ones -- on a cache-mode node, even a blob that landed here via
+-- a direct upload is just the newest cache entry, evictable like any other.
+CREATE TABLE IF NOT EXISTS local_blob_cache (
+  blob_id INTEGER PRIMARY KEY REFERENCES content_blobs(id) ON DELETE CASCADE,
+  last_accessed_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS cluster_events (

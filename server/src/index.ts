@@ -8,6 +8,7 @@ import { startBackendWorkers } from "./jobs/scheduler.ts";
 import { setupWebSockets } from "./ws.ts";
 import { joinCluster } from "./cluster/membership.ts";
 import { ClusterFirehoseConsumer } from "./cluster/firehoseClient.ts";
+import { initSelfState } from "./cluster/election.ts";
 
 const log = getLogger("app.main");
 
@@ -20,6 +21,11 @@ const db = createDb(settings.databaseUrl);
 const state = createAppState(settings, db);
 
 await ensureMaster(db);
+// Seed this node's election state (cluster/election.ts) from NODE_ROLE on
+// first ever boot; a no-op on every later boot since persisted role/epoch
+// always wins over env config. Must run before anything else (heartbeat,
+// join, the scheduler) reads or writes cluster_self_state.
+initSelfState(db, settings);
 state.eventWriter.start();
 startBackendWorkers(state);
 

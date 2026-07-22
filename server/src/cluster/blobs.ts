@@ -6,6 +6,7 @@ import { pipeline } from "node:stream/promises";
 import type { AppState } from "../appState.ts";
 import type { ClusterNodeRow } from "../db/rows.ts";
 import { ClusterHTTPError, openStream } from "./http.ts";
+import { touchBlobAccess } from "./cacheEviction.ts";
 import { getLogger } from "../logging.ts";
 
 /** Mirrors app/cluster/blobs.py. */
@@ -22,7 +23,7 @@ const log = getLogger("app.cluster.blobs");
  * inactive. */
 export async function fetchBlobFromPeers(
   state: AppState,
-  opts: { storedSha256: string; transformKey: string; dest: string },
+  opts: { storedSha256: string; transformKey: string; dest: string; blobId?: number },
 ): Promise<boolean> {
   const peers = state.db
     .all<ClusterNodeRow>("SELECT * FROM cluster_nodes WHERE active = 1")
@@ -44,6 +45,10 @@ export async function fetchBlobFromPeers(
       await pipeline(Readable.fromWeb(resp.body as never), createWriteStream(tmp));
       renameSync(tmp, opts.dest);
       log.info(`fetched blob ${opts.storedSha256.slice(0, 12)} from peer ${peer.base_url}`);
+      // This node just pulled the bytes in -- count it as a fresh cache
+      // entry so cluster/cacheEviction.ts's LRU clock starts now, not at
+      // whatever created the (replicated) content_blobs row.
+      touchBlobAccess(state.db, opts.blobId);
       return true;
     } catch {
       try {

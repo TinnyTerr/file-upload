@@ -16,6 +16,7 @@ import { openBox } from "../crypto/secretbox.ts";
 import { renderSpa } from "../spa.ts";
 import { nowIso, type FileRow, type UserRow } from "../db/rows.ts";
 import { fetchBlobFromPeers } from "../cluster/blobs.ts";
+import { touchBlobAccess } from "../cluster/cacheEviction.ts";
 import { getOrCreateThumbnail } from "../storage/thumbnail.ts";
 
 const log = getLogger("app.public");
@@ -51,7 +52,7 @@ async function ensureBlobAvailable(state: AppState, f: FileRow, fullPath: string
   );
   if (!blob) return;
   try {
-    await fetchBlobFromPeers(state, { storedSha256: blob.stored_sha256, transformKey: blob.transform_key, dest: fullPath });
+    await fetchBlobFromPeers(state, { storedSha256: blob.stored_sha256, transformKey: blob.transform_key, dest: fullPath, blobId: f.blob_id ?? undefined });
   } catch {
     // best-effort -- caller falls back to a 500 if this didn't help
   }
@@ -238,6 +239,7 @@ export function publicRouter(state: AppState): Router {
       res.status(500).json({ detail: "file missing from storage" });
       return;
     }
+    touchBlobAccess(db, f.blob_id);
 
     const needsDecrypt = f.encryption_mode === "server";
     const needsDecompress = !!(f.compressed || f.archived);
@@ -385,6 +387,7 @@ export function publicRouter(state: AppState): Router {
       res.status(500).json({ detail: "file missing from storage" });
       return;
     }
+    touchBlobAccess(db, f.blob_id);
     const fileSize = statSync(fullPath).size;
     const headers: Record<string, string> = { ...SECURITY_HEADERS, "Accept-Ranges": "bytes" };
     const rangeHeader = req.headers.range;

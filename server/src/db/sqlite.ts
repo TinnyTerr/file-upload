@@ -25,6 +25,8 @@ export function createSqliteDb(path: string): Db {
   ensureColumn(sqlite, "users", "webauthn_user_handle", "webauthn_user_handle TEXT");
   ensureColumn(sqlite, "credentials", "updated_at", "updated_at TEXT");
   ensureColumn(sqlite, "credentials", "transports", "transports TEXT");
+  ensureColumn(sqlite, "cluster_nodes", "role", "role TEXT NOT NULL DEFAULT 'follower'");
+  ensureColumn(sqlite, "cluster_nodes", "epoch", "epoch INTEGER NOT NULL DEFAULT 0");
 
   return {
     run(sql: string, params: SqlParams = {}) {
