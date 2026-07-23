@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { performUpload, type UploadPhase, type UploadOutcome } from "../lib/uploadCore";
@@ -17,7 +17,24 @@ export interface UploadItem {
 
 let seq = 0;
 
-export function useUpload() {
+interface UploadState {
+  items: UploadItem[];
+  completed: UploadItem[];
+  busy: boolean;
+  start: (files: File[], options: UploadOptions) => Promise<{ filename: string; outcome: UploadOutcome }[]>;
+  cancel: (id: string) => void;
+  clearFinished: () => void;
+  reset: () => void;
+}
+
+const UploadContext = createContext<UploadState | null>(null);
+
+/**
+ * Holds upload progress in a context above the routed pages, so an in-flight
+ * upload (and its UI) survives navigating away from the Files tab instead of
+ * being torn down with the component that started it.
+ */
+export function UploadProvider({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
   const [items, setItems] = useState<UploadItem[]>([]);
   const [busy, setBusy] = useState(false);
@@ -92,5 +109,15 @@ export function useUpload() {
 
   const completed = items.filter((it) => it.status === "done" && it.outcome);
 
-  return { items, completed, busy, start, cancel, clearFinished, reset };
+  return (
+    <UploadContext.Provider value={{ items, completed, busy, start, cancel, clearFinished, reset }}>
+      {children}
+    </UploadContext.Provider>
+  );
+}
+
+export function useUpload() {
+  const ctx = useContext(UploadContext);
+  if (!ctx) throw new Error("useUpload must be used within UploadProvider");
+  return ctx;
 }

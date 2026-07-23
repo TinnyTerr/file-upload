@@ -5,6 +5,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryProvider } from "@/providers/QueryProvider";
 import { ToastProvider } from "@/providers/ToastProvider";
 import { DialogProvider } from "@/providers/DialogProvider";
+import { UploadProvider } from "@/features/files/hooks/useUpload";
 import { AuthProvider } from "@/features/auth/hooks/auth";
 import App from "./App";
 import "./index.css";
@@ -29,10 +30,12 @@ createRoot(document.getElementById("root")!).render(
       <AuthProvider>
         <TooltipProvider delayDuration={200}>
           <DialogProvider>
-            <BrowserRouter>
-              <App />
-            </BrowserRouter>
-            <ToastProvider />
+            <UploadProvider>
+              <BrowserRouter>
+                <App />
+              </BrowserRouter>
+              <ToastProvider />
+            </UploadProvider>
           </DialogProvider>
         </TooltipProvider>
       </AuthProvider>

@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Brand } from "./Brand";
 import { SidebarNav } from "./Sidebar";
 import { UserMenu } from "./UserMenu";
+import { UploadStatusIndicator } from "@/features/files/components/UploadStatusIndicator";
 
 export function Header() {
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -35,7 +36,7 @@ export function Header() {
       </div>
 
       <div className="flex items-center gap-3">
-        {/* Placeholder for future header items */}
+        <UploadStatusIndicator />
       </div>
     </header>
   );

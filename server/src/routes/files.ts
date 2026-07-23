@@ -506,6 +506,12 @@ export function receivedIndices(parts: string, n: number): number[] {
   return out.sort((a, b) => a - b);
 }
 
+/** Serializes finalize/abort against each other for a given upload (keyed by
+ * its storage rel path) so one request can't delete the `.parts` dir out from
+ * under another that's mid-read — the ENOENT race that used to surface as an
+ * unhandled 500 and leave an orphaned, unaccounted-for `.part` file on disk. */
+const uploadLocks = new Map<string, "finalizing" | "aborting">();
+
 /** Drops chunk dirs / assembly files left behind by abandoned uploads. Exported
  * so jobs/scheduler.ts can run it on an interval, mirroring the APScheduler job. */
 export function sweepStaleParts(): void {
@@ -902,16 +908,24 @@ export function filesRouter(state: AppState): Router {
   });
 
   router.post("/upload/finalize", getUploadUser(state), async (req, res) => {
+    let relPath: string | null = null;
+    let work: string | null = null;
     try {
       const user = req.currentUser!;
       const uploadId = String(req.body?.upload_id ?? "");
       const meta = openChunkToken(state, uploadId, user);
-      const relPath = meta.rel;
+      relPath = meta.rel;
       const parts = partsDir(relPath);
       if (!existsSync(parts)) {
         res.status(410).json({ detail: "upload session gone" });
         return;
       }
+      if (uploadLocks.has(relPath)) {
+        res.status(409).json({ detail: "upload busy, retry shortly" });
+        return;
+      }
+      uploadLocks.set(relPath, "finalizing");
+
       const received = new Set(receivedIndices(parts, meta.n));
       const missing: number[] = [];
       for (let i = 0; i < meta.n; i++) if (!received.has(i)) missing.push(i);
@@ -921,16 +935,29 @@ export function filesRouter(state: AppState): Router {
         return;
       }
 
-      const work = `${join(storageRoot(), relPath)}.part`;
+      work = `${join(storageRoot(), relPath)}.part`;
       const out = createWriteStream(work);
-      for (let i = 0; i < meta.n; i++) {
-        const chunkPath = join(parts, String(i));
-        await new Promise<void>((resolve, reject) => {
-          const rs = createReadStream(chunkPath);
-          rs.on("error", reject);
-          rs.on("end", resolve);
-          rs.pipe(out, { end: false });
-        });
+      try {
+        for (let i = 0; i < meta.n; i++) {
+          const chunkPath = join(parts, String(i));
+          await new Promise<void>((resolve, reject) => {
+            const rs = createReadStream(chunkPath);
+            rs.on("error", reject);
+            rs.on("end", resolve);
+            rs.pipe(out, { end: false });
+          });
+        }
+      } catch (err) {
+        out.destroy();
+        // The parts dir vanished mid-read — almost always a concurrent abort
+        // won the race despite the lock above (e.g. an abort that slipped in
+        // between the existsSync check and the lock being set). Report it as
+        // a clean, expected failure rather than a 500.
+        if (!existsSync(parts)) {
+          res.status(410).json({ detail: "upload session gone" });
+          return;
+        }
+        throw err;
       }
       await new Promise<void>((resolve) => out.end(resolve));
       const stored = statSync(work).size;
@@ -982,14 +1009,36 @@ export function filesRouter(state: AppState): Router {
       log.info(`chunked upload finalized user_id=${user.id} total_bytes=${meta.total} chunks=${meta.n}`);
       res.json(result);
     } catch (err) {
+      // Never leave a partially-assembled `.part` file behind on failure —
+      // that debris counts toward real disk usage but never becomes a
+      // `content_blobs` row, so it silently inflates disk use past what
+      // /api/files/usage reports until the (up to 12h-delayed) stale-part
+      // sweep catches it.
+      if (work) {
+        try {
+          unlinkSync(work);
+        } catch {
+          // best-effort
+        }
+      }
       respondError(res, err);
+    } finally {
+      if (relPath) uploadLocks.delete(relPath);
     }
   });
 
   router.delete("/upload", getUploadUser(state), (req, res) => {
+    let relPath: string | null = null;
     try {
       const user = req.currentUser!;
       const meta = openChunkToken(state, String(req.query.upload_id ?? ""), user);
+      relPath = meta.rel;
+      if (uploadLocks.get(relPath) === "finalizing") {
+        res.status(409).json({ detail: "finalize in progress, retry shortly" });
+        relPath = null; // don't clear a lock we don't own
+        return;
+      }
+      uploadLocks.set(relPath, "aborting");
       rmSync(partsDir(meta.rel), { recursive: true, force: true });
       try {
         unlinkSync(`${join(storageRoot(), meta.rel)}.part`);
@@ -1000,6 +1049,8 @@ export function filesRouter(state: AppState): Router {
       res.json({ status: "aborted" });
     } catch (err) {
       respondError(res, err);
+    } finally {
+      if (relPath) uploadLocks.delete(relPath);
     }
   });
 
