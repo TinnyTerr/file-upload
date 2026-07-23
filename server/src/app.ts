@@ -76,8 +76,7 @@ export function createApp(state: AppState): Express {
         },
       }),
     );
-    const spaRoutes = ["/", "/login", "/account/change", "/files", "/admin", "/api-docs", "/api-keys", "/cluster"];
-    app.get(spaRoutes, (_req, res) => {
+    app.get(/^\/(?!api\/).*/, (_req, res) => {
       res.set("Cache-Control", "no-cache");
       res.sendFile(join(SPA_DIST, "index.html"));
     });
