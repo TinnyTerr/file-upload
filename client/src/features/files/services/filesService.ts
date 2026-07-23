@@ -1,4 +1,4 @@
-import { api } from "@/config/api";
+import { api, apiPath } from "@/config/api";
 import type { FileObject, Usage, UploadResult, MintLinkResult, UploadOptions } from "../types";
 
 interface ChunkedInit {
@@ -105,7 +105,7 @@ function xhrUpload(
 ): Promise<UploadResult> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", path);
+    xhr.open("POST", apiPath(path));
     xhr.withCredentials = true;
     const token = localStorage.getItem("fu_csrf_token");
     if (token) xhr.setRequestHeader("X-CSRF-Token", token);
