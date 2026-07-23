@@ -215,7 +215,7 @@ export function authRouter(state: AppState): Router {
     res.json({ status: "logged_out" });
   });
 
-  router.get("/sessions", requireSession(state), requireCsrf, (req, res) => {
+  router.get("/sessions", requireSession(state), (req, res) => {
     const current = req.sessionRow!;
     const rows = db.all<SessionRow>(
       "SELECT * FROM sessions WHERE user_id = $userId AND expires_at > $now",
