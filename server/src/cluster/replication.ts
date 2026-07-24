@@ -53,6 +53,7 @@ const TABLE_COLUMNS: Record<ReplicatedTable, string[]> = {
     "stored_sha256",
     "transform_key",
     "ref_count",
+    "archived",
     "media_width",
     "media_height",
     "media_duration_seconds",

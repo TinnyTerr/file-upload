@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS content_blobs (
   stored_sha256 TEXT NOT NULL DEFAULT '',
   transform_key TEXT NOT NULL DEFAULT 'plain',
   ref_count INTEGER NOT NULL DEFAULT 0,
+  archived INTEGER NOT NULL DEFAULT 0,
   media_width INTEGER,
   media_height INTEGER,
   media_duration_seconds INTEGER,

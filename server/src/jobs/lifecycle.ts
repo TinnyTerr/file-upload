@@ -110,9 +110,8 @@ export async function archiveIdleJob(db: Db): Promise<number> {
         { $stored: stored, $orig: original, $saved: saved, $id: f.id },
       );
       if (blob) {
-        db.run("UPDATE content_blobs SET stored_size_bytes = $stored, transform_key = $tk WHERE id = $id", {
+        db.run("UPDATE content_blobs SET stored_size_bytes = $stored, archived = 1 WHERE id = $id", {
           $stored: stored,
-          $tk: `${blob.transform_key}|archived`,
           $id: blob.id,
         });
       }
@@ -274,9 +273,8 @@ export async function archiveFileCore(
       { $stored: stored, $orig: original, $saved: saved, $id: f.id },
     );
     if (blob) {
-      db.run("UPDATE content_blobs SET stored_size_bytes = $stored, transform_key = $tk WHERE id = $id", {
+      db.run("UPDATE content_blobs SET stored_size_bytes = $stored, archived = 1 WHERE id = $id", {
         $stored: stored,
-        $tk: `${blob.transform_key}|archived`.slice(0, 64),
         $id: blob.id,
       });
     }
@@ -361,7 +359,10 @@ export async function unarchiveFileCore(
       { $stored: restored, $now: nowIso(), $id: f.id },
     );
     if (blob) {
-      db.run("UPDATE content_blobs SET stored_size_bytes = $stored WHERE id = $id", { $stored: restored, $id: blob.id });
+      db.run("UPDATE content_blobs SET stored_size_bytes = $stored, archived = 0 WHERE id = $id", {
+        $stored: restored,
+        $id: blob.id,
+      });
     }
     recordAudit(db, { actor, action: "file.unarchived", target: `file:${f.id}`, ip });
     f = fileRow(db, f.id)!;

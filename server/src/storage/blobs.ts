@@ -54,8 +54,14 @@ export function attachBlob(
 ): ContentBlobRow {
   const transformKey = opts.transformKey ?? "plain";
   const storedSha256 = (opts.storedHashes ?? opts.hashes).sha256;
+  // Archived blobs are excluded from dedup matching: their bytes are
+  // currently zstd-compressed on disk, not the plain representation the
+  // (sha256, transform_key) identity was minted for, and archiving only ever
+  // happens to a ref_count == 1 blob (see lifecycle.ts::sharedBlob). A new
+  // upload that matches an archived blob's content just gets its own fresh,
+  // dedup-eligible blob rather than reusing compressed bytes it can't read.
   const existing = db.get<ContentBlobRow>(
-    "SELECT * FROM content_blobs WHERE stored_sha256 = $sha AND transform_key = $tk",
+    "SELECT * FROM content_blobs WHERE stored_sha256 = $sha AND transform_key = $tk AND archived = 0",
     { $sha: storedSha256, $tk: transformKey },
   );
   if (existing) {

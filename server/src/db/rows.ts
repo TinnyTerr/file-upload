@@ -64,6 +64,7 @@ export interface ContentBlobRow {
   stored_sha256: string;
   transform_key: string;
   ref_count: number;
+  archived: number;
   media_width: number | null;
   media_height: number | null;
   media_duration_seconds: number | null;
