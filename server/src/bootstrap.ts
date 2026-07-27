@@ -42,8 +42,8 @@ export async function ensureMaster(db: Db, print: (line: string) => void = conso
          user_id, can_upload, can_upload_client_encrypted, can_delete, can_regenerate_links,
          can_delete_links, can_create_directories, can_manage_lifecycle, can_use_api_keys,
          can_view_admin, can_manage_users, can_manage_storage, can_manage_api_keys, can_manage_cluster,
-         quota_bytes, max_file_bytes, archive_after_idle_days, created_at
-       ) VALUES ($userId, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 107374182400, 10737418240, 5, $createdAt)`,
+         can_use_torrents, quota_bytes, max_file_bytes, archive_after_idle_days, created_at
+       ) VALUES ($userId, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 107374182400, 10737418240, 5, $createdAt)`,
       { $userId: id, $createdAt: createdAt },
     );
 

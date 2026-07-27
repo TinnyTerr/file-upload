@@ -30,7 +30,8 @@ The in-memory event sequence counter in `eventBus.ts` assumes **one process per 
 | Frontend | React 18/19, TypeScript, TanStack Query, Tailwind CSS, Radix UI primitives |
 | Auth | Cookie-based sessions (`fu_session`) + CSRF tokens (`fu_csrf_token` in localStorage) |
 | Crypto | AES-GCM (server-side, `server/src/crypto/aead.ts`), browser WebCrypto (client-side E2E) |
-| Scheduling | `server/src/jobs/scheduler.ts` — plain `setInterval` jobs (archive/delete-idle, temp/link expiry, stale-part sweep); no `node-cron`/`croner` dependency |
+| Scheduling | `server/src/jobs/scheduler.ts` — plain `setInterval` jobs (archive/delete-idle, temp/link expiry, stale-part sweep, `torrent_poll`); no `node-cron`/`croner` dependency |
+| Torrenting | qBittorrent WebUI API v2 on the host (`server/src/torrents/*`) |
 
 ---
 
@@ -53,6 +54,9 @@ Config lives in `./data/app.env` and is auto-generated on first run. Environment
 - `MASTER_KEY_B64` — base64 AES-256 key used for server-side encryption
 - `DATABASE_URL` — default `sqlite:///./data/app.db`
 - `TRUST_PROXY` — set `true` behind a reverse proxy for real IP detection
+- `QBITTORRENT_URL` / `QBITTORRENT_USERNAME` / `QBITTORRENT_PASSWORD` — host qBittorrent WebUI (e.g. `http://127.0.0.1:8080`). Empty = torrenting disabled everywhere
+- `QBITTORRENT_SAVE_PATH` — the download location, as **qBittorrent** sees it
+- `TORRENT_CONTENT_PATH` — the same directory as **this server** sees it; only needed when qBittorrent runs in a container with a different mount point (defaults to `QBITTORRENT_SAVE_PATH`)
 
 **Legacy Python backend (`app/`, reference only — do not run in production):**
 ```bash
@@ -94,6 +98,8 @@ server/
       admin.ts               # Admin: storage, backend logs, lifecycle triggers, bulk actions
       cluster.ts              # Cluster node linking + node-to-node membership/replication/blob handshake
       remoteUpload.ts        # Remote URL fetch-and-upload
+      torrents.ts             # Torrent jobs (magnet/.torrent) + admin qBittorrent status
+    torrents/                # qbittorrent.ts (WebUI API v2 client), poller.ts (scheduler job), importer.ts
 
 app/  (retired — Python/FastAPI reference only, do not run in production)
   main.py               # FastAPI app factory, route mounting
@@ -139,6 +145,7 @@ client/src/
     admin/              # Admin panel (users, files, keys, audit)
     api-docs/           # Interactive API reference page
     apikeys/            # API key management UI
+    torrents/           # Torrents page (add magnet/.torrent, live progress)
     account/            # Profile, avatar, password
   components/
     layout/             # Sidebar, settings modal (sessions tab), top bar
@@ -199,8 +206,10 @@ client/src/
 
 Defined in `app/models/permission.py` and `client/src/config/permissions.ts`:
 - `can_upload`, `can_delete`, `can_delete_links`, `can_regenerate_links`
-- `can_use_api_keys`, `can_use_dropbox`
+- `can_use_api_keys`, `can_use_dropbox`, `can_use_torrents`
 - `master` role bypasses all permission checks
+
+Adding a flag means touching all of: `server/src/db/schema.sql` (+ an `ensureColumn` backfill in `server/src/db/sqlite.ts`, since schema.sql only runs `CREATE TABLE IF NOT EXISTS`), `server/src/db/rows.ts`, `server/src/permissions.ts` (`BOOL_FLAGS` + the master seed insert), `server/src/bootstrap.ts`, `MASTER_ALL_TRUE` in `server/src/routes/users.ts`, the `/account/me` payload in `server/src/routes/account.ts`, and `client/src/config/permissions.ts`.
 
 ### Admin panel
 
@@ -208,6 +217,19 @@ Defined in `app/models/permission.py` and `client/src/config/permissions.ts`:
 - Files tab: grouped by owner username, alphabetically sorted
 - Keys tab: grouped by owner username, alphabetically sorted  
 - Hard-deletes API keys when users delete them (not soft-delete)
+
+### Torrenting
+
+Downloads run on a **qBittorrent instance on the host**, not in this process — the server only drives its WebUI API v2 (`server/src/torrents/qbittorrent.ts`) and imports the result:
+
+1. `POST /api/torrents` (permission `can_use_torrents`) hands qBittorrent a magnet or an uploaded `.torrent`, with `savepath = <QBITTORRENT_SAVE_PATH>/<tag>` and `autoTMM=false`, and inserts a `torrent_jobs` row. Each job gets a unique tag (`fu-<hex>`) — that tag, not the info hash, is how the poller finds the torrent again (a magnet's hash is known up front, an uploaded `.torrent`'s is not).
+2. The `torrent_poll` scheduler job (every 15s, `torrents/poller.ts`) mirrors progress/speed/ETA onto the row, and on completion imports the content through `finalizeStoredFile` — so quota, blob dedup, share-link minting and cluster replication all behave exactly like a normal upload. Multi-file torrents land in a new folder titled after the torrent; single-file torrents become a plain file. `source_type` is `torrent`.
+3. After a successful import the torrent + its data are deleted from qBittorrent. A **failed** import (usually quota) deliberately leaves the downloaded data in place so `POST /api/torrents/:id/retry` can re-import without re-downloading.
+
+Notes:
+- Only magnets and uploaded `.torrent` files are accepted. Handing qBittorrent an arbitrary `http(s)` URL to fetch would turn it into an SSRF proxy into the host's network — the remote-upload route guards that surface by pinning validated public IPs (`routes/remoteUpload.ts`), which is impossible to enforce through qBittorrent.
+- `TORRENT_CONTENT_PATH` exists because the import reads the files directly off disk: qBittorrent's view of the download directory and this server's view differ as soon as either side is containerized.
+- Everything (routes, poller, nav item) is inert unless `QBITTORRENT_URL` **and** `QBITTORRENT_SAVE_PATH` are set; the API answers 503 and the admin panel's Torrents tab says so.
 
 ### Session management
 

@@ -13,6 +13,7 @@ export const FEATURES = {
   audit: true,
   remoteUpload: true,
   cluster: true,
+  torrents: true,
 } as const;
 
 export type FeatureFlag = keyof typeof FEATURES;

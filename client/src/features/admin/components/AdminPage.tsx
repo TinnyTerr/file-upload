@@ -9,6 +9,7 @@ import { FilesTab } from "./FilesTab";
 import { KeysTab } from "./KeysTab";
 import { AuditTab } from "./AuditTab";
 import { BackendTab } from "./BackendTab";
+import { TorrentsTab } from "./TorrentsTab";
 import { useDiskStats } from "../hooks/useAdminDashboard";
 import { useAuth } from "@/features/auth/hooks/auth";
 import { formatBytes } from "@/lib/bytes";
@@ -39,6 +40,7 @@ export function AdminPage() {
     { value: "users", label: "Users", el: <UsersTab />, allowed: can("can_manage_users") },
     { value: "files", label: "Files", el: <FilesTab />, allowed: isMaster },
     { value: "keys", label: "API keys", el: <KeysTab />, allowed: can("can_manage_api_keys") },
+    { value: "torrents", label: "Torrents", el: <TorrentsTab />, allowed: isMaster },
     { value: "audit", label: "Audit", el: <AuditTab />, allowed: isMaster },
     { value: "backend", label: "Backend", el: <BackendTab />, allowed: isMaster },
   ].filter((t) => t.allowed);

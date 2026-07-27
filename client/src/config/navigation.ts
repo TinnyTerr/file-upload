@@ -1,4 +1,4 @@
-import { FolderUp, BookText, ShieldCheck, KeyRound, Network, type LucideIcon } from "lucide-react";
+import { FolderUp, BookText, ShieldCheck, KeyRound, Network, Download, type LucideIcon } from "lucide-react";
 import type { PermissionFlag } from "./permissions";
 import type { FeatureFlag } from "./featureFlags";
 
@@ -20,6 +20,14 @@ export const NAV_ITEMS: NavItem[] = [
     icon: FolderUp,
     description: "Upload, share and manage your files",
     feature: "files",
+  },
+  {
+    label: "Torrents",
+    to: "/torrents",
+    icon: Download,
+    description: "Download torrents into your storage",
+    requires: "can_use_torrents",
+    feature: "torrents",
   },
   {
     label: "Keys",

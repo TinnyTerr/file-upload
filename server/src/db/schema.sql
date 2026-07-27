@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS permissions (
   can_manage_storage INTEGER NOT NULL DEFAULT 0,
   can_manage_api_keys INTEGER NOT NULL DEFAULT 0,
   can_manage_cluster INTEGER NOT NULL DEFAULT 0,
+  can_use_torrents INTEGER NOT NULL DEFAULT 0,
   quota_bytes INTEGER NOT NULL DEFAULT 107374182400,
   max_file_bytes INTEGER NOT NULL DEFAULT 10737418240,
   archive_after_idle_days INTEGER NOT NULL DEFAULT 5,
@@ -222,6 +223,30 @@ CREATE TABLE IF NOT EXISTS remote_upload_jobs (
   completed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_remote_upload_jobs_owner_id ON remote_upload_jobs(owner_id);
+
+CREATE TABLE IF NOT EXISTS torrent_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_id INTEGER NOT NULL REFERENCES users(id),
+  directory_id INTEGER REFERENCES directories(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  source TEXT NOT NULL,
+  info_hash TEXT,
+  tag TEXT NOT NULL UNIQUE,
+  save_path TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  progress REAL NOT NULL DEFAULT 0,
+  size_bytes INTEGER NOT NULL DEFAULT 0,
+  downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+  dl_speed INTEGER NOT NULL DEFAULT 0,
+  eta_seconds INTEGER,
+  imported_file_count INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_torrent_jobs_owner_id ON torrent_jobs(owner_id);
+CREATE INDEX IF NOT EXISTS ix_torrent_jobs_status ON torrent_jobs(status);
 
 CREATE TABLE IF NOT EXISTS dropbox_upload_links (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -6,6 +6,7 @@ import { heartbeatJob } from "../cluster/membership.ts";
 import { syncCheckJob } from "../cluster/digest.ts";
 import { checkMasterLivenessJob } from "../cluster/election.ts";
 import { cacheEvictionJob } from "../cluster/cacheEviction.ts";
+import { torrentPollJob, resetInterruptedImports } from "../torrents/poller.ts";
 
 /** setInterval-based scheduler mirroring app/main.py's BackgroundScheduler
  * wiring: archive_idle/delete_idle/temp_expiry/sweep_stale_parts hourly,
@@ -45,6 +46,8 @@ function buildJobSpecs(state: AppState): JobSpec[] {
     { id: "cluster_sync_check", intervalMs: 5 * MINUTE_MS, run: () => syncCheckJob(state) },
     { id: "cluster_election_liveness", intervalMs: FIFTEEN_SEC_MS, run: () => checkMasterLivenessJob(state) },
     { id: "cluster_cache_eviction", intervalMs: TEN_MIN_MS, run: () => cacheEvictionJob(state) },
+    // No-op unless QBITTORRENT_URL/QBITTORRENT_SAVE_PATH are configured.
+    { id: "torrent_poll", intervalMs: FIFTEEN_SEC_MS, run: () => torrentPollJob(state) },
   ];
 }
 
@@ -61,6 +64,7 @@ async function runJob(id: string, run: () => void | Promise<unknown>): Promise<v
  * timers first. Returns the job ids that were (re)started. */
 export function startBackendWorkers(state: AppState): string[] {
   stopBackendWorkers();
+  resetInterruptedImports(state.db);
   const specs = buildJobSpecs(state);
   for (const spec of specs) {
     const timer = setInterval(() => void runJob(spec.id, spec.run), spec.intervalMs);

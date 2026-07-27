@@ -2,6 +2,7 @@ import { api } from "@/config/api";
 import type { FileObject } from "@/features/files/types";
 import type { Directory } from "@/features/directories/types";
 import type { AdminApiKey } from "@/features/apikeys/types";
+import type { AdminTorrentJob, TorrentHostStatus } from "@/features/torrents/types";
 import type {
   DiskStats,
   StorageDetails,
@@ -56,6 +57,10 @@ export const adminService = {
 
   // Lifecycle
   runLifecycle: (job: LifecycleJob) => api.post<{ processed: number }>(`/admin/lifecycle/${job}`),
+
+  // Torrents (host qBittorrent connectivity + every user's jobs)
+  torrentStatus: () => api.get<TorrentHostStatus>("/admin/torrents/status"),
+  torrents: () => api.get<{ torrents: AdminTorrentJob[] }>("/admin/torrents").then((r) => r.torrents),
 
   // Bulk
   bulkPreview: (action: BulkAction, ids: number[]) =>

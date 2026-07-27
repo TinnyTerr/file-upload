@@ -40,6 +40,7 @@ const MASTER_ALL_TRUE: PermissionFlag[] = [
   "can_manage_users",
   "can_manage_storage",
   "can_manage_api_keys",
+  "can_use_torrents",
 ];
 
 function serializePermissions(perm: PermissionRow) {

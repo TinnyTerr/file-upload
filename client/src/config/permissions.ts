@@ -13,6 +13,7 @@ export const PERMISSION_FLAGS = [
   "can_manage_storage",
   "can_manage_api_keys",
   "can_manage_cluster",
+  "can_use_torrents",
 ] as const;
 
 export type PermissionFlag = (typeof PERMISSION_FLAGS)[number];
@@ -42,6 +43,7 @@ export const PERMISSION_META: PermissionMeta[] = [
   { key: "can_create_directories", label: "Create folders", description: "Group files into shareable folders.", group: "advanced" },
   { key: "can_manage_lifecycle", label: "Lifecycle controls", description: "Set archive / expiry / idle-delete rules.", group: "advanced" },
   { key: "can_use_api_keys", label: "Personal API keys", description: "Create API keys for programmatic uploads.", group: "advanced" },
+  { key: "can_use_torrents", label: "Torrent downloads", description: "Download torrents via the host's qBittorrent into their storage.", group: "advanced" },
   { key: "can_view_admin", label: "View admin", description: "Access the admin dashboard.", group: "admin" },
   { key: "can_manage_users", label: "Manage users", description: "Create, edit and delete user accounts.", group: "admin" },
   { key: "can_manage_storage", label: "Manage storage", description: "Set the global storage cap and run lifecycle jobs.", group: "admin" },

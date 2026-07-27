@@ -19,6 +19,7 @@ import { directoriesRouter, adminDirectoriesRouter, publicDirectoriesRouter } fr
 import { dropboxRouter } from "./routes/dropbox.ts";
 import { adminRouter } from "./routes/admin.ts";
 import { clusterRouter, adminClusterRouter } from "./routes/cluster.ts";
+import { torrentsRouter, adminTorrentsRouter } from "./routes/torrents.ts";
 import { HttpError } from "./httpError.ts";
 import { getLogger } from "./logging.ts";
 
@@ -59,6 +60,8 @@ export function createApp(state: AppState): Express {
   app.use("/api", directoriesRouter(state));
   app.use("/api", dropboxRouter(state));
   app.use("/api/admin", adminRouter(state));
+  app.use("/api/torrents", torrentsRouter(state));
+  app.use("/api/admin/torrents", adminTorrentsRouter(state));
   app.use("/api/cluster", clusterRouter(state));
   app.use("/api/admin/cluster", adminClusterRouter(state));
   app.use("/api", publicRouter(state));

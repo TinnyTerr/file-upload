@@ -45,6 +45,7 @@ export interface PermissionRow {
   can_manage_storage: number;
   can_manage_api_keys: number;
   can_manage_cluster: number;
+  can_use_torrents: number;
   quota_bytes: number;
   max_file_bytes: number;
   archive_after_idle_days: number;
@@ -190,6 +191,30 @@ export interface RemoteUploadJobRow {
   status: string;
   error: string | null;
   created_at: string;
+  completed_at: string | null;
+}
+
+export interface TorrentJobRow {
+  id: number;
+  owner_id: number;
+  directory_id: number | null;
+  name: string;
+  source: string;
+  info_hash: string | null;
+  /** Per-job qBittorrent tag ("fu-<random>") -- how a job finds its torrent. */
+  tag: string;
+  save_path: string;
+  /** queued | downloading | importing | completed | failed | cancelled */
+  status: string;
+  progress: number;
+  size_bytes: number;
+  downloaded_bytes: number;
+  dl_speed: number;
+  eta_seconds: number | null;
+  imported_file_count: number;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
   completed_at: string | null;
 }
 

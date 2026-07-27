@@ -130,6 +130,7 @@ export function accountRouter(state: AppState): Router {
       can_manage_storage: !!perm.can_manage_storage,
       can_manage_api_keys: !!perm.can_manage_api_keys,
       can_manage_cluster: !!perm.can_manage_cluster,
+      can_use_torrents: !!perm.can_use_torrents,
     });
   });
 

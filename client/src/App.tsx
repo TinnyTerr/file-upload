@@ -30,6 +30,9 @@ const AdminPage = lazy(() =>
 const ApiKeysPage = lazy(() =>
   import("@/features/apikeys/components/ApiKeysPage").then((m) => ({ default: m.ApiKeysPage })),
 );
+const TorrentsPage = lazy(() =>
+  import("@/features/torrents/components/TorrentsPage").then((m) => ({ default: m.TorrentsPage })),
+);
 const ClusterPage = lazy(() =>
   import("@/features/cluster/components/ClusterPage").then((m) => ({ default: m.ClusterPage })),
 );
@@ -126,6 +129,16 @@ export default function App() {
                 }
               />
               <Route path="/api-docs" element={<ApiDocsPage />} />
+            </Route>
+            <Route element={<RequirePermission flag="can_use_torrents" />}>
+              <Route
+                path="/torrents"
+                element={
+                  <Gated feature="torrents" label="Torrents">
+                    <TorrentsPage />
+                  </Gated>
+                }
+              />
             </Route>
             <Route element={<RequirePermission flag="can_manage_cluster" />}>
               <Route

@@ -23,6 +23,15 @@ export interface Settings {
   archiveEnabled: boolean;
   replicationMode: string;
   cacheMaxBytes: number;
+  /** qBittorrent WebUI base URL, e.g. http://127.0.0.1:8080. Empty = torrenting disabled. */
+  qbittorrentUrl: string;
+  qbittorrentUsername: string;
+  qbittorrentPassword: string;
+  /** Download location as *qBittorrent* sees it (the "set location"). */
+  qbittorrentSavePath: string;
+  /** The same directory as *this server* sees it -- differs when qBittorrent
+   * runs in a container with a different mount point. Defaults to the save path. */
+  torrentContentPath: string;
 }
 
 function tokenUrlsafe(bytes: number): string {
@@ -59,6 +68,12 @@ function generateFile(path: string): void {
     ["ARCHIVE_ENABLED", "true"],
     ["REPLICATION_MODE", "full"],
     ["TRUST_PROXY", "false"],
+    // Torrenting stays off until a qBittorrent WebUI URL and download
+    // location are filled in (see routes/torrents.ts).
+    ["QBITTORRENT_URL", ""],
+    ["QBITTORRENT_USERNAME", ""],
+    ["QBITTORRENT_PASSWORD", ""],
+    ["QBITTORRENT_SAVE_PATH", ""],
   ]);
   const fd = openSync(path, "wx", 0o600);
   writeSync(fd, serializeEnvFile(map));
@@ -131,5 +146,10 @@ export function loadSettings(configPathArg?: string): Settings {
     archiveEnabled: map.get("ARCHIVE_ENABLED") ? truthy(map.get("ARCHIVE_ENABLED")) : true,
     replicationMode: map.get("REPLICATION_MODE") || "full",
     cacheMaxBytes: Number(map.get("CACHE_MAX_BYTES") || "0"),
+    qbittorrentUrl: (map.get("QBITTORRENT_URL") || "").replace(/\/+$/, ""),
+    qbittorrentUsername: map.get("QBITTORRENT_USERNAME") || "",
+    qbittorrentPassword: map.get("QBITTORRENT_PASSWORD") || "",
+    qbittorrentSavePath: map.get("QBITTORRENT_SAVE_PATH") || "",
+    torrentContentPath: map.get("TORRENT_CONTENT_PATH") || map.get("QBITTORRENT_SAVE_PATH") || "",
   };
 }

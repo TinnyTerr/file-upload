@@ -28,6 +28,7 @@ export function createSqliteDb(path: string): Db {
   ensureColumn(sqlite, "cluster_nodes", "role", "role TEXT NOT NULL DEFAULT 'follower'");
   ensureColumn(sqlite, "cluster_nodes", "epoch", "epoch INTEGER NOT NULL DEFAULT 0");
   ensureColumn(sqlite, "content_blobs", "archived", "archived INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(sqlite, "permissions", "can_use_torrents", "can_use_torrents INTEGER NOT NULL DEFAULT 0");
 
   return {
     run(sql: string, params: SqlParams = {}) {
