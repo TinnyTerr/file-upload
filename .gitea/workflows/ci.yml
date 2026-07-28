@@ -5,39 +5,66 @@ on:
   pull_request:
 
 jobs:
-  build:
+  server-typecheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-
-      - name: Install server deps
-        working-directory: server
+      - working-directory: server
         run: bun install --frozen-lockfile
-
-      - name: Server typecheck
-        working-directory: server
+      - working-directory: server
         run: bun run typecheck
 
-      - name: Install client deps
-        working-directory: client
+  server-biome:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - working-directory: server
         run: bun install --frozen-lockfile
+      - working-directory: server
+        run: bunx @biomejs/biome check .
 
-      - name: Client typecheck
-        working-directory: client
+  client-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - working-directory: client
+        run: bun install --frozen-lockfile
+      - working-directory: client
         run: bun run typecheck
-
-      - name: Client build (discard output)
-        working-directory: client
+      - working-directory: client
         run: bunx vite build --outDir /dev/null
 
-      - name: Client unit tests
-        working-directory: client
+  client-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - working-directory: client
+        run: bun install --frozen-lockfile
+      - working-directory: client
         run: bun test
-
-      - name: Client crypto vectors
-        working-directory: client
+      - working-directory: client
         run: bun run test:crypto
+
+  client-biome:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - working-directory: client
+        run: bun install --frozen-lockfile
+      - working-directory: client
+        run: bunx @biomejs/biome check .
