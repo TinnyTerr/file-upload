@@ -18,7 +18,18 @@ const REPLICATED_TABLES = ["users", "permissions", "content_blobs", "directories
 type ReplicatedTable = (typeof REPLICATED_TABLES)[number];
 
 const TABLE_COLUMNS: Record<ReplicatedTable, string[]> = {
-  users: ["id", "username", "password_hash", "role", "must_change_credentials", "avatar_data", "avatar_content_type", "created_at"],
+  users: [
+    "id",
+    "username",
+    "password_hash",
+    "role",
+    "must_change_credentials",
+    "avatar_data",
+    "avatar_content_type",
+    "mfa_required",
+    "webauthn_user_handle",
+    "created_at",
+  ],
   permissions: [
     "id",
     "user_id",
@@ -35,6 +46,7 @@ const TABLE_COLUMNS: Record<ReplicatedTable, string[]> = {
     "can_manage_storage",
     "can_manage_api_keys",
     "can_manage_cluster",
+    "can_use_torrents",
     "quota_bytes",
     "max_file_bytes",
     "archive_after_idle_days",

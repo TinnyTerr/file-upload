@@ -201,10 +201,19 @@ export interface TorrentJobRow {
   name: string;
   source: string;
   info_hash: string | null;
-  /** Per-job qBittorrent tag ("fu-<random>") -- how a job finds its torrent. */
+  /** Per-job tag ("fu-<random>"). How a qBittorrent job finds its torrent
+   * again, and the per-job download directory name for both providers. */
   tag: string;
   save_path: string;
-  /** queued | downloading | importing | completed | failed | cancelled */
+  /** 'debrid' (Real-Debrid) | 'qbittorrent' (fallback). */
+  provider: string;
+  /** Real-Debrid torrent id, when provider = 'debrid'. */
+  debrid_id: string | null;
+  /** Last raw Real-Debrid status ("magnet_conversion", "downloaded", ...). */
+  debrid_status: string | null;
+  /** Why the job landed on qBittorrent while Real-Debrid was configured. */
+  fallback_reason: string | null;
+  /** queued | downloading | fetching | importing | completed | failed | cancelled */
   status: string;
   progress: number;
   size_bytes: number;

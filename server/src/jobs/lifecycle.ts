@@ -8,6 +8,7 @@ import { getPermissions } from "../permissions.ts";
 import { storageRoot, safeJoin } from "../storage/paths.ts";
 import { compressFile, shouldCompress, decompressStream } from "../storage/compress.ts";
 import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
+import { deleteThumbnail } from "../storage/thumbnail.ts";
 import { ensureStorageSettings, usedStorageBytes, usedStorageBytesForUser, diskUsageBytes } from "../storage/accounting.ts";
 
 /** Mirrors app/jobs/lifecycle.py -- background lifecycle sweeps plus the
@@ -39,6 +40,7 @@ function deleteFileForJob(db: Db, f: FileRow): string | null {
   db.run("DELETE FROM links WHERE file_id = $id", { $id: f.id });
   const path = releaseBlob(db, f);
   db.run("DELETE FROM files WHERE id = $id", { $id: f.id });
+  deleteThumbnail(f.id);
   log.info(`lifecycle deleted file file_id=${f.id} storage_path=${f.storage_path}`);
   return path;
 }

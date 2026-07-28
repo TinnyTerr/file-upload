@@ -49,9 +49,11 @@ export function AddTorrentCard({
       <CardHeader>
         <CardTitle>Add a torrent</CardTitle>
         <CardDescription>
-          {config?.configured
-            ? "qBittorrent on this host downloads the torrent, then the files land in your storage automatically."
-            : "Torrenting is not configured on this server yet — an admin needs to set QBITTORRENT_URL and QBITTORRENT_SAVE_PATH."}
+          {!config?.configured
+            ? "Torrenting is not configured on this server yet — an admin needs to add a Real-Debrid API token or set QBITTORRENT_URL and QBITTORRENT_SAVE_PATH."
+            : config.debrid_enabled
+              ? "Real-Debrid downloads the torrent for you — cached or not — then the files transfer here and land in your storage automatically."
+              : "qBittorrent on this host downloads the torrent, then the files land in your storage automatically."}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -86,7 +88,7 @@ export function AddTorrentCard({
           <Button variant="secondary" onClick={() => fileInput.current?.click()} disabled={disabled}>
             <Upload /> Upload a .torrent file
           </Button>
-          {config?.configured && config.save_path && (
+          {config?.configured && !config.debrid_enabled && config.save_path && (
             <span className="truncate text-xs text-muted-foreground">Downloads to {config.save_path}</span>
           )}
         </div>

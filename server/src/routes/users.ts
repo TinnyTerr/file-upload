@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { requireMaster } from "../middleware/deps.ts";
+import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { requireSession, clientIp } from "../middleware/auth.ts";
 import { hashPassword } from "../security/passwords.ts";
@@ -14,6 +15,7 @@ import {
   validateAllocatedQuotaCapacity,
 } from "../storage/accounting.ts";
 import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
+import { deleteThumbnail } from "../storage/thumbnail.ts";
 import { nowIso, type FileRow, type PermissionRow, type UserRow } from "../db/rows.ts";
 import { getLogger } from "../logging.ts";
 import { HttpError } from "../httpError.ts";
@@ -41,6 +43,7 @@ const MASTER_ALL_TRUE: PermissionFlag[] = [
   "can_manage_storage",
   "can_manage_api_keys",
   "can_use_torrents",
+  "can_manage_cluster",
 ];
 
 function serializePermissions(perm: PermissionRow) {
@@ -81,7 +84,7 @@ export function usersRouter(state: AppState): Router {
     });
   });
 
-  router.post("/", requireSession(state), requireCsrf, requireMaster(state), async (req, res) => {
+  router.post("/", requireSession(state), requireCsrf, requireMaster(state), asyncHandler(async (req, res) => {
     const master = req.currentUser!;
     const body = req.body ?? {};
     const username = String(body.username ?? "");
@@ -102,16 +105,18 @@ export function usersRouter(state: AppState): Router {
     }
 
     try {
+      // Hash before the insert so the row never exists with an empty
+      // password_hash -- Bun.password.verify("", ...) throws rather than
+      // returning false, which used to let a half-created row hang a login.
+      const passwordHash = await hashPassword(password);
       db.transaction(() => {
         db.run(
           `INSERT INTO users (username, password_hash, role, must_change_credentials, created_at)
            VALUES ($u, $hash, $role, 0, $now)`,
-          { $u: username, $hash: "", $role: role, $now: nowIso() },
+          { $u: username, $hash: passwordHash, $role: role, $now: nowIso() },
         );
       });
-      const passwordHash = await hashPassword(password);
       const user = db.get<UserRow>("SELECT * FROM users WHERE username = $u", { $u: username })!;
-      db.run("UPDATE users SET password_hash = $h WHERE id = $id", { $h: passwordHash, $id: user.id });
 
       const perm = ensurePermissions(db, user.id, { master: role === "master" });
       const updates: Partial<Record<PermissionFlag, boolean>> = {
@@ -164,9 +169,9 @@ export function usersRouter(state: AppState): Router {
           .json({ detail: err instanceof HttpError ? err.detail : "internal server error" });
       }
     }
-  });
+  }));
 
-  router.patch("/:userId", requireSession(state), requireCsrf, requireMaster(state), async (req, res) => {
+  router.patch("/:userId", requireSession(state), requireCsrf, requireMaster(state), asyncHandler(async (req, res) => {
     const master = req.currentUser!;
     const userId = Number(req.params.userId);
     const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", { $id: userId });
@@ -218,8 +223,7 @@ export function usersRouter(state: AppState): Router {
         log.warning(`admin role changed target_user_id=${user.id} role=${role} actor_id=${master.id}`);
         const perm = ensurePermissions(db, user.id, { master: role === "master" });
         if (role === "master") {
-          const setCols = [...MASTER_ALL_TRUE, "can_manage_cluster" as PermissionFlag];
-          db.run(`UPDATE permissions SET ${setCols.map((c) => `${c} = 1`).join(", ")} WHERE user_id = $id`, {
+          db.run(`UPDATE permissions SET ${MASTER_ALL_TRUE.map((c) => `${c} = 1`).join(", ")} WHERE user_id = $id`, {
             $id: perm.user_id,
           });
         }
@@ -240,7 +244,7 @@ export function usersRouter(state: AppState): Router {
           .json({ detail: err instanceof HttpError ? err.detail : "internal server error" });
       }
     }
-  });
+  }));
 
   router.delete("/:userId", requireSession(state), requireCsrf, requireMaster(state), (req, res) => {
     const master = req.currentUser!;
@@ -286,6 +290,7 @@ export function usersRouter(state: AppState): Router {
       for (const f of uniqueFiles) {
         db.run("DELETE FROM links WHERE file_id = $id", { $id: f.id });
         unlinkAfterCommit.push(releaseBlob(db, f));
+        deleteThumbnail(f.id);
         db.run("DELETE FROM files WHERE id = $id", { $id: f.id });
       }
 
@@ -304,6 +309,11 @@ export function usersRouter(state: AppState): Router {
       db.run("DELETE FROM api_keys WHERE owner_id = $id", { $id: userId });
       db.run("DELETE FROM sessions WHERE user_id = $id", { $id: userId });
       db.run("DELETE FROM permissions WHERE user_id = $id", { $id: userId });
+      // PRAGMA foreign_keys = ON means any of these referencing the user
+      // would otherwise throw on the DELETE FROM users below.
+      db.run("DELETE FROM credentials WHERE user_id = $id", { $id: userId });
+      db.run("DELETE FROM torrent_jobs WHERE owner_id = $id", { $id: userId });
+      db.run("UPDATE cluster_nodes SET created_by_id = NULL WHERE created_by_id = $id", { $id: userId });
 
       recordAudit(db, { actor: master.username, action: "user.deleted", target: `user:${userId}`, ip: clientIp(state, req) });
       log.warning(

@@ -43,11 +43,25 @@ export class LockoutPolicy {
       "SELECT * FROM login_attempts WHERE identifier = $identifier AND identifier_type = $type",
       { $identifier: identifier, $type: type },
     );
-    const failedCount = (row?.failed_count ?? 0) + 1;
+
+    // `updated_at` is the rolling-window anchor: a row whose last failure was
+    // more than `lockoutSeconds` ago -- and that isn't currently locked -- is
+    // stale, so its count restarts at 1 instead of incrementing forever.
+    // Without this, an identifier that ever accumulated maxAttempts lifetime
+    // failures stays permanently >= maxAttempts, so the very next failure
+    // after a lock expires immediately re-locks it (an effectively permanent
+    // ban), which contradicts the 900s window this class's docstring claims.
+    const isCurrentlyLocked = !!row?.locked_until && new Date(row.locked_until).getTime() > Date.now();
+    const windowExpired = !!row && Date.now() - new Date(row.updated_at).getTime() > this.lockoutSeconds * 1000;
+    const staleRow = !isCurrentlyLocked && windowExpired;
+
+    const failedCount = staleRow ? 1 : (row?.failed_count ?? 0) + 1;
     const lockedUntil =
       failedCount >= this.maxAttempts
         ? new Date(Date.now() + this.lockoutSeconds * 1000).toISOString()
-        : row?.locked_until ?? null;
+        : staleRow
+          ? null
+          : (row?.locked_until ?? null);
     if (row) {
       db.run(
         "UPDATE login_attempts SET failed_count = $failedCount, locked_until = $lockedUntil, updated_at = $now WHERE id = $id",

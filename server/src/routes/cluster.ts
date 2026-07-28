@@ -3,6 +3,7 @@ import { Router } from "express";
 import type { Request, Response, NextFunction } from "express";
 import type { AppState } from "../appState.ts";
 import { requirePermission } from "../middleware/deps.ts";
+import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { requireSession, clientIp } from "../middleware/auth.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { recordAudit } from "../audit.ts";
@@ -109,7 +110,9 @@ export function requireClusterToken(state: AppState) {
 }
 
 async function triggerEnroll(state: AppState, baseUrl: string, token: string): Promise<Record<string, unknown>> {
-  if (state.settings.nodeRole !== "master") {
+  // Master is an elected, epoch-versioned role (cluster/election.ts) -- the
+  // static NODE_ROLE config value can be stale, so check the live state.
+  if (getSelfState(state.db).role !== "master") {
     const result = { status: "skipped", reason: "this server is not a master" };
     log.info(`enroll ${baseUrl}: ${result.reason}`);
     return result;
@@ -122,7 +125,9 @@ async function triggerEnroll(state: AppState, baseUrl: string, token: string): P
   log.info(`enroll ${baseUrl}: commanding node to join master ${state.settings.nodeUrl}`);
   try {
     const res = (await clusterHttp.postJson(
-      `${baseUrl}/cluster/enroll`,
+      // Router is mounted at /api/cluster in app.ts -- every other node-to-node
+      // call in cluster/*.ts uses the /api prefix (membership.ts, blobs.ts).
+      `${baseUrl}/api/cluster/enroll`,
       token,
       { master_url: state.settings.nodeUrl, master_token: state.clusterToken },
       20_000,
@@ -171,8 +176,9 @@ export function clusterRouter(state: AppState): Router {
     const stats = selfStats(state);
     const halts = Object.entries(state.haltRegistry.snapshot()).map(([scope, until]) => ({ scope, until }));
     res.json({
+      // stats.role already reports the live elected role (getSelfState) --
+      // don't overwrite it with the static NODE_ROLE bootstrap config value.
       ...stats,
-      role: state.settings.nodeRole,
       node_url: state.settings.nodeUrl,
       halts,
     });
@@ -183,7 +189,7 @@ export function clusterRouter(state: AppState): Router {
     res.json({ nodes: nodes.map(serializeNode) });
   });
 
-  router.post("/nodes", requireSession(state), requireCsrf, requireCluster, async (req, res) => {
+  router.post("/nodes", requireSession(state), requireCsrf, requireCluster, asyncHandler(async (req, res) => {
     const body = req.body as { name?: string; base_url?: string; token?: string };
     const name = (body.name ?? "").trim();
     const baseUrl = (body.base_url ?? "").trim().replace(/\/$/, "");
@@ -214,7 +220,7 @@ export function clusterRouter(state: AppState): Router {
 
     const enroll = await triggerEnroll(state, node.base_url, node.token);
     res.json({ ...serializeNode(node), enroll });
-  });
+  }));
 
   router.delete("/nodes/:id", requireSession(state), requireCsrf, requireCluster, (req, res) => {
     const id = Number(req.params.id);
@@ -291,7 +297,7 @@ export function clusterRouter(state: AppState): Router {
     res.json({ self: selfStats(state), peers });
   });
 
-  router.post("/enroll", clusterAuth, async (req, res) => {
+  router.post("/enroll", clusterAuth, asyncHandler(async (req, res) => {
     const body = req.body as { master_url?: string; master_token?: string };
     if (!body?.master_url || !body?.master_token) {
       res.status(400).json({ detail: "master_url and master_token are required" });
@@ -299,7 +305,7 @@ export function clusterRouter(state: AppState): Router {
     }
     const result = await enrollWithMaster(state, body.master_url, body.master_token);
     res.json(result);
-  });
+  }));
 
   router.post("/heartbeat", clusterAuth, (req, res) => {
     const body = req.body as JoinBody;

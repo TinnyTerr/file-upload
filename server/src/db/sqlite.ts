@@ -29,6 +29,11 @@ export function createSqliteDb(path: string): Db {
   ensureColumn(sqlite, "cluster_nodes", "epoch", "epoch INTEGER NOT NULL DEFAULT 0");
   ensureColumn(sqlite, "content_blobs", "archived", "archived INTEGER NOT NULL DEFAULT 0");
   ensureColumn(sqlite, "permissions", "can_use_torrents", "can_use_torrents INTEGER NOT NULL DEFAULT 0");
+  // Existing torrent jobs predate Real-Debrid, so they are qBittorrent jobs.
+  ensureColumn(sqlite, "torrent_jobs", "provider", "provider TEXT NOT NULL DEFAULT 'qbittorrent'");
+  ensureColumn(sqlite, "torrent_jobs", "debrid_id", "debrid_id TEXT");
+  ensureColumn(sqlite, "torrent_jobs", "debrid_status", "debrid_status TEXT");
+  ensureColumn(sqlite, "torrent_jobs", "fallback_reason", "fallback_reason TEXT");
 
   return {
     run(sql: string, params: SqlParams = {}) {

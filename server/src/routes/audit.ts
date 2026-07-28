@@ -50,6 +50,11 @@ export function auditRouter(state: AppState): Router {
       { ...params, $limit: limit, $offset: offset },
     );
 
+    // verifyAuditChain re-reads and re-hashes the ENTIRE audit_log table --
+    // too expensive to run on every GET, so it's opt-in via ?verify=1.
+    // chain_ok is null (not checked) unless the caller asks.
+    const chainOk = req.query.verify === "1" ? verifyAuditChain(db) : null;
+
     res.json({
       entries: entries.map((e) => ({
         id: e.id,
@@ -59,7 +64,7 @@ export function auditRouter(state: AppState): Router {
         ip: e.ip,
         created_at: e.created_at,
       })),
-      chain_ok: verifyAuditChain(db),
+      chain_ok: chainOk,
       actions,
       total_count: totalCount,
       filtered_count: filteredCount,

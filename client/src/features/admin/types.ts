@@ -85,7 +85,9 @@ export interface AuditEntry {
 
 export interface AuditResponse {
   entries: AuditEntry[];
-  chain_ok: boolean;
+  // null = not checked -- verifyAuditChain is opt-in (?verify=1) since it
+  // re-reads and re-hashes the entire audit_log table.
+  chain_ok: boolean | null;
   actions: string[];
   total_count: number;
   filtered_count: number;

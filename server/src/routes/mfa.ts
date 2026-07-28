@@ -3,6 +3,7 @@ import { Router } from "express";
 import { authenticator } from "otplib";
 import type { AppState } from "../appState.ts";
 import { requireSession, clientIp } from "../middleware/auth.ts";
+import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { verifyPassword } from "../security/passwords.ts";
 import { getMasterKey } from "../config.ts";
@@ -80,7 +81,7 @@ export function mfaRouter(state: AppState): Router {
     res.json({ status: "enrolled", id });
   });
 
-  router.post("/webauthn/register/start", requireSession(state), requireCsrf, async (req, res) => {
+  router.post("/webauthn/register/start", requireSession(state), requireCsrf, asyncHandler(async (req, res) => {
     const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", { $id: req.sessionRow!.user_id })!;
     let rpContext: { rpID: string; origin: string };
     try {
@@ -99,9 +100,9 @@ export function mfaRouter(state: AppState): Router {
       existing.map((c) => c.webauthn_id!),
     );
     res.json({ options });
-  });
+  }));
 
-  router.post("/webauthn/register/finish", requireSession(state), requireCsrf, async (req, res) => {
+  router.post("/webauthn/register/finish", requireSession(state), requireCsrf, asyncHandler(async (req, res) => {
     const { response, label } = req.body ?? {};
     if (!response || typeof response !== "object") {
       res.status(422).json({ detail: "response required" });
@@ -148,9 +149,9 @@ export function mfaRouter(state: AppState): Router {
       ip: clientIp(state, req),
     });
     res.json({ status: "enrolled", id });
-  });
+  }));
 
-  router.delete("/:id", requireSession(state), requireCsrf, async (req, res) => {
+  router.delete("/:id", requireSession(state), requireCsrf, asyncHandler(async (req, res) => {
     const { current_password: currentPassword } = req.body ?? {};
     const sessionRow = req.sessionRow!;
     const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", { $id: sessionRow.user_id })!;
@@ -166,7 +167,7 @@ export function mfaRouter(state: AppState): Router {
     }
     recordAudit(db, { actor: user.username, action: "mfa.credential_removed", target: `credential:${id}`, ip: clientIp(state, req) });
     res.json({ status: "removed" });
-  });
+  }));
 
   return router;
 }

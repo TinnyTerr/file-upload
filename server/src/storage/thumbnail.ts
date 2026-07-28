@@ -1,4 +1,4 @@
-import { mkdirSync, existsSync } from "node:fs";
+import { mkdirSync, existsSync, unlinkSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import sharp, { type Sharp } from "sharp";
 import { thumbnailRoot, safeJoin } from "./paths.ts";
@@ -44,15 +44,14 @@ function thumbnailPath(fileId: number): string {
   return safeJoin(thumbnailRoot(), `${fileId}.jpg`);
 }
 
-/** Generates (and caches on disk) a small JPEG thumbnail for a file, resized to
- * fit within MAX_DIMENSION and re-encoded so it always clears social-preview
- * size limits. Videos get a play-button overlay burned into the extracted frame
- * so the static preview still reads as "this is a video". Returns null if no
- * thumbnail could be produced (unsupported/corrupt media). */
-export async function getOrCreateThumbnail(fileId: number, fullPath: string, contentType: string): Promise<string | null> {
-  const out = thumbnailPath(fileId);
-  if (existsSync(out)) return out;
+/** Reachable unauthenticated via /file/:slug/thumbnail with no per-file rate
+ * limit, so N concurrent requests for the same uncached video/image would
+ * otherwise spawn N ffmpeg processes / sharp pipelines. Callers piling on
+ * while a generation is already running for `fileId` get the same promise
+ * instead of kicking off their own. */
+const inFlight = new Map<number, Promise<string | null>>();
 
+async function generateThumbnail(fileId: number, fullPath: string, contentType: string, out: string): Promise<string | null> {
   const isVideo = contentType.startsWith("video/");
   const isImage = contentType.startsWith("image/");
   if (!isVideo && !isImage) return null;
@@ -89,5 +88,35 @@ export async function getOrCreateThumbnail(fileId: number, fullPath: string, con
   } catch (err) {
     log.warning(`thumbnail generation failed file_id=${fileId}: ${err instanceof Error ? err.message : String(err)}`);
     return null;
+  }
+}
+
+/** Generates (and caches on disk) a small JPEG thumbnail for a file, resized to
+ * fit within MAX_DIMENSION and re-encoded so it always clears social-preview
+ * size limits. Videos get a play-button overlay burned into the extracted frame
+ * so the static preview still reads as "this is a video". Returns null if no
+ * thumbnail could be produced (unsupported/corrupt media). */
+export async function getOrCreateThumbnail(fileId: number, fullPath: string, contentType: string): Promise<string | null> {
+  const out = thumbnailPath(fileId);
+  if (existsSync(out)) return out;
+
+  const running = inFlight.get(fileId);
+  if (running) return running;
+
+  const promise = generateThumbnail(fileId, fullPath, contentType, out).finally(() => {
+    inFlight.delete(fileId);
+  });
+  inFlight.set(fileId, promise);
+  return promise;
+}
+
+/** Best-effort cleanup when a file row is deleted -- otherwise
+ * data/thumbnails/ grows forever. Safe to call even if no thumbnail was ever
+ * generated for this file. */
+export function deleteThumbnail(fileId: number): void {
+  try {
+    unlinkSync(thumbnailPath(fileId));
+  } catch {
+    // no thumbnail existed -- nothing to clean up
   }
 }

@@ -159,13 +159,23 @@ export async function addTorrent(settings: Settings, opts: AddTorrentOpts): Prom
   }
 }
 
-/** Torrents carrying `tag`. Empty when qBittorrent has dropped/never had it. */
-export async function torrentsByTag(settings: Settings, tag: string): Promise<QbitTorrent[]> {
-  const res = await call(settings, `/api/v2/torrents/info?tag=${encodeURIComponent(tag)}`);
-  const rows = (await res.json()) as QbitTorrent[];
-  // `tag` filtering was added in 4.3.5; older builds ignore the parameter and
-  // return everything, so filter client-side too.
-  return rows.filter((t) => (t.tags ?? "").split(",").some((x) => x.trim() === tag));
+/** Every torrent qBittorrent knows about, in one request. The poller groups
+ * these by tag itself rather than issuing one tag-filtered request per job. */
+export async function allTorrents(settings: Settings): Promise<QbitTorrent[]> {
+  const res = await call(settings, "/api/v2/torrents/info");
+  return (await res.json()) as QbitTorrent[];
+}
+
+/** Maps each `fu-` job tag to its torrent, from a single list fetch. */
+export function byTag(torrents: QbitTorrent[]): Map<string, QbitTorrent> {
+  const out = new Map<string, QbitTorrent>();
+  for (const t of torrents) {
+    for (const raw of (t.tags ?? "").split(",")) {
+      const tag = raw.trim();
+      if (tag) out.set(tag, t);
+    }
+  }
+  return out;
 }
 
 export async function deleteTorrent(settings: Settings, hash: string, deleteFiles: boolean): Promise<void> {

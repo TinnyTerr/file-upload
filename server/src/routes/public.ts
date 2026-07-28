@@ -3,6 +3,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import type { AppState } from "../appState.ts";
 import { clientIp } from "../middleware/auth.ts";
+import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
 import { getMasterKey } from "../config.ts";
 import { recordAudit } from "../audit.ts";
@@ -13,6 +14,7 @@ import { safeJoin, storageRoot } from "../storage/paths.ts";
 import { decompressStream } from "../storage/compress.ts";
 import { decryptStream } from "../crypto/aead.ts";
 import { openBox } from "../crypto/secretbox.ts";
+import { writeStreamToFile } from "../storage/zip.ts";
 import { renderSpa } from "../spa.ts";
 import { nowIso, type FileRow, type UserRow } from "../db/rows.ts";
 import { fetchBlobFromPeers } from "../cluster/blobs.ts";
@@ -198,7 +200,7 @@ export function publicRouter(state: AppState): Router {
     });
   });
 
-  router.get("/file/:slug/raw", async (req, res) => {
+  router.get("/file/:slug/raw", asyncHandler(async (req, res) => {
     const link = resolveActiveLink(db, req.params.slug);
     if (!link) {
       res.status(404).json({ detail: "not found" });
@@ -339,9 +341,9 @@ export function publicRouter(state: AppState): Router {
 
     res.writeHead(200, { ...baseHeaders, "Content-Type": f.content_type, "Content-Length": String(fileSize) });
     createReadStream(fullPath, { highWaterMark: CHUNK }).pipe(res);
-  });
+  }));
 
-  router.get("/file/:slug/preview", async (req, res) => {
+  router.get("/file/:slug/preview", asyncHandler(async (req, res) => {
     const link = resolveActiveLink(db, req.params.slug);
     if (!link) {
       res.status(404).json({ detail: "not found" });
@@ -409,15 +411,21 @@ export function publicRouter(state: AppState): Router {
     }
     res.writeHead(200, { ...headers, "Content-Type": f.content_type, "Content-Length": String(fileSize) });
     createReadStream(fullPath, { highWaterMark: CHUNK }).pipe(res);
-  });
+  }));
 
   /** Small, size-capped JPEG for og:image -- unlike /preview this never streams the
    * raw original, so link-preview crawlers (which cap fetch size, e.g. ~8MB on
    * Discord) can always render it regardless of how large the source file is. */
-  router.get("/file/:slug/thumbnail", async (req, res) => {
+  router.get("/file/:slug/thumbnail", asyncHandler(async (req, res) => {
     const link = resolveActiveLink(db, req.params.slug);
     if (!link) {
       res.status(404).json({ detail: "not found" });
+      return;
+    }
+    // Mirrors /preview's guard -- a limited-use link's thumbnail must not be
+    // viewable without consuming a use.
+    if (link.max_uses !== null) {
+      res.status(403).json({ detail: "limited-use links do not expose thumbnails" });
       return;
     }
     const f = db.get<FileRow>("SELECT * FROM files WHERE id = $id", { $id: link.file_id });
@@ -454,7 +462,7 @@ export function publicRouter(state: AppState): Router {
       "Cache-Control": "public, max-age=86400",
     });
     createReadStream(thumbPath, { highWaterMark: CHUNK }).pipe(res);
-  });
+  }));
 
   router.get("/file/:slug", (req, res) => {
     const content = renderSpa(fileMetaTags(req, state, req.params.slug));
@@ -468,16 +476,16 @@ export function publicRouter(state: AppState): Router {
 async function* decompressFromDecrypted(path: string, originalSize: number, key: Buffer): AsyncGenerator<Buffer> {
   // upload-time compression: stored as ENC(ZSTD(x)) -> decrypt, then decompress.
   // decryptStream reads from disk directly; we can't decompress a live async
-  // generator with node:zlib's stream API, so buffer through a temp file.
-  const { mkdtemp, writeFile, unlink, rm } = await import("node:fs/promises");
+  // generator with node:zlib's stream API, so stream through a temp file --
+  // writeStreamToFile honors backpressure instead of buffering the whole
+  // (potentially huge) file in memory before writing it out.
+  const { mkdtemp, unlink, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const dir = await mkdtemp(join(tmpdir(), "fu-raw-"));
   const tmp1 = join(dir, "step1");
   try {
-    const chunks: Buffer[] = [];
-    for await (const c of decryptStream(key, path)) chunks.push(c);
-    await writeFile(tmp1, Buffer.concat(chunks));
+    await writeStreamToFile(decryptStream(key, path), tmp1);
     for await (const c of decompressStream(tmp1, originalSize)) yield c;
   } finally {
     await unlink(tmp1).catch(() => {});
@@ -486,16 +494,15 @@ async function* decompressFromDecrypted(path: string, originalSize: number, key:
 }
 
 async function* decryptFromDecompressed(path: string, originalSize: number, key: Buffer): AsyncGenerator<Buffer> {
-  // archive job: stored as ZSTD(ENC(x)) -> decompress, then decrypt.
-  const { mkdtemp, writeFile, unlink, rm } = await import("node:fs/promises");
+  // archive job: stored as ZSTD(ENC(x)) -> decompress, then decrypt. Same
+  // streamed-through-a-temp-file approach as decompressFromDecrypted above.
+  const { mkdtemp, unlink, rm } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
   const dir = await mkdtemp(join(tmpdir(), "fu-raw-"));
   const tmp1 = join(dir, "step1");
   try {
-    const chunks: Buffer[] = [];
-    for await (const c of decompressStream(path, originalSize)) chunks.push(c);
-    await writeFile(tmp1, Buffer.concat(chunks));
+    await writeStreamToFile(decompressStream(path, originalSize), tmp1);
     for await (const c of decryptStream(key, tmp1)) yield c;
   } finally {
     await unlink(tmp1).catch(() => {});

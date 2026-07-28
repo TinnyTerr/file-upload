@@ -84,6 +84,14 @@ export class SessionManager {
     const row = db.get<SessionRow>("SELECT * FROM sessions WHERE id = $id", { $id: sid });
     if (!row) return null;
     if (new Date(row.expires_at).getTime() < Date.now()) return null;
+
+    // Throttled so an active session doesn't issue a write per request.
+    const lastSeenMs = new Date(row.last_seen_at).getTime();
+    if (Date.now() - lastSeenMs > 60_000) {
+      const now = nowIso();
+      db.run("UPDATE sessions SET last_seen_at = $now WHERE id = $id", { $now: now, $id: sid });
+      row.last_seen_at = now;
+    }
     return row;
   }
 

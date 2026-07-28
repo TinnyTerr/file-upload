@@ -1,12 +1,13 @@
 import { Router } from "express";
 import busboy from "busboy";
 import { createHash, randomBytes } from "node:crypto";
-import { createReadStream, createWriteStream, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Request, Response } from "express";
 import type { AppState } from "../appState.ts";
 import { requireCsrf } from "../security/csrf.ts";
+import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { requireActiveUser } from "../middleware/deps.ts";
 import { requireSession, clientIp } from "../middleware/auth.ts";
 import { getMasterKey } from "../config.ts";
@@ -86,7 +87,10 @@ function openDropboxToken(state: AppState, token: string, uploadId: string): { r
   }
   if (meta.exp < Date.now() / 1000) {
     try {
-      rm(partsDir(meta.rel), { recursive: true, force: true });
+      // Sync, not the async rm() -- this isn't awaited (openDropboxToken is
+      // synchronous), so the promise floated and the catch below never fired
+      // on failure, matching routes/files.ts::openChunkToken's equivalent.
+      rmSync(partsDir(meta.rel), { recursive: true, force: true });
     } catch {
       // best-effort
     }
@@ -115,8 +119,9 @@ function dropboxUploadContext(
   return { owner, directory, perm };
 }
 
-/** Mirrors app/routes/dropbox.py. Mounted at the app root (no prefix) --
- * matches TODO_ROUTES.md's mount-prefix note for dropbox.py. */
+/** Mounted at /api with no further prefix -- this router owns two unrelated
+ * path families (/dropbox-links for owners, /dropbox/:token for anonymous
+ * uploaders), so each route spells out its own prefix. */
 export function dropboxRouter(state: AppState): Router {
   const router = Router();
   const { db } = state;
@@ -346,7 +351,12 @@ export function dropboxRouter(state: AppState): Router {
     });
   });
 
-  router.post("/dropbox/:token/upload/finalize", async (req, res) => {
+  router.post("/dropbox/:token/upload/finalize", asyncHandler(async (req, res) => {
+    // Hoisted so the catch below can clean it up on failure -- mirrors
+    // routes/files.ts's /upload/finalize, which unlinks its assembled `.part`
+    // file on error so it doesn't silently inflate disk use past what quota
+    // accounting reports until the stale-part sweep eventually catches it.
+    let work: string | null = null;
     try {
       const uploadId = String(req.body?.upload_id ?? "");
       const { row, meta } = openDropboxToken(state, req.params.token, uploadId);
@@ -367,7 +377,7 @@ export function dropboxRouter(state: AppState): Router {
         return;
       }
 
-      const work = `${join(storageRoot(), relPath)}.dropbox.part`;
+      work = `${join(storageRoot(), relPath)}.dropbox.part`;
       const out = createWriteStream(work);
       for (let i = 0; i < meta.n; i++) {
         const chunkPath = join(parts, String(i));
@@ -423,9 +433,16 @@ export function dropboxRouter(state: AppState): Router {
       log.info(`dropbox chunked upload completed id=${row.id} file_id=${result.file_id} owner_id=${owner.id}`);
       res.json(result);
     } catch (err) {
+      if (work) {
+        try {
+          unlinkSync(work);
+        } catch {
+          // best-effort
+        }
+      }
       respondError(res, err);
     }
-  });
+  }));
 
   router.post("/dropbox/:token/upload", (req, res) => {
     let row: DropboxLinkRow;

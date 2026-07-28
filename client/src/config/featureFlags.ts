@@ -1,7 +1,8 @@
 /**
  * The Python backend (`app/`) is retired. `server/` (Bun + Express) is the
- * only backend. Ports routes incrementally — see server/TODO_ROUTES.md for
- * what's left. Flip a flag to `true` here once its routes land in `server/`.
+ * only backend, and the route port is complete -- every flag below is `true`.
+ * Kept around as the toggle point should a future route ever need to be
+ * disabled without ripping out its UI.
  */
 export const FEATURES = {
   files: true,

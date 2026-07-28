@@ -2,7 +2,12 @@ import { api } from "@/config/api";
 import type { FileObject } from "@/features/files/types";
 import type { Directory } from "@/features/directories/types";
 import type { AdminApiKey } from "@/features/apikeys/types";
-import type { AdminTorrentJob, TorrentHostStatus } from "@/features/torrents/types";
+import type {
+  AdminTorrentJob,
+  DebridSettingsInput,
+  DebridStatus,
+  TorrentHostStatus,
+} from "@/features/torrents/types";
 import type {
   DiskStats,
   StorageDetails,
@@ -41,9 +46,10 @@ export const adminService = {
   // Keys (endpoint wraps the list as { keys: [...] })
   keys: () => api.get<{ keys: AdminApiKey[] }>("/admin/keys").then((r) => r.keys),
 
-  // Audit
-  audit: (params: { limit?: number; offset?: number; q?: string; action?: string }) =>
-    api.get<AuditResponse>("/audit/", { query: params }),
+  // Audit. verify=true asks the server to also recompute the hash chain
+  // (chain_ok stays null otherwise -- see server/src/routes/audit.ts).
+  audit: (params: { limit?: number; offset?: number; q?: string; action?: string; verify?: boolean }) =>
+    api.get<AuditResponse>("/audit/", { query: { ...params, verify: params.verify ? "1" : undefined } }),
 
   // Cluster-wide event log (aggregated from every node; server-filterable).
   clusterAudit: (params: {
@@ -58,9 +64,12 @@ export const adminService = {
   // Lifecycle
   runLifecycle: (job: LifecycleJob) => api.post<{ processed: number }>(`/admin/lifecycle/${job}`),
 
-  // Torrents (host qBittorrent connectivity + every user's jobs)
+  // Torrents (Real-Debrid + host qBittorrent connectivity, and every user's jobs)
   torrentStatus: () => api.get<TorrentHostStatus>("/admin/torrents/status"),
   torrents: () => api.get<{ torrents: AdminTorrentJob[] }>("/admin/torrents").then((r) => r.torrents),
+  // The server validates a non-empty api_key against Real-Debrid before it
+  // persists it, so a rejected token surfaces here as a 400.
+  setDebrid: (body: DebridSettingsInput) => api.put<DebridStatus>("/admin/torrents/debrid", { json: body }),
 
   // Bulk
   bulkPreview: (action: BulkAction, ids: number[]) =>

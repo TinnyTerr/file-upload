@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   ip_address TEXT,
   user_agent TEXT
 );
+CREATE INDEX IF NOT EXISTS ix_sessions_user_id ON sessions(user_id);
 
 CREATE TABLE IF NOT EXISTS login_attempts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,6 +97,7 @@ CREATE TABLE IF NOT EXISTS directories (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_directories_slug ON directories(slug);
+CREATE INDEX IF NOT EXISTS ix_directories_owner_id ON directories(owner_id);
 
 CREATE TABLE IF NOT EXISTS files (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,6 +131,7 @@ CREATE TABLE IF NOT EXISTS files (
 );
 CREATE INDEX IF NOT EXISTS ix_files_blob_id ON files(blob_id);
 CREATE INDEX IF NOT EXISTS ix_files_directory_id ON files(directory_id);
+CREATE INDEX IF NOT EXISTS ix_files_owner_id ON files(owner_id);
 
 CREATE TABLE IF NOT EXISTS links (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,6 +145,7 @@ CREATE TABLE IF NOT EXISTS links (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_links_slug ON links(slug);
+CREATE INDEX IF NOT EXISTS ix_links_file_id ON links(file_id);
 
 CREATE TABLE IF NOT EXISTS directory_links (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -155,6 +159,7 @@ CREATE TABLE IF NOT EXISTS directory_links (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_directory_links_slug ON directory_links(slug);
+CREATE INDEX IF NOT EXISTS ix_directory_links_directory_id ON directory_links(directory_id);
 
 CREATE TABLE IF NOT EXISTS api_keys (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -178,6 +183,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   prev_hash TEXT NOT NULL,
   entry_hash TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS ix_audit_log_created_at ON audit_log(created_at);
 
 CREATE TABLE IF NOT EXISTS credentials (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,6 +198,7 @@ CREATE TABLE IF NOT EXISTS credentials (
   created_at TEXT NOT NULL,
   updated_at TEXT
 );
+CREATE INDEX IF NOT EXISTS ix_credentials_user_id ON credentials(user_id);
 
 CREATE TABLE IF NOT EXISTS storage_settings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -233,6 +240,14 @@ CREATE TABLE IF NOT EXISTS torrent_jobs (
   info_hash TEXT,
   tag TEXT NOT NULL UNIQUE,
   save_path TEXT NOT NULL,
+  -- 'debrid' (Real-Debrid) or 'qbittorrent' (the fallback backend).
+  provider TEXT NOT NULL DEFAULT 'qbittorrent',
+  -- Real-Debrid torrent id, when provider = 'debrid'.
+  debrid_id TEXT,
+  -- Last raw Real-Debrid status string, surfaced in the UI for diagnosis.
+  debrid_status TEXT,
+  -- Why this job is on qBittorrent despite Real-Debrid being configured.
+  fallback_reason TEXT,
   status TEXT NOT NULL DEFAULT 'queued',
   progress REAL NOT NULL DEFAULT 0,
   size_bytes INTEGER NOT NULL DEFAULT 0,

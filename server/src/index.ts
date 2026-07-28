@@ -17,6 +17,11 @@ log.info(`application startup begin database_url=${settings.databaseUrl}`);
 if (settings.trustProxyMode !== "off") {
   log.info(`trusting proxy headers mode=${settings.trustProxyMode}`);
 }
+if (!settings.allowedHosts) {
+  log.warning(
+    "ALLOWED_HOSTS is not set -- WebAuthn relying-party ID is derived from the request's Origin header and the https redirect trusts proxy headers for any host. Set ALLOWED_HOSTS in data/app.env for production.",
+  );
+}
 const db = createDb(settings.databaseUrl);
 const state = createAppState(settings, db);
 

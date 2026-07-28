@@ -23,7 +23,18 @@ const WS_TOKEN_MAX_PER_WINDOW = 20;
 export class WsTokenRateLimiter {
   private windows = new Map<string, { count: number; resetAt: number }>();
 
+  /** Mirrors LoginChallengeRegistry.sweep() below -- without this, `windows`
+   * grows without bound (one entry per distinct IP ever seen, never removed
+   * once its window lapses). */
+  private sweep(): void {
+    const now = Date.now();
+    for (const [ip, entry] of this.windows) {
+      if (entry.resetAt <= now) this.windows.delete(ip);
+    }
+  }
+
   allow(ip: string): boolean {
+    this.sweep();
     const now = Date.now();
     const entry = this.windows.get(ip);
     if (!entry || entry.resetAt <= now) {

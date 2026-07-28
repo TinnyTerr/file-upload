@@ -11,6 +11,14 @@ export function thumbnailRoot(): string {
   return process.env.FILEUPLOAD_THUMBNAILS || "./data/thumbnails";
 }
 
+/** Staging area for Real-Debrid downloads: files land under
+ * `<root>/<job tag>/` and are deleted once imported. qBittorrent jobs use
+ * TORRENT_CONTENT_PATH instead -- that directory belongs to qBittorrent, this
+ * one is ours. */
+export function debridRoot(): string {
+  return process.env.FILEUPLOAD_DEBRID || "./data/debrid";
+}
+
 /** Random fan-out path relative to the storage root, e.g. "ab/cd/…". */
 export function newInternalRelPath(): string {
   const rand = randomBytes(32).toString("hex");

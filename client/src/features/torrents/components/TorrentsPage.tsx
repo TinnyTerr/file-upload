@@ -12,11 +12,14 @@ export function TorrentsPage() {
   const { confirm } = useDialogs();
 
   const onRemove = async (t: TorrentJob) => {
-    const inFlight = t.status === "queued" || t.status === "downloading" || t.status === "importing";
+    const inFlight =
+      t.status === "queued" || t.status === "downloading" || t.status === "fetching" || t.status === "importing";
     const ok = await confirm({
       title: inFlight ? "Cancel this torrent?" : "Remove from the list?",
       description: inFlight
-        ? "The download stops and the partially downloaded data is deleted from the host."
+        ? t.provider === "debrid"
+          ? "The transfer stops, and the torrent and any partial data are removed from Real-Debrid."
+          : "The download stops and the partially downloaded data is deleted from the host."
         : "Files already imported into your storage are kept — delete those from the files page.",
       confirmText: inFlight ? "Cancel torrent" : "Remove",
       destructive: true,

@@ -18,6 +18,7 @@ import { ZipArchive } from "archiver";
 import type { Request, Response } from "express";
 import type { AppState } from "../appState.ts";
 import { requireCsrf } from "../security/csrf.ts";
+import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { getUploadUser, requireActiveUser, requireMaster, requirePermission } from "../middleware/deps.ts";
 import { requireSession, clientIp } from "../middleware/auth.ts";
 import { getMasterKey } from "../config.ts";
@@ -29,6 +30,7 @@ import { hashFile, attachBlob, fileHashes, releaseBlob, unlinkQueued } from "../
 import { storageRoot, safeJoin } from "../storage/paths.ts";
 import { compressFile, shouldCompress } from "../storage/compress.ts";
 import { safeArcname, memberSource } from "../storage/zip.ts";
+import { deleteThumbnail } from "../storage/thumbnail.ts";
 import { encryptFile } from "../crypto/aead.ts";
 import { seal, openBox } from "../crypto/secretbox.ts";
 import { ensurePermissions } from "../permissions.ts";
@@ -564,8 +566,24 @@ function serializeFiles(state: AppState, req: Request, files: FileRow[]): Record
       usernameMap.set(u.id, u.username);
     }
   }
+  // Batch-fetch every file's links in one query instead of one query per file
+  // (N+1 -- the admin "all files" listing calls this with every file in the
+  // system).
+  const fileIds = [...new Set(files.map((f) => f.id))];
+  const linksByFile = new Map<number, LinkRow[]>();
+  if (fileIds.length) {
+    const linkRows = db.all<LinkRow>(
+      `SELECT * FROM links WHERE file_id IN (${fileIds.map((_, i) => `$fid${i}`).join(",")})`,
+      Object.fromEntries(fileIds.map((id, i) => [`$fid${i}`, id])),
+    );
+    for (const lk of linkRows) {
+      const list = linksByFile.get(lk.file_id);
+      if (list) list.push(lk);
+      else linksByFile.set(lk.file_id, [lk]);
+    }
+  }
   return files.map((f) => {
-    const links = db.all<LinkRow>("SELECT * FROM links WHERE file_id = $id", { $id: f.id });
+    const links = linksByFile.get(f.id) ?? [];
     return {
       id: f.id,
       owner_id: f.owner_id,
@@ -907,7 +925,7 @@ export function filesRouter(state: AppState): Router {
     });
   });
 
-  router.post("/upload/finalize", getUploadUser(state), async (req, res) => {
+  router.post("/upload/finalize", getUploadUser(state), asyncHandler(async (req, res) => {
     let relPath: string | null = null;
     let work: string | null = null;
     try {
@@ -1025,7 +1043,7 @@ export function filesRouter(state: AppState): Router {
     } finally {
       if (relPath) uploadLocks.delete(relPath);
     }
-  });
+  }));
 
   router.delete("/upload", getUploadUser(state), (req, res) => {
     let relPath: string | null = null;
@@ -1167,7 +1185,7 @@ export function filesRouter(state: AppState): Router {
     res.json({ files: serializeFiles(state, req, files) });
   });
 
-  router.get("/batch-zip", requireActiveUser(state), async (req, res) => {
+  router.get("/batch-zip", requireActiveUser(state), asyncHandler(async (req, res) => {
     const user = req.currentUser!;
     const rawIds = req.query.ids;
     const ids = (Array.isArray(rawIds) ? rawIds : rawIds !== undefined ? [rawIds] : [])
@@ -1237,7 +1255,7 @@ export function filesRouter(state: AppState): Router {
         }
       }
     }
-  });
+  }));
 
   router.get("/disk-stats", requireMaster(state), (_req, res) => {
     const totalBytes = usedStorageBytes(db);
@@ -1277,6 +1295,7 @@ export function filesRouter(state: AppState): Router {
     }
     const unlinkAfterCommit = [releaseBlob(db, fileObj)];
     db.run("DELETE FROM files WHERE id = $id", { $id: fileObj.id });
+    deleteThumbnail(fileObj.id);
     recordAudit(db, { actor: user.username, action: "file.deleted", target: `file:${fileObj.id}`, ip: clientIp(state, req) });
     unlinkQueued(unlinkAfterCommit);
     res.json({ status: "deleted" });

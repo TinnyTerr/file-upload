@@ -6,6 +6,7 @@ import { ZipArchive } from "archiver";
 import type { AppState } from "../appState.ts";
 import type { Db } from "../db/types.ts";
 import { requireCsrf } from "../security/csrf.ts";
+import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { requireActiveUser, requireMaster } from "../middleware/deps.ts";
 import { requireSession, clientIp } from "../middleware/auth.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
@@ -17,6 +18,7 @@ import { newSlug } from "../links.ts";
 import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
 import { safeJoin, storageRoot } from "../storage/paths.ts";
 import { safeArcname, memberSource } from "../storage/zip.ts";
+import { deleteThumbnail } from "../storage/thumbnail.ts";
 import { seal, openBox } from "../crypto/secretbox.ts";
 import { ensurePermissions } from "../permissions.ts";
 import { usedStorageBytesForUser } from "../storage/accounting.ts";
@@ -188,17 +190,27 @@ function serializeDirLink(lk: DirectoryLinkRow, req: Request): Record<string, un
 }
 
 /** Member files paired with their most-recent active link, mirrors
- * app/routes/directories.py::_public_files. */
+ * app/routes/directories.py::_public_files. Batch-fetches every member's
+ * links in one query instead of one query per file (N+1). */
 function publicFiles(db: Db, dirId: number): Array<{ file: FileRow; link: LinkRow }> {
   const members = db.all<FileRow>("SELECT * FROM files WHERE directory_id = $id ORDER BY created_at ASC", {
     $id: dirId,
   });
+  if (!members.length) return [];
+  const fileIds = members.map((f) => f.id);
+  const linkRows = db.all<LinkRow>(
+    `SELECT * FROM links WHERE active = 1 AND file_id IN (${fileIds.map((_, i) => `$fid${i}`).join(",")}) ORDER BY created_at DESC`,
+    Object.fromEntries(fileIds.map((id, i) => [`$fid${i}`, id])),
+  );
+  // First row per file_id wins -- rows are ordered created_at DESC, matching
+  // the single-file query's "most recent active link" semantics.
+  const latestByFile = new Map<number, LinkRow>();
+  for (const lk of linkRows) {
+    if (!latestByFile.has(lk.file_id)) latestByFile.set(lk.file_id, lk);
+  }
   const out: Array<{ file: FileRow; link: LinkRow }> = [];
   for (const f of members) {
-    const link = db.get<LinkRow>(
-      "SELECT * FROM links WHERE file_id = $id AND active = 1 ORDER BY created_at DESC LIMIT 1",
-      { $id: f.id },
-    );
+    const link = latestByFile.get(f.id);
     if (link) out.push({ file: f, link });
   }
   return out;
@@ -320,8 +332,8 @@ function expiresAtFromSeconds(res: Response, seconds: unknown): { ok: true; valu
 }
 
 /** Mirrors app/routes/directories.py -- folder CRUD, collaborators, and
- * per-folder link CRUD. Mounted at root (paths already include /directories,
- * matching TODO_ROUTES.md's "(none)" mount prefix for directories.py). */
+ * per-folder link CRUD. Mounted at /api with no further prefix -- every path
+ * in this router already spells out its own /directories segment. */
 export function directoriesRouter(state: AppState): Router {
   const router = Router();
   const { db } = state;
@@ -466,6 +478,13 @@ export function directoriesRouter(state: AppState): Router {
         res.status(403).json({ detail: "not your directory" });
         return;
       }
+      // DELETE /files/:fileId requires can_delete -- without this check a
+      // user denied deletion could route around it through a folder instead.
+      const perm = ensurePermissions(db, user.id, { master: user.role === "master" });
+      if (!perm.can_delete) {
+        res.status(403).json({ detail: "deletion not permitted" });
+        return;
+      }
       const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", { $id: req.params.fileId });
       if (!fileObj || fileObj.directory_id !== d.id) {
         res.status(404).json({ detail: "not found" });
@@ -478,6 +497,7 @@ export function directoriesRouter(state: AppState): Router {
       });
       const unlinkAfterCommit = [releaseBlob(db, fileObj)];
       db.run("DELETE FROM files WHERE id = $id", { $id: fileObj.id });
+      deleteThumbnail(fileObj.id);
       recordAudit(db, {
         actor: user.username,
         action: "directory.file_deleted",
@@ -583,6 +603,12 @@ export function directoriesRouter(state: AppState): Router {
       res.status(403).json({ detail: "not your directory" });
       return;
     }
+    // Same can_delete gate as the single-file route above and DELETE /files/:fileId.
+    const perm = ensurePermissions(db, user.id, { master: user.role === "master" });
+    if (!perm.can_delete) {
+      res.status(403).json({ detail: "deletion not permitted" });
+      return;
+    }
 
     const members = db.all<FileRow>("SELECT * FROM files WHERE directory_id = $id", { $id: d.id });
     const unlinkAfterCommit: Array<string | null> = [];
@@ -590,6 +616,7 @@ export function directoriesRouter(state: AppState): Router {
       db.run("DELETE FROM links WHERE file_id = $id", { $id: f.id });
       unlinkAfterCommit.push(releaseBlob(db, f));
       db.run("DELETE FROM files WHERE id = $id", { $id: f.id });
+      deleteThumbnail(f.id);
     }
     db.run("DELETE FROM dropbox_upload_links WHERE target_directory_id = $id", { $id: d.id });
     db.run("DELETE FROM directory_collaborators WHERE directory_id = $id", { $id: d.id });
@@ -661,6 +688,11 @@ export function directoriesRouter(state: AppState): Router {
     requireActiveUser(state),
     (req, res) => {
       const user = req.currentUser!;
+      const perm = ensurePermissions(db, user.id, { master: user.role === "master" });
+      if (!perm.can_regenerate_links) {
+        res.status(403).json({ detail: "link creation not permitted" });
+        return;
+      }
       const d = db.get<DirectoryRow>("SELECT * FROM directories WHERE id = $id", { $id: req.params.dirId });
       if (!d) {
         res.status(404).json({ detail: "not found" });
@@ -980,7 +1012,7 @@ export function publicDirectoriesRouter(state: AppState): Router {
     });
   });
 
-  router.get("/d/:slug/zip", async (req, res) => {
+  router.get("/d/:slug/zip", asyncHandler(async (req, res) => {
     const resolved = resolveDirectory(db, req.params.slug);
     if (!resolved) {
       res.status(404).json({ detail: "not found" });
@@ -1047,7 +1079,7 @@ export function publicDirectoriesRouter(state: AppState): Router {
         }
       }
     }
-  });
+  }));
 
   router.get("/d/:slug", (req, res) => {
     const resolved = resolveDirectory(db, req.params.slug);

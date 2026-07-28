@@ -7,10 +7,13 @@ import type { AddTorrentInput, TorrentJob } from "../types";
 const LIST_QUERY = ["torrents", "list"] as const;
 const CONFIG_QUERY = ["torrents", "config"] as const;
 
-/** Poll while anything is still moving; idle lists don't need a heartbeat. */
+/** Poll while anything is still moving; idle lists don't need a heartbeat.
+ * 5000ms tracks the server's torrent_poll scheduler cadence (jobs/scheduler.ts)
+ * -- polling faster just fires requests between server-side updates. */
+const BUSY: ReadonlySet<TorrentJob["status"]> = new Set(["queued", "downloading", "fetching", "importing"]);
+
 function refetchInterval(torrents: TorrentJob[] | undefined): number | false {
-  const busy = torrents?.some((t) => t.status === "queued" || t.status === "downloading" || t.status === "importing");
-  return busy ? 3000 : false;
+  return torrents?.some((t) => BUSY.has(t.status)) ? 5000 : false;
 }
 
 export function useTorrents() {
@@ -27,6 +30,7 @@ export function useTorrents() {
     queryKey: LIST_QUERY,
     queryFn: () => torrentsService.list().then((r) => r.torrents),
     refetchInterval: (query) => refetchInterval(query.state.data),
+    refetchIntervalInBackground: false,
   });
 
   const add = useMutation({

@@ -8,18 +8,23 @@ import { join } from "node:path";
 import { URL } from "node:url";
 import type { AppState } from "../appState.ts";
 import { requireCsrf } from "../security/csrf.ts";
-import { requireActiveUser } from "../middleware/deps.ts";
+import { requireActiveUser, requirePermission } from "../middleware/deps.ts";
+import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { requireSession, clientIp } from "../middleware/auth.ts";
 import { recordAudit } from "../audit.ts";
 import { getLogger } from "../logging.ts";
 import { HttpError } from "../httpError.ts";
 import { ensurePermissions } from "../permissions.ts";
 import { storageRoot } from "../storage/paths.ts";
-import { finalizeStoredFile } from "./files.ts";
+import { finalizeStoredFile, checkUploadHalt } from "./files.ts";
 import { nowIso, type RemoteUploadJobRow } from "../db/rows.ts";
 
 const log = getLogger("app.routes.remote_upload");
 const CHUNK = 256 * 1024;
+// Slack above the declared max file size to cover response headers riding
+// along in the same accumulated buffer -- the byte cap below is enforced on
+// the raw socket stream (headers + body), not the parsed body alone.
+const HEADER_ALLOWANCE = 64 * 1024;
 
 /** Mirrors app/routes/remote_upload.py::_is_public_ip. */
 function isPublicIp(value: string): boolean {
@@ -78,6 +83,38 @@ function filenameFromUrl(parsed: URL, fallback: string): string {
   return name.slice(0, 1024) || fallback;
 }
 
+/** Decodes an HTTP/1.1 chunked-transfer body: size-line (hex, optionally with
+ * chunk extensions after a `;`) -> data -> trailing CRLF, repeated until the
+ * terminating 0-length chunk. Trailer headers (if any) are discarded -- we
+ * don't need them. Writing the raw chunked framing straight to disk (the
+ * previous behavior) corrupted every response served with
+ * Transfer-Encoding: chunked. */
+function decodeChunkedBody(raw: Buffer): Buffer {
+  const parts: Buffer[] = [];
+  let offset = 0;
+  for (;;) {
+    const lineEnd = raw.indexOf("\r\n", offset);
+    if (lineEnd === -1) throw new HttpError(400, "malformed chunked response from remote host");
+    const sizeLine = raw.subarray(offset, lineEnd).toString("latin1").split(";")[0]!.trim();
+    const size = Number.parseInt(sizeLine, 16);
+    if (!Number.isFinite(size) || size < 0) {
+      throw new HttpError(400, "malformed chunked response from remote host");
+    }
+    offset = lineEnd + 2;
+    if (size === 0) break;
+    if (offset + size > raw.length) {
+      throw new HttpError(400, "malformed chunked response from remote host");
+    }
+    parts.push(raw.subarray(offset, offset + size));
+    offset += size;
+    if (raw.subarray(offset, offset + 2).toString("latin1") !== "\r\n") {
+      throw new HttpError(400, "malformed chunked response from remote host");
+    }
+    offset += 2;
+  }
+  return Buffer.concat(parts);
+}
+
 interface DownloadResult {
   filename: string;
   contentType: string;
@@ -108,7 +145,19 @@ async function downloadRemoteUrl(url: string, destination: string, maxBytes: num
           });
           socket.write(requestLine);
           const chunks: Buffer[] = [];
-          socket.on("data", (d: Buffer) => chunks.push(d));
+          // Running total instead of only checking after Buffer.concat --
+          // otherwise a malicious/misbehaving host can make us buffer
+          // unbounded bytes before the length check ever runs.
+          let total = 0;
+          socket.on("data", (d: Buffer) => {
+            total += d.length;
+            if (total > maxBytes + HEADER_ALLOWANCE) {
+              socket.destroy();
+              reject(new HttpError(413, "remote file exceeds max file size"));
+              return;
+            }
+            chunks.push(d);
+          });
           socket.on("error", (err: Error) => reject(new HttpError(400, `remote download failed: ${err.message}`)));
           socket.on("end", () => {
             try {
@@ -119,7 +168,10 @@ async function downloadRemoteUrl(url: string, destination: string, maxBytes: num
                 return;
               }
               const headerText = raw.subarray(0, headerEnd).toString("latin1");
-              const bodyStart = raw.subarray(headerEnd + 4);
+              // Explicit bare-Buffer annotation: decodeChunkedBody returns
+              // Buffer<ArrayBufferLike>, which Buffer<ArrayBuffer> (the type
+              // Buffer.concat/subarray infer) doesn't structurally accept.
+              let bodyStart: Buffer = raw.subarray(headerEnd + 4);
               const [statusLine, ...headerLines] = headerText.split("\r\n");
               const status = Number(statusLine!.split(" ")[1]);
               const headers: Record<string, string> = {};
@@ -136,6 +188,11 @@ async function downloadRemoteUrl(url: string, destination: string, maxBytes: num
                 }
                 resolve({ redirect: new URL(location, current).toString() });
                 return;
+              }
+              // The raw framing (hex size lines + CRLF delimiters) is not the
+              // file's actual bytes -- decode it before it ever touches disk.
+              if ((headers["transfer-encoding"] ?? "").toLowerCase().includes("chunked")) {
+                bodyStart = decodeChunkedBody(bodyStart);
               }
               resolve({ status, headers, body: bodyStart });
             } catch (err) {
@@ -184,11 +241,11 @@ export function remoteUploadRouter(state: AppState): Router {
   const router = Router();
   const { db } = state;
 
-  router.post("/remote-upload", requireSession(state), requireCsrf, requireActiveUser(state), async (req, res) => {
+  router.post("/remote-upload", requireSession(state), requireCsrf, requirePermission(state, "can_upload"), asyncHandler(async (req, res) => {
     const user = req.currentUser!;
+    checkUploadHalt(state, user.id);
     const body = req.body ?? {};
     const url = String(body.url ?? "");
-    validatePublicHttpUrl(url);
 
     const perm = ensurePermissions(db, user.id, { master: user.role === "master" });
     const rand = randomBytes(32).toString("hex");
@@ -203,6 +260,11 @@ export function remoteUploadRouter(state: AppState): Router {
     const job = db.get<RemoteUploadJobRow>("SELECT * FROM remote_upload_jobs WHERE id = last_insert_rowid()")!;
 
     try {
+      // Validated here (inside the try) rather than before job creation so a
+      // thrown HttpError is caught by the same handler that marks the job
+      // failed, instead of becoming an unhandled rejection (asyncHandler
+      // covers that too, belt-and-suspenders).
+      validatePublicHttpUrl(url);
       const meta = await downloadRemoteUrl(url, work, perm.max_file_bytes);
       const usedBytes =
         db.get<{ total: number | null }>("SELECT SUM(size_bytes) as total FROM files WHERE owner_id = $id", { $id: user.id })
@@ -268,7 +330,7 @@ export function remoteUploadRouter(state: AppState): Router {
         res.status(500).json({ detail: "internal server error" });
       }
     }
-  });
+  }));
 
   router.get("/remote-upload/:jobId", requireActiveUser(state), (req, res) => {
     const user = req.currentUser!;

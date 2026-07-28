@@ -32,6 +32,12 @@ export interface Settings {
   /** The same directory as *this server* sees it -- differs when qBittorrent
    * runs in a container with a different mount point. Defaults to the save path. */
   torrentContentPath: string;
+  /** Real-Debrid API token (https://real-debrid.com/apitoken). Empty = every
+   * torrent goes straight to qBittorrent. Set from the admin panel, which
+   * rewrites data/app.env and mutates this field in place. */
+  realDebridApiKey: string;
+  /** Admin kill switch: false routes torrents to qBittorrent even with a key set. */
+  realDebridEnabled: boolean;
 }
 
 function tokenUrlsafe(bytes: number): string {
@@ -68,12 +74,22 @@ function generateFile(path: string): void {
     ["ARCHIVE_ENABLED", "true"],
     ["REPLICATION_MODE", "full"],
     ["TRUST_PROXY", "false"],
+    // Empty = unconfigured (not "deny all"): httpsRedirect.ts falls back to
+    // trusting the proxy when this is empty and TRUST_PROXY=true, and
+    // webauthn.ts derives the relying-party ID from the request Origin
+    // header instead of validating it against this list. Set this in
+    // production so both are actually enforced.
+    ["ALLOWED_HOSTS", ""],
     // Torrenting stays off until a qBittorrent WebUI URL and download
     // location are filled in (see routes/torrents.ts).
     ["QBITTORRENT_URL", ""],
     ["QBITTORRENT_USERNAME", ""],
     ["QBITTORRENT_PASSWORD", ""],
     ["QBITTORRENT_SAVE_PATH", ""],
+    // Real-Debrid is the preferred torrent backend when a token is present;
+    // qBittorrent is only the fallback. Set from the admin panel.
+    ["REALDEBRID_API_KEY", ""],
+    ["REALDEBRID_ENABLED", "true"],
   ]);
   const fd = openSync(path, "wx", 0o600);
   writeSync(fd, serializeEnvFile(map));
@@ -151,5 +167,8 @@ export function loadSettings(configPathArg?: string): Settings {
     qbittorrentPassword: map.get("QBITTORRENT_PASSWORD") || "",
     qbittorrentSavePath: map.get("QBITTORRENT_SAVE_PATH") || "",
     torrentContentPath: map.get("TORRENT_CONTENT_PATH") || map.get("QBITTORRENT_SAVE_PATH") || "",
+    realDebridApiKey: (map.get("REALDEBRID_API_KEY") || "").trim(),
+    // Absent means "on" so an admin who only pastes a token gets debrid.
+    realDebridEnabled: map.get("REALDEBRID_ENABLED") ? truthy(map.get("REALDEBRID_ENABLED")) : true,
   };
 }

@@ -3,6 +3,7 @@ import type { Response } from "express";
 import type { AppState } from "../appState.ts";
 import type { Db, SqlParams } from "../db/types.ts";
 import { requireActiveUser, requireMaster } from "../middleware/deps.ts";
+import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { requireSession, clientIp } from "../middleware/auth.ts";
 import { recordAudit } from "../audit.ts";
@@ -19,6 +20,7 @@ import {
   diskUsageBytes,
 } from "../storage/accounting.ts";
 import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
+import { deleteThumbnail } from "../storage/thumbnail.ts";
 import {
   archiveIdleJob,
   deleteIdleJob,
@@ -434,13 +436,14 @@ function queueFileDelete(db: Db, f: FileRow): string | null {
   }
   const path = releaseBlob(db, f);
   db.run("DELETE FROM files WHERE id = $id", { $id: f.id });
+  deleteThumbnail(f.id);
   return path;
 }
 
 /** Mirrors app/routes/admin.py -- Storage/backend-logs/lifecycle/bulk-action
- * tabs of the admin panel. Users/keys/audit/files admin panels are ported in
- * their own routers (users.ts, keys.ts, audit.ts, files.ts); this file only
- * covers what's left, per TODO_ROUTES.md. Mount at /admin. */
+ * tabs of the admin panel. Users/keys/audit/files admin panels live in their
+ * own routers (users.ts, keys.ts, audit.ts, files.ts); this file covers only
+ * what's left over. Mount at /admin. */
 export function adminRouter(state: AppState): Router {
   const router = Router();
   const { db, settings } = state;
@@ -517,7 +520,7 @@ export function adminRouter(state: AppState): Router {
     requireSession(state),
     requireCsrf,
     requireMaster(state),
-    async (req, res) => {
+    asyncHandler(async (req, res) => {
       const master = req.currentUser!;
       const f = getFileOr404(res, Number(req.params.fileId));
       if (!f) return;
@@ -527,7 +530,7 @@ export function adminRouter(state: AppState): Router {
       } catch (err) {
         respondError(res, err);
       }
-    },
+    }),
   );
 
   router.post(
@@ -535,7 +538,7 @@ export function adminRouter(state: AppState): Router {
     requireSession(state),
     requireCsrf,
     requireMaster(state),
-    async (req, res) => {
+    asyncHandler(async (req, res) => {
       const master = req.currentUser!;
       const f = getFileOr404(res, Number(req.params.fileId));
       if (!f) return;
@@ -545,7 +548,7 @@ export function adminRouter(state: AppState): Router {
       } catch (err) {
         respondError(res, err);
       }
-    },
+    }),
   );
 
   router.post("/lifecycle/temp-expiry", requireSession(state), requireCsrf, requireMaster(state), (_req, res) => {
@@ -574,12 +577,12 @@ export function adminRouter(state: AppState): Router {
     requireSession(state),
     requireCsrf,
     requireMaster(state),
-    async (_req, res) => {
+    asyncHandler(async (_req, res) => {
       log.info("manual lifecycle archive idle scan started");
       const processed = await archiveIdleJob(db);
       log.info(`manual lifecycle archive idle scan completed processed=${processed}`);
       res.json({ processed });
-    },
+    }),
   );
 
   router.post("/bulk/preview", requireSession(state), requireCsrf, requireActiveUser(state), (req, res) => {
@@ -600,7 +603,7 @@ export function adminRouter(state: AppState): Router {
     }
   });
 
-  router.post("/bulk/run", requireSession(state), requireCsrf, requireActiveUser(state), async (req, res) => {
+  router.post("/bulk/run", requireSession(state), requireCsrf, requireActiveUser(state), asyncHandler(async (req, res) => {
     const user = req.currentUser!;
     const body = req.body ?? {};
     const action = String(body.action ?? "");
@@ -726,7 +729,7 @@ export function adminRouter(state: AppState): Router {
       `bulk run completed action=${action} actor_id=${user.id} processed=${processed} affected=${candidates.length}`,
     );
     res.json({ action, processed_count: processed, affected_count: candidates.length });
-  });
+  }));
 
   return router;
 }

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { requireActiveUser, requireMaster, requirePermission } from "../middleware/deps.ts";
+import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { requireSession, clientIp } from "../middleware/auth.ts";
 import { generateKey, hashKey } from "../security/apiKeys.ts";
@@ -82,11 +83,13 @@ export function keysRouter(state: AppState): Router {
       return;
     }
     recordAudit(db, { actor: user.username, action: "apikey.deleted", target: `apikey:${key.id}`, ip: clientIp(state, req) });
-    db.run("UPDATE api_keys SET active = 0 WHERE id = $id", { $id: key.id });
+    // Hard delete, not soft -- so it disappears from the admin panel
+    // immediately instead of lingering as an inactive row (see CLAUDE.md).
+    db.run("DELETE FROM api_keys WHERE id = $id", { $id: key.id });
     res.json({ status: "deleted" });
   });
 
-  router.post("/:keyId/reset-ip", requireSession(state), requireCsrf, requireActiveUser(state), async (req, res) => {
+  router.post("/:keyId/reset-ip", requireSession(state), requireCsrf, requireActiveUser(state), asyncHandler(async (req, res) => {
     const user = req.currentUser!;
     const key = db.get<ApiKeyRow>("SELECT * FROM api_keys WHERE id = $id", { $id: req.params.keyId });
     if (!key) {
@@ -105,7 +108,7 @@ export function keysRouter(state: AppState): Router {
     db.run("UPDATE api_keys SET bound_ip = NULL WHERE id = $id", { $id: key.id });
     recordAudit(db, { actor: user.username, action: "apikey.ip_reset", target: `apikey:${key.id}`, ip: clientIp(state, req) });
     res.json({ status: "ip_reset" });
-  });
+  }));
 
   return router;
 }

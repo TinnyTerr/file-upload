@@ -37,7 +37,7 @@ export function useAdminKeys() {
   return useQuery({ queryKey: ["admin", "keys"], queryFn: adminService.keys });
 }
 
-export function useAudit(params: { limit: number; offset: number; q?: string; action?: string }) {
+export function useAudit(params: { limit: number; offset: number; q?: string; action?: string; verify?: boolean }) {
   return useQuery({
     queryKey: ["admin", "audit", params],
     queryFn: () => adminService.audit(params),

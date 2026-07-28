@@ -20,7 +20,14 @@ export function httpsRedirect(settings: Settings) {
     const host = req.header("host") ?? "";
     let proto = req.protocol;
     let effectiveHost = host;
-    if (settings.trustProxy && allowedHosts.has(host)) {
+    // An empty ALLOWED_HOSTS means "not configured", not "deny all" -- config.ts
+    // never generates it, so requiring an exact host match here would make
+    // TRUST_PROXY=true behind any reverse proxy 308-redirect forever (req.protocol
+    // stays http, the host is never in the empty set). Falling back to trusting
+    // the proxy when the allowlist is empty still requires the operator to have
+    // explicitly opted in via TRUST_PROXY; TRUST_PROXY=false still yields no
+    // proxy trust regardless of allowedHosts.
+    if (settings.trustProxy && (allowedHosts.size === 0 || allowedHosts.has(host))) {
       proto = req.header("x-forwarded-proto") || proto;
       effectiveHost = req.header("x-forwarded-host") || host;
     }

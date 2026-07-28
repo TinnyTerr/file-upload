@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Search, ShieldCheck, ShieldAlert, ChevronLeft, ChevronRight, ScrollText, Server } from "lucide-react";
+import { useMutation } from "@tanstack/react-query";
+import { Search, ShieldCheck, ShieldAlert, ShieldQuestion, ChevronLeft, ChevronRight, ScrollText, Server } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -8,6 +9,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 import { useAudit, useClusterAudit } from "../hooks/useAdminData";
+import { adminService } from "../services/adminService";
 import { formatDateTime } from "@/lib/time";
 
 const PAGE = 50;
@@ -31,6 +33,16 @@ export function AuditTab() {
   const [page, setPage] = useState(0);
 
   const isLocal = server === LOCAL;
+
+  // verifyAuditChain re-hashes the whole audit_log table, so it's opt-in
+  // (server/src/routes/audit.ts): chain_ok comes back null on the normal
+  // paginated fetch, and this button asks for a one-off check instead of
+  // paying that cost on every page/filter change.
+  const [verifiedResult, setVerifiedResult] = useState<boolean | null>(null);
+  const verifyChain = useMutation({
+    mutationFn: () => adminService.audit({ limit: 1, offset: 0, verify: true }),
+    onSuccess: (data) => setVerifiedResult(data.chain_ok),
+  });
 
   const local = useAudit({
     limit: PAGE,
@@ -66,16 +78,27 @@ export function AuditTab() {
 
   return (
     <div className="space-y-4">
-      {isLocal && local.data && !local.data.chain_ok && (
+      {isLocal && local.data && verifiedResult === false && (
         <div className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
           <ShieldAlert className="size-4 shrink-0" />
           Audit log hash-chain is broken — possible tampering detected.
         </div>
       )}
-      {isLocal && local.data && local.data.chain_ok && (
+      {isLocal && local.data && verifiedResult === true && (
         <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/10 px-4 py-2.5 text-sm text-success">
           <ShieldCheck className="size-4 shrink-0" />
           Audit chain verified · {local.data.total_count} entries
+        </div>
+      )}
+      {isLocal && local.data && verifiedResult === null && (
+        <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-secondary/20 px-4 py-2.5 text-sm text-muted-foreground">
+          <span className="flex items-center gap-2">
+            <ShieldQuestion className="size-4 shrink-0" />
+            Hash-chain not checked yet · {local.data.total_count} entries
+          </span>
+          <Button variant="outline" size="sm" onClick={() => verifyChain.mutate()} disabled={verifyChain.isPending}>
+            {verifyChain.isPending ? "Verifying…" : "Verify chain"}
+          </Button>
         </div>
       )}
       {!isLocal && (

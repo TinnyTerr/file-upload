@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { Download, FolderOpen, RotateCcw, Trash2 } from "lucide-react";
+import { CloudDownload, Download, FolderOpen, RotateCcw, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -14,9 +14,19 @@ import type { TorrentJob, TorrentStatus } from "../types";
 const STATUS_BADGE: Record<TorrentStatus, { label: string; variant: "success" | "accent" | "secondary" | "destructive" }> = {
   queued: { label: "queued", variant: "secondary" },
   downloading: { label: "downloading", variant: "accent" },
+  fetching: { label: "transferring", variant: "accent" },
   importing: { label: "importing", variant: "accent" },
   completed: { label: "completed", variant: "success" },
   failed: { label: "failed", variant: "destructive" },
+};
+
+/** What Real-Debrid is doing while our own status is still "queued". */
+const DEBRID_PHASE: Record<string, string> = {
+  magnet_conversion: "resolving the magnet…",
+  waiting_files_selection: "selecting files…",
+  queued: "queued on Real-Debrid…",
+  compressing: "Real-Debrid is packaging the files…",
+  uploading: "Real-Debrid is finishing up…",
 };
 
 function formatEta(seconds: number | null): string {
@@ -26,6 +36,11 @@ function formatEta(seconds: number | null): string {
   return `${Math.round(seconds / 3600)}h`;
 }
 
+function transferLine(t: TorrentJob): string {
+  const rate = `${formatBytes(t.dl_speed)}/s · ETA ${formatEta(t.eta_seconds)}`;
+  return `${formatBytes(t.downloaded_bytes)} of ${formatBytes(t.size_bytes)} · ${rate}`;
+}
+
 function subtitle(t: TorrentJob): string {
   if (t.status === "completed") {
     const files = `${t.imported_file_count} file${t.imported_file_count === 1 ? "" : "s"}`;
@@ -33,8 +48,16 @@ function subtitle(t: TorrentJob): string {
   }
   if (t.status === "failed") return t.error ?? "failed";
   if (t.status === "importing") return "moving files into your storage…";
+  // The debrid transfer leg: the torrent is already done remotely and these
+  // bytes are the hop from Real-Debrid to this server.
+  if (t.status === "fetching") {
+    return t.size_bytes ? `downloading from Real-Debrid · ${transferLine(t)}` : "downloading from Real-Debrid…";
+  }
+  if (t.provider === "debrid" && t.debrid_status && DEBRID_PHASE[t.debrid_status]) {
+    return DEBRID_PHASE[t.debrid_status]!;
+  }
   if (!t.size_bytes) return "fetching metadata…";
-  return `${formatBytes(t.downloaded_bytes)} of ${formatBytes(t.size_bytes)} · ${formatBytes(t.dl_speed)}/s · ETA ${formatEta(t.eta_seconds)}`;
+  return transferLine(t);
 }
 
 export function TorrentList({
@@ -70,11 +93,19 @@ export function TorrentList({
     <div className="space-y-2">
       {torrents.map((t) => {
         const badge = STATUS_BADGE[t.status] ?? STATUS_BADGE.queued;
-        const inFlight = t.status === "queued" || t.status === "downloading" || t.status === "importing";
+        const inFlight =
+          t.status === "queued" || t.status === "downloading" || t.status === "fetching" || t.status === "importing";
+        const viaDebrid = t.provider === "debrid";
         return (
           <ListRow
             key={t.id}
-            leading={<Download className="size-4 shrink-0 text-muted-foreground" />}
+            leading={
+              viaDebrid ? (
+                <CloudDownload className="size-4 shrink-0 text-muted-foreground" />
+              ) : (
+                <Download className="size-4 shrink-0 text-muted-foreground" />
+              )
+            }
             trailing={
               <>
                 {t.status === "completed" && t.directory_id !== null && (
@@ -110,6 +141,17 @@ export function TorrentList({
             <div className="flex items-center gap-2">
               <span className="truncate text-sm font-medium">{t.name}</span>
               <Badge variant={badge.variant}>{badge.label}</Badge>
+              <Tooltip
+                content={
+                  viaDebrid
+                    ? "Downloaded by Real-Debrid, then transferred to this server"
+                    : t.fallback_reason
+                      ? `Real-Debrid couldn't take this one: ${t.fallback_reason}`
+                      : "Downloaded by qBittorrent on this host"
+                }
+              >
+                <Badge variant="secondary">{viaDebrid ? "Real-Debrid" : "qBittorrent"}</Badge>
+              </Tooltip>
             </div>
             <p className="mt-0.5 truncate text-xs text-muted-foreground">{subtitle(t)}</p>
             {inFlight && <Progress className="mt-2 h-1.5" value={Math.round((t.progress ?? 0) * 100)} />}

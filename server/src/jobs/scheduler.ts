@@ -25,6 +25,7 @@ const HOUR_MS = 60 * 60 * 1000;
 const TEN_MIN_MS = 10 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 const FIFTEEN_SEC_MS = 15 * 1000;
+const FIVE_SEC_MS = 5 * 1000;
 
 interface JobSpec {
   id: string;
@@ -46,8 +47,9 @@ function buildJobSpecs(state: AppState): JobSpec[] {
     { id: "cluster_sync_check", intervalMs: 5 * MINUTE_MS, run: () => syncCheckJob(state) },
     { id: "cluster_election_liveness", intervalMs: FIFTEEN_SEC_MS, run: () => checkMasterLivenessJob(state) },
     { id: "cluster_cache_eviction", intervalMs: TEN_MIN_MS, run: () => cacheEvictionJob(state) },
-    // No-op unless QBITTORRENT_URL/QBITTORRENT_SAVE_PATH are configured.
-    { id: "torrent_poll", intervalMs: FIFTEEN_SEC_MS, run: () => torrentPollJob(state) },
+    // One qBittorrent request per tick (not per job), and zero requests at
+    // all when no job is in flight -- see torrents/poller.ts.
+    { id: "torrent_poll", intervalMs: FIVE_SEC_MS, run: () => torrentPollJob(state) },
   ];
 }
 

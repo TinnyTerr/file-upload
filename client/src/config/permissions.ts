@@ -1,4 +1,6 @@
-/** Permission flags mirrored from the backend (see app/routes/account.py). */
+/** Permission flags mirrored from the backend -- keep in sync with
+ * `BOOL_FLAGS` in server/src/permissions.ts and the /account/me payload in
+ * server/src/routes/account.ts. */
 export const PERMISSION_FLAGS = [
   "can_upload",
   "can_upload_client_encrypted",

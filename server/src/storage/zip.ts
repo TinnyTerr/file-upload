@@ -43,7 +43,10 @@ function newTempfile(suffix: string): string {
   return join(tmpdir(), `fu-${randomBytes(16).toString("hex")}${suffix}`);
 }
 
-async function writeStreamToFile(stream: AsyncGenerator<Buffer>, dest: string): Promise<void> {
+/** Streams an async chunk generator into a file, honoring backpressure.
+ * Exported for reuse by routes/public.ts's raw-download decompress/decrypt
+ * helpers, which used to buffer the whole file in memory before this. */
+export async function writeStreamToFile(stream: AsyncGenerator<Buffer>, dest: string): Promise<void> {
   const out = createWriteStream(dest);
   try {
     for await (const chunk of stream) {
@@ -59,9 +62,20 @@ async function writeStreamToFile(stream: AsyncGenerator<Buffer>, dest: string): 
 }
 
 /** Mirrors app/routes/directories.py::_member_source. Resolves a file row to a
- * path holding its plaintext bytes, decompressing then decrypting (archive-job
- * compression always wraps already-encrypted bytes). Returns [path, isTemp] --
- * caller must unlink when isTemp is true. */
+ * path holding its plaintext bytes. Returns [path, isTemp] -- caller must
+ * unlink when isTemp is true.
+ *
+ * Two different producers wrap a file's bytes in opposite transform orders:
+ *  - finalizeStoredFile (upload-time, routes/files.ts) compresses THEN
+ *    encrypts -> ENC(ZSTD(x)), and sets `compressed = 1`.
+ *  - the archive job (jobs/lifecycle.ts) only ever recompresses a file that
+ *    was NOT already compressed at upload time -- it wraps an already
+ *    *encrypted* file -> ZSTD(ENC(x)), leaving `compressed = 0` (see
+ *    archiveFileCore's early-out when `f.compressed` is already true).
+ * So `archived && !compressed` is the only layout stored as ZSTD(ENC(x))
+ * (decompress-then-decrypt); every other compressed+encrypted combination is
+ * ENC(ZSTD(x)) (decrypt-then-decompress). Mirrors routes/public.ts's raw
+ * handler (`f.archived && !f.compressed` branch). */
 export async function memberSource(
   masterKey: Buffer,
   f: FileRow,
@@ -73,22 +87,48 @@ export async function memberSource(
   const needsDecrypt = f.encryption_mode === "server";
   if (!needsDecompress && !needsDecrypt) return [full, false];
 
+  const decompressFirst = !!(f.archived && !f.compressed);
+
   let src = full;
   let intermediate: string | null = null;
   try {
-    if (needsDecompress) {
-      const dec = newTempfile(".dec");
-      intermediate = dec;
-      await writeStreamToFile(decompressStream(src, f.size_bytes), dec);
-      src = dec;
+    if (decompressFirst) {
+      // ZSTD(ENC(x)) -- decompress, then decrypt.
+      if (needsDecompress) {
+        const dec = newTempfile(".dec");
+        intermediate = dec;
+        await writeStreamToFile(decompressStream(src, f.size_bytes), dec);
+        src = dec;
+      }
+      if (needsDecrypt) {
+        if (!f.enc_key_blob) throw new HttpError(500, "encryption key not stored");
+        const key = openBox(masterKey, Buffer.from(f.enc_key_blob));
+        const plain = newTempfile(".plain");
+        try {
+          await writeStreamToFile(decryptStream(key, src), plain);
+        } catch (err) {
+          await unlink(plain).catch(() => {});
+          throw err;
+        }
+        if (intermediate) await unlink(intermediate).catch(() => {});
+        return [plain, true];
+      }
+      return [src, true];
     }
 
+    // ENC(ZSTD(x)) -- decrypt, then decompress.
     if (needsDecrypt) {
       if (!f.enc_key_blob) throw new HttpError(500, "encryption key not stored");
       const key = openBox(masterKey, Buffer.from(f.enc_key_blob));
+      const dec = newTempfile(".dec");
+      intermediate = dec;
+      await writeStreamToFile(decryptStream(key, src), dec);
+      src = dec;
+    }
+    if (needsDecompress) {
       const plain = newTempfile(".plain");
       try {
-        await writeStreamToFile(decryptStream(key, src), plain);
+        await writeStreamToFile(decompressStream(src, f.size_bytes), plain);
       } catch (err) {
         await unlink(plain).catch(() => {});
         throw err;

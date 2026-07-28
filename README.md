@@ -67,4 +67,4 @@ public/         Built client output, served by the Express app
 data/           Runtime state: app.env, sqlite db, uploaded files (not checked in)
 ```
 
-See `CLAUDE.md` for a detailed developer/agent guide (architecture, key patterns, route status) and `TODO_ROUTES.md` for the remaining cluster/realtime work.
+See `CLAUDE.md` for a detailed developer/agent guide (architecture, key patterns, conventions).

@@ -3,11 +3,13 @@ import busboy from "busboy";
 import type { AppState } from "../appState.ts";
 import { requireSession, clientIp } from "../middleware/auth.ts";
 import { requireActiveUser } from "../middleware/deps.ts";
+import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { hashPassword, verifyPassword } from "../security/passwords.ts";
 import { recordAudit } from "../audit.ts";
 import { ensurePermissions } from "../permissions.ts";
 import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
+import { deleteThumbnail } from "../storage/thumbnail.ts";
 import type { FileRow, UserRow } from "../db/rows.ts";
 
 interface SumRow {
@@ -52,6 +54,7 @@ function purgeUserData(state: AppState, userId: number): Array<string | null> {
   }
   for (const f of uniqueFiles) {
     paths.push(releaseBlob(db, f));
+    deleteThumbnail(f.id);
     db.run("DELETE FROM files WHERE id = $id", { $id: f.id });
   }
 
@@ -65,7 +68,10 @@ function purgeUserData(state: AppState, userId: number): Array<string | null> {
   db.run("DELETE FROM directory_collaborators WHERE user_id = $id", { $id: userId });
   db.run("DELETE FROM remote_upload_jobs WHERE owner_id = $id", { $id: userId });
   db.run("DELETE FROM api_keys WHERE owner_id = $id", { $id: userId });
-  db.run("DELETE FROM permissions WHERE user_id = $id", { $id: userId });
+  // Torrent jobs are user data like everything else above, so this runs for
+  // both /account/reset and account deletion. Unlike credentials/permissions
+  // (see callers), there's no reason to keep it around across a reset.
+  db.run("DELETE FROM torrent_jobs WHERE owner_id = $id", { $id: userId });
 
   return paths;
 }
@@ -75,10 +81,17 @@ export function accountRouter(state: AppState): Router {
   const router = Router();
   const { db } = state;
 
-  router.post("/change-credentials", requireSession(state), requireCsrf, async (req, res) => {
+  router.post("/change-credentials", requireSession(state), requireCsrf, asyncHandler(async (req, res) => {
     const { new_username: newUsername, current_password: currentPassword, new_password: newPassword } = req.body ?? {};
     if (typeof newPassword !== "string" || newPassword.length < 12) {
       res.status(400).json({ detail: "new password too short" });
+      return;
+    }
+    // A missing/blank username would otherwise hit db.get/db.run with
+    // `undefined` (bun:sqlite throws) or silently rename the account to "".
+    const username = typeof newUsername === "string" ? newUsername.trim() : "";
+    if (!username) {
+      res.status(400).json({ detail: "new username is required" });
       return;
     }
     const sessionRow = req.sessionRow!;
@@ -87,7 +100,7 @@ export function accountRouter(state: AppState): Router {
       res.status(401).json({ detail: "invalid current password" });
       return;
     }
-    const existing = db.get<UserRow>("SELECT * FROM users WHERE username = $u", { $u: newUsername });
+    const existing = db.get<UserRow>("SELECT * FROM users WHERE username = $u", { $u: username });
     if (existing && existing.id !== user.id) {
       res.status(409).json({ detail: "username taken" });
       return;
@@ -95,14 +108,14 @@ export function accountRouter(state: AppState): Router {
     const actor = user.username;
     const newHash = await hashPassword(newPassword);
     db.run("UPDATE users SET username = $u, password_hash = $h, must_change_credentials = 0 WHERE id = $id", {
-      $u: newUsername,
+      $u: username,
       $h: newHash,
       $id: user.id,
     });
     db.run("DELETE FROM sessions WHERE user_id = $id AND id != $sid", { $id: user.id, $sid: sessionRow.id });
     recordAudit(db, { actor, action: "account.credentials_changed", target: `user:${user.id}`, ip: clientIp(state, req) });
     res.json({ status: "updated" });
-  });
+  }));
 
   router.get("/me", requireActiveUser(state), (req, res) => {
     const user = req.currentUser!;
@@ -224,7 +237,7 @@ export function accountRouter(state: AppState): Router {
     res.send(Buffer.from(user.avatar_data));
   });
 
-  router.post("/reset", requireSession(state), requireCsrf, async (req, res) => {
+  router.post("/reset", requireSession(state), requireCsrf, asyncHandler(async (req, res) => {
     const { current_password: currentPassword } = req.body ?? {};
     const sessionRow = req.sessionRow!;
     const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", { $id: sessionRow.user_id });
@@ -239,9 +252,9 @@ export function accountRouter(state: AppState): Router {
     });
     unlinkQueued(paths);
     res.json({ status: "reset" });
-  });
+  }));
 
-  router.delete("/", requireSession(state), requireCsrf, async (req, res) => {
+  router.delete("/", requireSession(state), requireCsrf, asyncHandler(async (req, res) => {
     const { current_password: currentPassword } = req.body ?? {};
     const sessionRow = req.sessionRow!;
     const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", { $id: sessionRow.user_id });
@@ -261,13 +274,18 @@ export function accountRouter(state: AppState): Router {
       paths = purgeUserData(state, user.id);
       db.run("DELETE FROM sessions WHERE user_id = $id", { $id: user.id });
       db.run("DELETE FROM permissions WHERE user_id = $id", { $id: user.id });
+      // Unlike a reset, the account is actually going away -- unenroll MFA
+      // and detach any cluster nodes this user registered so the
+      // PRAGMA foreign_keys = ON DELETE FROM users below doesn't throw.
+      db.run("DELETE FROM credentials WHERE user_id = $id", { $id: user.id });
+      db.run("UPDATE cluster_nodes SET created_by_id = NULL WHERE created_by_id = $id", { $id: user.id });
       recordAudit(db, { actor: user.username, action: "account.deleted", target: `user:${user.id}`, ip: clientIp(state, req) });
       db.run("DELETE FROM users WHERE id = $id", { $id: user.id });
     });
     unlinkQueued(paths);
     res.clearCookie("fu_session", { path: "/" });
     res.json({ status: "deleted" });
-  });
+  }));
 
   return router;
 }

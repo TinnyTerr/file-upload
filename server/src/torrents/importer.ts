@@ -10,7 +10,7 @@ import { newSlug } from "../links.ts";
 import { recordAudit } from "../audit.ts";
 import { getLogger } from "../logging.ts";
 import { HttpError } from "../httpError.ts";
-import { storageRoot, newInternalRelPath } from "../storage/paths.ts";
+import { storageRoot, debridRoot, newInternalRelPath } from "../storage/paths.ts";
 import { finalizeStoredFile } from "../routes/files.ts";
 
 const log = getLogger("app.torrents.importer");
@@ -26,10 +26,14 @@ export interface DiscoveredFile {
   size: number;
 }
 
-/** The per-job download directory as *this server* sees it. `save_path` on the
- * job row is the same directory as *qBittorrent* sees it -- the two differ when
- * qBittorrent runs in a container (see TORRENT_CONTENT_PATH). */
+/** The per-job download directory as *this server* sees it.
+ *
+ * Real-Debrid jobs are fetched by this process into our own staging root, so
+ * the path is unambiguous. For qBittorrent jobs, `save_path` on the row is the
+ * directory as *qBittorrent* sees it -- the two differ when qBittorrent runs
+ * in a container (see TORRENT_CONTENT_PATH). */
 export function localJobDir(state: AppState, job: TorrentJobRow): string {
+  if (job.provider === "debrid") return join(debridRoot(), job.tag);
   return join(state.settings.torrentContentPath || state.settings.qbittorrentSavePath, job.tag);
 }
 

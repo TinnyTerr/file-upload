@@ -3,6 +3,7 @@ import { Router } from "express";
 import { authenticator } from "otplib";
 import type { AppState } from "../appState.ts";
 import { requireSession, clientIp } from "../middleware/auth.ts";
+import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { COOKIE_NAME, type SessionRow } from "../security/sessions.ts";
 import { hashPassword, verifyPassword, verifyDummyPassword } from "../security/passwords.ts";
@@ -16,7 +17,7 @@ import type { UserRow } from "../db/rows.ts";
 /** Mirrors app/routes/auth.py -- login/logout/session listing/revocation,
  * matching status codes, cookie attrs, and CSRF header behavior exactly.
  * Extended with a second-factor step (TOTP/WebAuthn) and usernameless
- * WebAuthn login -- see CLAUDE.md's login redesign notes. */
+ * WebAuthn login -- see CLAUDE.md's "Login + second factor" section. */
 export function authRouter(state: AppState): Router {
   const router = Router();
   const { db, sessionManager, lockout } = state;
@@ -43,7 +44,7 @@ export function authRouter(state: AppState): Router {
     res.json({ conn_id: connId, expires_in: 300 });
   });
 
-  router.post("/login", async (req, res) => {
+  router.post("/login", asyncHandler(async (req, res) => {
     const { username, password, conn_id: connId } = req.body ?? {};
     if (typeof username !== "string" || typeof password !== "string") {
       res.status(422).json({ detail: "username and password required" });
@@ -90,9 +91,9 @@ export function authRouter(state: AppState): Router {
 
     recordAudit(db, { actor: username, action: "login.success", ip });
     issueSession(req, res, user, ip, mfaEnforced && credRows.length === 0);
-  });
+  }));
 
-  router.post("/totp/verify-login", async (req, res) => {
+  router.post("/totp/verify-login", asyncHandler(async (req, res) => {
     const { mfa_ticket: ticket, code, conn_id: connId } = req.body ?? {};
     if (typeof ticket !== "string" || typeof code !== "string") {
       res.status(422).json({ detail: "mfa_ticket and code required" });
@@ -133,9 +134,9 @@ export function authRouter(state: AppState): Router {
     }
     recordAudit(db, { actor: user.username, action: "login.mfa_success", ip });
     issueSession(req, res, user, ip, false);
-  });
+  }));
 
-  router.post("/webauthn/login/start", async (req, res) => {
+  router.post("/webauthn/login/start", asyncHandler(async (req, res) => {
     const { conn_id: providedConnId } = req.body ?? {};
     let rpContext: { rpID: string; origin: string };
     try {
@@ -148,9 +149,9 @@ export function authRouter(state: AppState): Router {
     const options = await buildAuthenticationOptions(rpContext);
     state.loginChallenges.setWebauthnChallenge(connId, options.challenge);
     res.json({ options, conn_id: connId });
-  });
+  }));
 
-  router.post("/webauthn/login/finish", async (req, res) => {
+  router.post("/webauthn/login/finish", asyncHandler(async (req, res) => {
     const { conn_id: connId, response } = req.body ?? {};
     const ip = clientIp(state, req);
     if (typeof connId !== "string" || !connId || !response || typeof response !== "object") {
@@ -204,7 +205,7 @@ export function authRouter(state: AppState): Router {
     state.loginChallenges.transition(connId, { state: "done" });
     recordAudit(db, { actor: user.username, action: "login.webauthn_usernameless_success", ip });
     issueSession(req, res, user, ip, false);
-  });
+  }));
 
   router.post("/logout", requireSession(state), requireCsrf, (req, res) => {
     const cookieValue = req.cookies?.[COOKIE_NAME] as string | undefined;
@@ -234,7 +235,7 @@ export function authRouter(state: AppState): Router {
     });
   });
 
-  router.delete("/sessions/:id", requireSession(state), requireCsrf, async (req, res) => {
+  router.delete("/sessions/:id", requireSession(state), requireCsrf, asyncHandler(async (req, res) => {
     const { current_password: currentPassword } = req.body ?? {};
     const current = req.sessionRow!;
     const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", { $id: current.user_id })!;
@@ -250,9 +251,9 @@ export function authRouter(state: AppState): Router {
     db.run("DELETE FROM sessions WHERE id = $id", { $id: target.id });
     recordAudit(db, { actor: user.username, action: "session.revoked", target: target.id });
     res.json({ status: "revoked" });
-  });
+  }));
 
-  router.delete("/sessions", requireSession(state), requireCsrf, async (req, res) => {
+  router.delete("/sessions", requireSession(state), requireCsrf, asyncHandler(async (req, res) => {
     const { current_password: currentPassword } = req.body ?? {};
     const current = req.sessionRow!;
     const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", { $id: current.user_id })!;
@@ -264,7 +265,7 @@ export function authRouter(state: AppState): Router {
     recordAudit(db, { actor: user.username, action: "session.revoked_all" });
     res.clearCookie(COOKIE_NAME, { path: "/" });
     res.json({ status: "all_revoked" });
-  });
+  }));
 
   return router;
 }

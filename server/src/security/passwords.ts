@@ -11,7 +11,14 @@ export async function hashPassword(password: string): Promise<string> {
 }
 
 export async function verifyPassword(password: string, hash: string): Promise<boolean> {
-  return Bun.password.verify(password, hash);
+  try {
+    return await Bun.password.verify(password, hash);
+  } catch {
+    // A malformed/empty hash (e.g. a row caught mid-creation) must read as
+    // "wrong password", never as a 500 -- Bun.password.verify throws instead
+    // of returning false for those inputs.
+    return false;
+  }
 }
 
 /** Always does a real Argon2 verify against a fixed dummy hash, so response
