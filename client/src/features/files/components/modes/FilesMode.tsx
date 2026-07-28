@@ -46,7 +46,7 @@ export function FilesMode() {
 					<ul className="space-y-1.5">
 						{files.map((f, i) => (
 							<li
-								key={`${f.name}-${i}`}
+								key={`${f.name}-${f.size}-${f.lastModified}`}
 								className="flex items-center justify-between gap-2 rounded-md border border-border bg-secondary/20 px-3 py-2 text-sm"
 							>
 								<span className="flex min-w-0 items-center gap-2">

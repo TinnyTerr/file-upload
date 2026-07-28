@@ -88,6 +88,7 @@ export function BarList({
 	return (
 		<div className="space-y-2">
 			{data.map((d, i) => (
+				// biome-ignore lint/suspicious/noArrayIndexKey: read-only, already-sorted stats list -- labels are filenames/folder titles and can legitimately repeat, so position is the only unique key.
 				<div key={`${d.label}-${i}`} className="space-y-1">
 					<div className="flex items-center justify-between gap-2 text-xs">
 						<span

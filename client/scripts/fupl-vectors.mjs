@@ -1,63 +1,34 @@
 /**
  * FUPL v1 interop verification: proves the browser worker's crypto core is
- * byte-compatible with the server (app/crypto/aead.py).
+ * byte-compatible with the server's container (server/src/crypto/aead.ts).
  *
- *   1. JS encrypts  -> Python decrypts -> must equal original plaintext
- *   2. Python encrypts -> JS decrypts  -> must equal original plaintext
+ *   1. JS(worker) encrypts -> server decrypts -> must equal original plaintext
+ *   2. server encrypts -> JS(worker) decrypts -> must equal original plaintext
  *
- * Run from client/: `node scripts/fupl-vectors.mjs`
- * Requires Node >= 20 (global WebCrypto) and Python with `cryptography`.
+ * Run from client/: `bun scripts/fupl-vectors.mjs`
  *
- * The JS side imports the SAME primitives the worker uses, transpiled on the
- * fly via a tiny esbuild-free shim: we import the .ts core through Node's
- * built-in TS stripping (Node >= 22.6 with --experimental-strip-types) OR fall
- * back to a local re-implementation guard. To keep this dependency-free we
- * re-derive bytes through a child Python process for the server side.
+ * Both sides are TypeScript imported directly (Bun transpiles on the fly), so
+ * this exercises the real primitives rather than a re-implementation. The
+ * server side is file-oriented, hence the temp-directory round trips.
  */
-import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = resolve(__dirname, "..", "..");
+const { encryptBytes, decryptBytes } = await import(
+	"../src/workers/fuplCore.ts"
+);
+const { encryptFile, decryptStream } = await import(
+	"../../server/src/crypto/aead.ts"
+);
 
-// Load the worker's crypto core (TS) via Node native type stripping.
-const core = await import("../src/workers/fuplCore.ts");
-const { encryptBytes, decryptBytes } = core;
-
-const PY_DECRYPT = `
-import sys, pathlib
-sys.path.insert(0, sys.argv[1])
-from app.crypto.aead import decrypt_stream
-key = pathlib.Path(sys.argv[2]).read_bytes()
-src = pathlib.Path(sys.argv[3])
-out = pathlib.Path(sys.argv[4])
-import app.crypto.aead as a
-# write key to a temp and decrypt
-data = b"".join(decrypt_stream(key, src))
-out.write_bytes(data)
-`;
-
-const PY_ENCRYPT = `
-import sys, pathlib
-sys.path.insert(0, sys.argv[1])
-from app.crypto.aead import encrypt_file
-key = pathlib.Path(sys.argv[2]).read_bytes()
-src = pathlib.Path(sys.argv[3])
-out = pathlib.Path(sys.argv[4])
-encrypt_file(key, src, out)
-`;
-
-function python(code, args, work) {
-	const scriptPath = join(work, "snippet.py");
-	writeFileSync(scriptPath, code);
-	const py = process.platform === "win32" ? "python" : "python3";
-	const res = spawnSync(py, [scriptPath, ...args], { encoding: "utf8" });
-	if (res.status !== 0) {
-		throw new Error(`python failed: ${res.stderr || res.stdout}`);
+/** Server-side decrypt of a .fupl file into one buffer. */
+async function serverDecrypt(key, path) {
+	const parts = [];
+	for await (const chunk of decryptStream(Buffer.from(key), path)) {
+		parts.push(chunk);
 	}
+	return new Uint8Array(Buffer.concat(parts));
 }
 
 function eq(a, b) {
@@ -89,31 +60,28 @@ let failures = 0;
 try {
 	for (const [name, plaintext] of Object.entries(CASES)) {
 		const key = crypto.getRandomValues(new Uint8Array(32));
-		const keyPath = join(work, "key.bin");
-		writeFileSync(keyPath, key);
 
-		// --- Case A: JS encrypt -> Python decrypt ---
-		const jsCipher = await encryptBytes(key, plaintext);
+		// --- Case A: JS encrypt -> server decrypt ---
 		const ctPath = join(work, "a.fupl");
-		const ptOut = join(work, "a.out");
-		writeFileSync(ctPath, jsCipher);
-		python(PY_DECRYPT, [REPO_ROOT, keyPath, ctPath, ptOut], work);
-		const aResult = new Uint8Array(readFileSync(ptOut));
-		const aOk = eq(aResult, plaintext);
+		writeFileSync(ctPath, await encryptBytes(key, plaintext));
+		const aOk = eq(await serverDecrypt(key, ctPath), plaintext);
 
-		// --- Case B: Python encrypt -> JS decrypt ---
+		// --- Case B: server encrypt -> JS decrypt ---
 		const ptPath = join(work, "b.in");
-		const pyCt = join(work, "b.fupl");
+		const serverCt = join(work, "b.fupl");
 		writeFileSync(ptPath, plaintext);
-		python(PY_ENCRYPT, [REPO_ROOT, keyPath, ptPath, pyCt], work);
-		const bResult = await decryptBytes(key, new Uint8Array(readFileSync(pyCt)));
+		await encryptFile(Buffer.from(key), ptPath, serverCt);
+		const bResult = await decryptBytes(
+			key,
+			new Uint8Array(readFileSync(serverCt)),
+		);
 		const bOk = eq(bResult, plaintext);
 
 		const ok = aOk && bOk;
 		if (!ok) failures++;
 		console.log(
 			`${ok ? "\x1b[32m✓\x1b[0m" : "\x1b[31m✗\x1b[0m"} ${name.padEnd(12)} ` +
-				`JS→PY:${aOk ? "ok" : "FAIL"}  PY→JS:${bOk ? "ok" : "FAIL"}  (${plaintext.length} bytes)`,
+				`JS→SRV:${aOk ? "ok" : "FAIL"}  SRV→JS:${bOk ? "ok" : "FAIL"}  (${plaintext.length} bytes)`,
 		);
 	}
 } finally {

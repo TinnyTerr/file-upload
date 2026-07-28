@@ -191,11 +191,9 @@ export function authRouter(state: AppState): Router {
 			try {
 				rpContext = resolveRpContext(state.settings, req);
 			} catch (err) {
-				res
-					.status(400)
-					.json({
-						detail: err instanceof Error ? err.message : "invalid origin",
-					});
+				res.status(400).json({
+					detail: err instanceof Error ? err.message : "invalid origin",
+				});
 				return;
 			}
 			const connId =
@@ -253,17 +251,15 @@ export function authRouter(state: AppState): Router {
 			try {
 				rpContext = resolveRpContext(state.settings, req);
 			} catch (err) {
-				res
-					.status(400)
-					.json({
-						detail: err instanceof Error ? err.message : "invalid origin",
-					});
+				res.status(400).json({
+					detail: err instanceof Error ? err.message : "invalid origin",
+				});
 				return;
 			}
 			const transports = credRow.transports
 				? JSON.parse(credRow.transports)
 				: undefined;
-			let verification;
+			let verification: Awaited<ReturnType<typeof verifyAuthentication>>;
 			try {
 				verification = await verifyAuthentication(
 					rpContext,
@@ -282,11 +278,9 @@ export function authRouter(state: AppState): Router {
 					action: "login.webauthn_failure",
 					ip,
 				});
-				res
-					.status(401)
-					.json({
-						detail: err instanceof Error ? err.message : "verification failed",
-					});
+				res.status(401).json({
+					detail: err instanceof Error ? err.message : "verification failed",
+				});
 				return;
 			}
 			if (!verification.verified) {

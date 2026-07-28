@@ -1275,12 +1275,10 @@ export function publicDirectoriesRouter(state: AppState): Router {
 			}
 			const { directory: d } = resolved;
 			if (d.encryption_mode === "client") {
-				res
-					.status(400)
-					.json({
-						detail:
-							"end-to-end encrypted bundle — download from the directory page",
-					});
+				res.status(400).json({
+					detail:
+						"end-to-end encrypted bundle — download from the directory page",
+				});
 				return;
 			}
 			const ek = typeof req.query.ek === "string" ? req.query.ek : null;

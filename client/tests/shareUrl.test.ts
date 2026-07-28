@@ -49,7 +49,8 @@ describe("shareUrl", () => {
 describe("url builders", () => {
 	test("file/folder URLs use the origin", () => {
 		expect(mod.fileUrl("slug1")).toBe("https://host.test/file/slug1");
-		expect(mod.rawUrl("slug1")).toBe("https://host.test/file/slug1/raw");
+		// rawUrl is the backend download endpoint, so it lives under /api.
+		expect(mod.rawUrl("slug1")).toBe("https://host.test/api/file/slug1/raw");
 		expect(mod.folderUrl("d1")).toBe("https://host.test/d/d1");
 	});
 });

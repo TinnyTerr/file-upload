@@ -126,7 +126,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 	}, []);
 
 	const reset = useCallback(() => {
-		controllers.current.forEach((c) => c.abort());
+		for (const c of controllers.current.values()) c.abort();
 		controllers.current.clear();
 		setItems([]);
 	}, []);

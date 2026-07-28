@@ -211,8 +211,8 @@ export function ShareModal({
 				)}
 
 				<div className="max-h-[55vh] space-y-3 overflow-y-auto pr-1">
-					{entries.map((entry, i) => (
-						<EntryCard key={`${entry.baseUrl}-${i}`} entry={entry} />
+					{entries.map((entry) => (
+						<EntryCard key={entry.baseUrl} entry={entry} />
 					))}
 				</div>
 			</DialogContent>

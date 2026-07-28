@@ -482,14 +482,12 @@ export function dropboxRouter(state: AppState): Router {
 					log.info(
 						`dropbox chunked upload finalize incomplete id=${row.id} missing_count=${missing.length}`,
 					);
-					res
-						.status(409)
-						.json({
-							detail: {
-								error: "upload incomplete",
-								missing: missing.slice(0, 512),
-							},
-						});
+					res.status(409).json({
+						detail: {
+							error: "upload incomplete",
+							missing: missing.slice(0, 512),
+						},
+					});
 					return;
 				}
 

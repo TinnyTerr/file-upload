@@ -40,6 +40,7 @@ function TotpSetupModal({
 	const [code, setCode] = useState("");
 	const [label, setLabel] = useState("");
 
+	// biome-ignore lint/correctness/useExhaustiveDependencies: deliberately keyed on `open` alone -- this runs the open/close transition. start()/reset() are re-created every render and start() advances state.step, so adding them loops.
 	React.useEffect(() => {
 		if (open && state.step === "idle") void start();
 		if (!open) {
@@ -47,7 +48,6 @@ function TotpSetupModal({
 			setCode("");
 			setLabel("");
 		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [open]);
 
 	React.useEffect(() => {

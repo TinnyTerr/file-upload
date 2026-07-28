@@ -8,9 +8,9 @@ import { FileRow } from "./FileRow";
 function ListSkeleton() {
 	return (
 		<div className="space-y-2">
-			{Array.from({ length: 4 }).map((_, i) => (
+			{["a", "b", "c", "d"].map((k) => (
 				<div
-					key={i}
+					key={k}
 					className="flex items-center gap-3 rounded-lg border border-border bg-secondary/20 p-3"
 				>
 					<Skeleton className="size-9 rounded-md" />

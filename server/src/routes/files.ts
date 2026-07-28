@@ -276,7 +276,7 @@ export async function finalizeStoredFile(
 	const basePath = join(storageRoot(), opts.relPath);
 	const directoryId = directory ? directory.id : null;
 
-	let plainHashes;
+	let plainHashes: Awaited<ReturnType<typeof hashFile>>;
 	try {
 		plainHashes = await hashFile(opts.workPath);
 		enforceGlobalUploadCapacity(db, opts.stored);
@@ -667,7 +667,7 @@ export function sweepStaleParts(): void {
 		}
 		for (const entry of entries) {
 			const p = join(dir, entry);
-			let st;
+			let st: ReturnType<typeof statSync>;
 			try {
 				st = statSync(p);
 			} catch {
@@ -789,12 +789,10 @@ export function filesRouter(state: AppState): Router {
 	router.post("/upload", getUploadUser(state), (req, res, next) => {
 		const user = req.currentUser!;
 		if (state.haltRegistry.activeUntil(user.id) !== null) {
-			res
-				.status(503)
-				.json({
-					detail:
-						"uploads are temporarily halted on this cluster; try again shortly",
-				});
+			res.status(503).json({
+				detail:
+					"uploads are temporarily halted on this cluster; try again shortly",
+			});
 			return;
 		}
 		const bb = busboy({
@@ -1118,14 +1116,12 @@ export function filesRouter(state: AppState): Router {
 					log.info(
 						`chunked upload finalize incomplete user_id=${user.id} missing_count=${missing.length}`,
 					);
-					res
-						.status(409)
-						.json({
-							detail: {
-								error: "upload incomplete",
-								missing: missing.slice(0, 512),
-							},
-						});
+					res.status(409).json({
+						detail: {
+							error: "upload incomplete",
+							missing: missing.slice(0, 512),
+						},
+					});
 					return;
 				}
 

@@ -121,11 +121,9 @@ export function mfaRouter(state: AppState): Router {
 			try {
 				rpContext = resolveRpContext(state.settings, req);
 			} catch (err) {
-				res
-					.status(400)
-					.json({
-						detail: err instanceof Error ? err.message : "invalid origin",
-					});
+				res.status(400).json({
+					detail: err instanceof Error ? err.message : "invalid origin",
+				});
 				return;
 			}
 			const userHandle = ensureWebauthnUserHandle(db, user);
@@ -157,11 +155,9 @@ export function mfaRouter(state: AppState): Router {
 			try {
 				rpContext = resolveRpContext(state.settings, req);
 			} catch (err) {
-				res
-					.status(400)
-					.json({
-						detail: err instanceof Error ? err.message : "invalid origin",
-					});
+				res.status(400).json({
+					detail: err instanceof Error ? err.message : "invalid origin",
+				});
 				return;
 			}
 			const expectedChallenge = takeRegistrationChallenge(req.sessionRow!.id);
@@ -171,7 +167,7 @@ export function mfaRouter(state: AppState): Router {
 					.json({ detail: "registration ceremony expired, try again" });
 				return;
 			}
-			let verification;
+			let verification: Awaited<ReturnType<typeof verifyRegistration>>;
 			try {
 				verification = await verifyRegistration(
 					rpContext,
@@ -179,11 +175,9 @@ export function mfaRouter(state: AppState): Router {
 					expectedChallenge,
 				);
 			} catch (err) {
-				res
-					.status(400)
-					.json({
-						detail: err instanceof Error ? err.message : "verification failed",
-					});
+				res.status(400).json({
+					detail: err instanceof Error ? err.message : "verification failed",
+				});
 				return;
 			}
 			if (!verification.verified || !verification.registrationInfo) {

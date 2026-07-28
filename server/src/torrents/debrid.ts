@@ -345,8 +345,8 @@ function etaFrom(
  * is separately blocked by safeJoin; this is about Windows-illegal names and
  * control characters. */
 function sanitizeSegment(segment: string): string {
-	// eslint-disable-next-line no-control-regex
 	const cleaned = segment
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control characters out of an attacker-supplied path segment is the whole point.
 		.replace(/[\u0000-\u001f<>:"|?*\\]/g, "_")
 		.replace(/[. ]+$/, "");
 	return cleaned || "_";

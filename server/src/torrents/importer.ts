@@ -1,3 +1,4 @@
+import type { Dirent } from "node:fs";
 import { mkdirSync, readdirSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { copyFile } from "node:fs/promises";
 import { basename, join, relative, sep } from "node:path";
@@ -57,7 +58,7 @@ function torrentRoot(jobDir: string): string {
 export function discoverFiles(root: string): DiscoveredFile[] {
 	const out: DiscoveredFile[] = [];
 	const walk = (dir: string) => {
-		let entries;
+		let entries: Dirent[];
 		try {
 			entries = readdirSync(dir, { withFileTypes: true });
 		} catch {

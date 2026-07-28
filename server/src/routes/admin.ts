@@ -567,11 +567,9 @@ export function adminRouter(state: AppState): Router {
 				!Number.isInteger(raw) ||
 				raw < 0
 			) {
-				res
-					.status(400)
-					.json({
-						detail: "global_storage_quota_bytes must be a non-negative integer",
-					});
+				res.status(400).json({
+					detail: "global_storage_quota_bytes must be a non-negative integer",
+				});
 				return;
 			}
 			try {

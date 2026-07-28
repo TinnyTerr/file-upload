@@ -110,6 +110,7 @@ export function BackendTab() {
 				<div className="max-h-[60vh] space-y-0.5 overflow-y-auto rounded-lg border border-border bg-background/50 p-3 font-mono text-xs">
 					{data.entries.map((log, i) => (
 						<div
+							// biome-ignore lint/suspicious/noArrayIndexKey: log ring-buffer snapshot has no id and is never reordered in place.
 							key={i}
 							className="flex gap-2 border-b border-border/40 py-1 last:border-0"
 						>

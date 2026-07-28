@@ -32,9 +32,9 @@ export function UsersTab() {
 
 	const usageById = useMemo(() => {
 		const m = new Map<number, { used: number; quota: number | null }>();
-		storage?.users.forEach((u) =>
-			m.set(u.id, { used: u.used_bytes, quota: u.quota_bytes }),
-		);
+		for (const u of storage?.users ?? []) {
+			m.set(u.id, { used: u.used_bytes, quota: u.quota_bytes });
+		}
 		return m;
 	}, [storage]);
 

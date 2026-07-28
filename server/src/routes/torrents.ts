@@ -178,12 +178,10 @@ export function torrentsRouter(state: AppState): Router {
 					return;
 				}
 				if (magnet && !/^magnet:\?/i.test(magnet)) {
-					res
-						.status(400)
-						.json({
-							detail:
-								"only magnet links are accepted here; upload the .torrent file instead",
-						});
+					res.status(400).json({
+						detail:
+							"only magnet links are accepted here; upload the .torrent file instead",
+					});
 					return;
 				}
 
@@ -225,11 +223,9 @@ export function torrentsRouter(state: AppState): Router {
 					{ $id: user.id },
 				)!.n;
 				if (active >= MAX_ACTIVE_PER_USER) {
-					res
-						.status(429)
-						.json({
-							detail: `you already have ${MAX_ACTIVE_PER_USER} torrents in flight`,
-						});
+					res.status(429).json({
+						detail: `you already have ${MAX_ACTIVE_PER_USER} torrents in flight`,
+					});
 					return;
 				}
 

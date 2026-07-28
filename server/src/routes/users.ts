@@ -203,11 +203,9 @@ export function usersRouter(state: AppState): Router {
 						$id: user.id,
 					});
 					db.run("DELETE FROM users WHERE id = $id", { $id: user.id });
-					res
-						.status(400)
-						.json({
-							detail: "user quotas would exceed global storage allocation",
-						});
+					res.status(400).json({
+						detail: "user quotas would exceed global storage allocation",
+					});
 					return;
 				}
 				if (body.quota_bytes !== undefined) {
@@ -226,12 +224,10 @@ export function usersRouter(state: AppState): Router {
 				res.json({ id: user.id, username: user.username, role: user.role });
 			} catch (err) {
 				if (!res.headersSent) {
-					res
-						.status(err instanceof HttpError ? err.status : 500)
-						.json({
-							detail:
-								err instanceof HttpError ? err.detail : "internal server error",
-						});
+					res.status(err instanceof HttpError ? err.status : 500).json({
+						detail:
+							err instanceof HttpError ? err.detail : "internal server error",
+					});
 				}
 			}
 		}),
@@ -361,12 +357,10 @@ export function usersRouter(state: AppState): Router {
 				});
 			} catch (err) {
 				if (!res.headersSent) {
-					res
-						.status(err instanceof HttpError ? err.status : 500)
-						.json({
-							detail:
-								err instanceof HttpError ? err.detail : "internal server error",
-						});
+					res.status(err instanceof HttpError ? err.status : 500).json({
+						detail:
+							err instanceof HttpError ? err.detail : "internal server error",
+					});
 				}
 			}
 		}),
@@ -537,11 +531,9 @@ export function usersRouter(state: AppState): Router {
 						quotaBytes,
 					});
 					if (allocated > settings.global_storage_quota_bytes) {
-						res
-							.status(400)
-							.json({
-								detail: "user quotas would exceed global storage allocation",
-							});
+						res.status(400).json({
+							detail: "user quotas would exceed global storage allocation",
+						});
 						return;
 					}
 					validateAllocatedQuotaCapacity(allocated);

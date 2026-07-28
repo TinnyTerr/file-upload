@@ -52,11 +52,9 @@ export function keysRouter(state: AppState): Router {
 				{ $id: user.id },
 			)!.n;
 			if (activeCount >= MAX_ACTIVE_KEYS_PER_USER) {
-				res
-					.status(429)
-					.json({
-						detail: `active API key limit reached (${MAX_ACTIVE_KEYS_PER_USER}); delete one first`,
-					});
+				res.status(429).json({
+					detail: `active API key limit reached (${MAX_ACTIVE_KEYS_PER_USER}); delete one first`,
+				});
 				return;
 			}
 			const nextNumber =

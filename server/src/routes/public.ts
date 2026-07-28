@@ -74,6 +74,7 @@ function contentDisposition(filename: string): string {
 		.filter((c) => c.codePointAt(0)! >= 0x20)
 		.join("");
 	const asciiFallback = cleaned
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: the ASCII range is deliberate -- non-ASCII must degrade to "?" in the legacy filename param.
 		.replace(/[^\x00-\x7F]/g, "?")
 		.replace(/"/g, "_")
 		.replace(/\\/g, "_");

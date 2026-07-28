@@ -15,7 +15,10 @@ export function useSelection() {
 	const set = useCallback((nextIds: number[], on: boolean) => {
 		setIds((prev) => {
 			const next = new Set(prev);
-			nextIds.forEach((id) => (on ? next.add(id) : next.delete(id)));
+			for (const id of nextIds) {
+				if (on) next.add(id);
+				else next.delete(id);
+			}
 			return next;
 		});
 	}, []);

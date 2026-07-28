@@ -65,7 +65,7 @@ describe("api client", () => {
 			query: { p: 1, skip: undefined },
 		});
 		expect(res).toEqual([1, 2, 3]);
-		expect(captured!.url).toBe("/y?p=1");
+		expect(captured!.url).toBe("/api/y?p=1");
 		const headers = captured!.init.headers as Headers;
 		expect(headers.get("X-CSRF-Token")).toBeNull();
 	});

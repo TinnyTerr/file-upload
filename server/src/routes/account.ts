@@ -234,11 +234,9 @@ export function accountRouter(state: AppState): Router {
 			const ct = (info.mimeType || "").toLowerCase().split(";")[0]!.trim();
 			if (!ALLOWED_AVATAR_TYPES.has(ct)) {
 				handled = true;
-				res
-					.status(415)
-					.json({
-						detail: `unsupported image type: ${ct}. Allowed: jpeg, png, gif, webp`,
-					});
+				res.status(415).json({
+					detail: `unsupported image type: ${ct}. Allowed: jpeg, png, gif, webp`,
+				});
 				stream.resume();
 				req.unpipe(bb);
 				return;
@@ -398,12 +396,10 @@ export function accountRouter(state: AppState): Router {
 					"SELECT COUNT(*) as n FROM users WHERE role = 'master'",
 				)!.n;
 				if (masterCount <= 1) {
-					res
-						.status(409)
-						.json({
-							detail:
-								"cannot delete the only master account — promote another user first",
-						});
+					res.status(409).json({
+						detail:
+							"cannot delete the only master account — promote another user first",
+					});
 					return;
 				}
 			}

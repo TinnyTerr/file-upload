@@ -50,9 +50,9 @@ function UserSection({
 	const someSelected = keys.some((k) => selection.has(k.id));
 
 	const toggleAll = () => {
-		if (allSelected)
-			keys.forEach((k) => selection.has(k.id) && selection.toggle(k.id));
-		else keys.forEach((k) => !selection.has(k.id) && selection.toggle(k.id));
+		for (const k of keys) {
+			if (selection.has(k.id) === allSelected) selection.toggle(k.id);
+		}
 	};
 
 	return (
