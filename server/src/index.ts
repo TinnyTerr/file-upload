@@ -1,26 +1,26 @@
-import { loadSettings } from "./config.ts";
-import { createDb } from "./db/index.ts";
+import { createApp } from "./app.ts";
 import { createAppState } from "./appState.ts";
 import { ensureMaster } from "./bootstrap.ts";
-import { createApp } from "./app.ts";
-import { getLogger } from "./logging.ts";
-import { startBackendWorkers } from "./jobs/scheduler.ts";
-import { setupWebSockets } from "./ws.ts";
-import { joinCluster } from "./cluster/membership.ts";
-import { ClusterFirehoseConsumer } from "./cluster/firehoseClient.ts";
 import { initSelfState } from "./cluster/election.ts";
+import { ClusterFirehoseConsumer } from "./cluster/firehoseClient.ts";
+import { joinCluster } from "./cluster/membership.ts";
+import { loadSettings } from "./config.ts";
+import { createDb } from "./db/index.ts";
+import { startBackendWorkers } from "./jobs/scheduler.ts";
+import { getLogger } from "./logging.ts";
+import { setupWebSockets } from "./ws.ts";
 
 const log = getLogger("app.main");
 
 const settings = loadSettings();
 log.info(`application startup begin database_url=${settings.databaseUrl}`);
 if (settings.trustProxyMode !== "off") {
-  log.info(`trusting proxy headers mode=${settings.trustProxyMode}`);
+	log.info(`trusting proxy headers mode=${settings.trustProxyMode}`);
 }
 if (!settings.allowedHosts) {
-  log.warning(
-    "ALLOWED_HOSTS is not set -- WebAuthn relying-party ID is derived from the request's Origin header and the https redirect trusts proxy headers for any host. Set ALLOWED_HOSTS in data/app.env for production.",
-  );
+	log.warning(
+		"ALLOWED_HOSTS is not set -- WebAuthn relying-party ID is derived from the request's Origin header and the https redirect trusts proxy headers for any host. Set ALLOWED_HOSTS in data/app.env for production.",
+	);
 }
 const db = createDb(settings.databaseUrl);
 const state = createAppState(settings, db);
@@ -40,7 +40,9 @@ firehoseConsumer.start();
 // Non-master nodes bootstrap into the mesh from MASTER_URL/MASTER_TOKEN in
 // the background so a slow/unreachable master never blocks startup.
 void joinCluster(state).catch((err) => {
-  log.warning(`cluster auto-join failed: ${err instanceof Error ? err.message : String(err)}`);
+	log.warning(
+		`cluster auto-join failed: ${err instanceof Error ? err.message : String(err)}`,
+	);
 });
 
 const app = createApp(state);
@@ -50,6 +52,6 @@ const port = Number(process.env.PORT ?? 8000);
 // raw http.Server that app.listen() returns -- Express itself has no
 // websocket support.
 const server = app.listen(port, () => {
-  log.info(`fileupload server listening on :${port} (env=${settings.appEnv})`);
+	log.info(`fileupload server listening on :${port} (env=${settings.appEnv})`);
 });
 setupWebSockets(server, state);

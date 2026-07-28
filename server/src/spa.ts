@@ -8,7 +8,7 @@ const SPA_DIR = join(REPO_ROOT, "public");
 const SPA_INDEX = join(SPA_DIR, "index.html");
 
 export function renderSpa(meta = ""): string {
-  const html = readFileSync(SPA_INDEX, "utf-8");
-  if (meta) return html.replace("</head>", `${meta}\n</head>`);
-  return html;
+	const html = readFileSync(SPA_INDEX, "utf-8");
+	if (meta) return html.replace("</head>", `${meta}\n</head>`);
+	return html;
 }

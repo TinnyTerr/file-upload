@@ -1,15 +1,18 @@
 {
-  "name": "fileupload",
-  "private": true,
-  "version": "0.1.0",
-  "workspaces": [
-    "client",
-    "server"
-  ],
-  "scripts": {
-    "dev": "bun --cwd=server run dev & bun --cwd=client run dev & wait",
-    "build": "bun --cwd=client run build",
-    "start": "bun run build && bun --cwd=server run start",
-    "typecheck": "bun --cwd=client run typecheck && bun --cwd=server run typecheck"
-  }
+	"name": "fileupload",
+	"private": true,
+	"version": "0.1.0",
+	"workspaces": [
+		"client",
+		"server"
+	],
+	"scripts": {
+		"dev": "bun --cwd=server run dev & bun --cwd=client run dev & wait",
+		"build": "bun --cwd=client run build",
+		"start": "bun run build && bun --cwd=server run start",
+		"typecheck": "bun --cwd=client run typecheck && bun --cwd=server run typecheck"
+	},
+	"dependencies": {
+		"@biomejs/biome": "^2.5.6"
+	}
 }

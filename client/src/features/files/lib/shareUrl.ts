@@ -2,21 +2,21 @@ import type { EncryptionMode } from "../types";
 
 /** Absolute origin for building shareable links. */
 export function origin(): string {
-  return window.location.origin;
+	return window.location.origin;
 }
 
 export function fileUrl(slug: string): string {
-  return `${origin()}/file/${slug}`;
+	return `${origin()}/file/${slug}`;
 }
 
 /** The actual download endpoint (backend, under /api) -- distinct from
  * fileUrl(), which is the SPA page that shows this file's info. */
 export function rawUrl(slug: string): string {
-  return `${origin()}/api/file/${slug}/raw`;
+	return `${origin()}/api/file/${slug}/raw`;
 }
 
 export function folderUrl(slug: string): string {
-  return `${origin()}/d/${slug}`;
+	return `${origin()}/d/${slug}`;
 }
 
 /**
@@ -26,11 +26,13 @@ export function folderUrl(slug: string): string {
  *  - none        → bare URL
  */
 export function shareUrl(
-  base: string,
-  mode: EncryptionMode,
-  opts: { accessKey?: string | null; clientKeyB64?: string | null },
+	base: string,
+	mode: EncryptionMode,
+	opts: { accessKey?: string | null; clientKeyB64?: string | null },
 ): string {
-  if (mode === "server" && opts.accessKey) return `${base}?ek=${encodeURIComponent(opts.accessKey)}`;
-  if (mode === "client" && opts.clientKeyB64) return `${base}#ek=${opts.clientKeyB64}`;
-  return base;
+	if (mode === "server" && opts.accessKey)
+		return `${base}?ek=${encodeURIComponent(opts.accessKey)}`;
+	if (mode === "client" && opts.clientKeyB64)
+		return `${base}#ek=${opts.clientKeyB64}`;
+	return base;
 }

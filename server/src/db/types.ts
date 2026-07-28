@@ -1,7 +1,10 @@
-export type SqlParams = Record<string, string | number | bigint | boolean | null | Buffer>;
+export type SqlParams = Record<
+	string,
+	string | number | bigint | boolean | null | Buffer
+>;
 
 export interface Row {
-  [column: string]: unknown;
+	[column: string]: unknown;
 }
 
 /**
@@ -10,9 +13,9 @@ export interface Row {
  * this same interface and gets picked up by createDb() in index.ts.
  */
 export interface Db {
-  run(sql: string, params?: SqlParams): void;
-  get<T = Row>(sql: string, params?: SqlParams): T | undefined;
-  all<T = Row>(sql: string, params?: SqlParams): T[];
-  transaction<T>(fn: () => T): T;
-  close(): void;
+	run(sql: string, params?: SqlParams): void;
+	get<T = Row>(sql: string, params?: SqlParams): T | undefined;
+	all<T = Row>(sql: string, params?: SqlParams): T[];
+	transaction<T>(fn: () => T): T;
+	close(): void;
 }

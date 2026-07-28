@@ -7,34 +7,36 @@ type WsState = "connecting" | "open" | "closed";
  * accelerant only -- every login step's HTTP response is authoritative on
  * its own, so a blocked or flaky socket never breaks login. */
 export function useLoginConnection() {
-  const [connId, setConnId] = useState<string | null>(null);
-  const [wsState, setWsState] = useState<WsState>("connecting");
-  const wsRef = useRef<WebSocket | null>(null);
+	const [connId, setConnId] = useState<string | null>(null);
+	const [wsState, setWsState] = useState<WsState>("connecting");
+	const wsRef = useRef<WebSocket | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+	useEffect(() => {
+		let cancelled = false;
 
-    authService
-      .wsToken()
-      .then(({ conn_id }) => {
-        if (cancelled) return;
-        setConnId(conn_id);
-        const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-        const ws = new WebSocket(`${proto}//${window.location.host}/api/auth?conn_id=${conn_id}`);
-        wsRef.current = ws;
-        ws.onopen = () => !cancelled && setWsState("open");
-        ws.onclose = () => !cancelled && setWsState("closed");
-        ws.onerror = () => !cancelled && setWsState("closed");
-      })
-      .catch(() => {
-        if (!cancelled) setWsState("closed");
-      });
+		authService
+			.wsToken()
+			.then(({ conn_id }) => {
+				if (cancelled) return;
+				setConnId(conn_id);
+				const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+				const ws = new WebSocket(
+					`${proto}//${window.location.host}/api/auth?conn_id=${conn_id}`,
+				);
+				wsRef.current = ws;
+				ws.onopen = () => !cancelled && setWsState("open");
+				ws.onclose = () => !cancelled && setWsState("closed");
+				ws.onerror = () => !cancelled && setWsState("closed");
+			})
+			.catch(() => {
+				if (!cancelled) setWsState("closed");
+			});
 
-    return () => {
-      cancelled = true;
-      wsRef.current?.close();
-    };
-  }, []);
+		return () => {
+			cancelled = true;
+			wsRef.current?.close();
+		};
+	}, []);
 
-  return { connId, wsState };
+	return { connId, wsState };
 }
