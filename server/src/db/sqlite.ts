@@ -7,6 +7,38 @@ import type { Db, Row, SqlParams } from "./types.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+/** Strips `--` line comments. Comments are dropped before statement splitting
+ * because schema.sql's prose contains semicolons, which would otherwise look
+ * like statement terminators. A `--` inside a string literal is left alone. */
+function stripSqlComments(schema: string): string {
+	return schema
+		.split("\n")
+		.map((line) => {
+			const at = line.indexOf("--");
+			if (at === -1) return line;
+			// Odd quote count before the marker means we're inside a literal.
+			const quotes = (line.slice(0, at).match(/'/g) ?? []).length;
+			return quotes % 2 === 1 ? line : line.slice(0, at);
+		})
+		.join("\n");
+}
+
+/** Partitions schema.sql into its CREATE INDEX statements and everything else,
+ * so the two halves can straddle the ensureColumn backfills. Splitting on `;`
+ * is sound here because schema.sql holds only CREATE TABLE/INDEX statements --
+ * no triggers, and no string literal containing a semicolon. */
+function splitSchema(schema: string): { tables: string; indexes: string } {
+	const tables: string[] = [];
+	const indexes: string[] = [];
+	for (const raw of stripSqlComments(schema).split(";")) {
+		const statement = raw.trim();
+		if (!statement) continue;
+		const isIndex = /^CREATE\s+(UNIQUE\s+)?INDEX\b/i.test(statement);
+		(isIndex ? indexes : tables).push(`${statement};`);
+	}
+	return { tables: tables.join("\n"), indexes: indexes.join("\n") };
+}
+
 /** bun:sqlite adapter -- the default/only Db implementation for now. */
 export function createSqliteDb(path: string): Db {
 	if (path !== ":memory:") {
@@ -18,8 +50,14 @@ export function createSqliteDb(path: string): Db {
 		sqlite.exec("PRAGMA journal_mode = WAL;");
 	}
 
+	// Tables first, then the additive column backfills, then indexes. An index
+	// declared over a column that only exists via ensureColumn (e.g.
+	// ix_directories_is_library) would throw "no such column" on a database a
+	// previous version already created, because CREATE TABLE IF NOT EXISTS is a
+	// no-op there and the column only lands in the backfill pass below.
 	const schema = readFileSync(join(__dirname, "schema.sql"), "utf-8");
-	sqlite.exec(schema);
+	const { tables, indexes } = splitSchema(schema);
+	sqlite.exec(tables);
 
 	ensureColumn(
 		sqlite,
@@ -117,6 +155,8 @@ export function createSqliteDb(path: string): Db {
 		"fallback_reason",
 		"fallback_reason TEXT",
 	);
+
+	sqlite.exec(indexes);
 
 	return {
 		run(sql: string, params: SqlParams = {}) {
