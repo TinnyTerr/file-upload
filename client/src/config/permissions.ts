@@ -16,6 +16,7 @@ export const PERMISSION_FLAGS = [
 	"can_manage_api_keys",
 	"can_manage_cluster",
 	"can_use_torrents",
+	"can_watch_media",
 ] as const;
 
 export type PermissionFlag = (typeof PERMISSION_FLAGS)[number];
@@ -94,6 +95,13 @@ export const PERMISSION_META: PermissionMeta[] = [
 		label: "Torrent downloads",
 		description:
 			"Download torrents via the host's qBittorrent into their storage.",
+		group: "advanced",
+	},
+	{
+		key: "can_watch_media",
+		label: "Watch library",
+		description:
+			"Stream account-restricted media and mint playback keys for mpv.",
 		group: "advanced",
 	},
 	{

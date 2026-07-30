@@ -111,6 +111,9 @@ function purgeUserData(state: AppState, userId: number): Array<string | null> {
 	// both /account/reset and account deletion. Unlike credentials/permissions
 	// (see callers), there's no reason to keep it around across a reset.
 	db.run("DELETE FROM torrent_jobs WHERE owner_id = $id", { $id: userId });
+	// Play keys point at files that no longer exist after this, and they FK to
+	// users, so they have to go before the account row can be deleted.
+	db.run("DELETE FROM media_play_keys WHERE user_id = $id", { $id: userId });
 
 	return paths;
 }
@@ -218,6 +221,7 @@ export function accountRouter(state: AppState): Router {
 			can_manage_api_keys: !!perm.can_manage_api_keys,
 			can_manage_cluster: !!perm.can_manage_cluster,
 			can_use_torrents: !!perm.can_use_torrents,
+			can_watch_media: !!perm.can_watch_media,
 		});
 	});
 

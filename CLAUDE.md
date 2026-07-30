@@ -139,10 +139,14 @@ server/src/
     compress.ts            # zstd compress/decompress with zip-bomb guards
     zip.ts                 # safeArcname + memberSource (plaintext bytes for zip streaming)
     thumbnail.ts           # Cached JPEG thumbnails (sharp; ffmpeg for video frames)
+    streaming.ts           # Shared read path: peer fetch-on-miss + plaintext stream
+    mediaProbe.ts          # ffprobe backfill of content_blobs media_* columns
   cluster/                 # see "Cluster subsystem" above
   jobs/
     lifecycle.ts           # archive/unarchive cores + idle-archive/idle-delete/expiry/reconcile sweeps
     scheduler.ts           # setInterval registration for every background job
+  media/
+    playKeys.ts            # Sealed play-key tokens + DB revocation list + prune
   torrents/
     realdebrid.ts          # Real-Debrid REST 1.0 client (user, addMagnet/addTorrent, selectFiles,
                            #   info, delete, unrestrict) + RealDebridError with authFailed
@@ -167,7 +171,8 @@ client/src/
     torrents/              # Torrents page (add magnet/.torrent, live progress)
     cluster/               # Cluster dashboard (nodes, token, halts)
     admin/                 # Admin panel (users, files, keys, audit, storage, logs, torrents)
-    api-docs/              # Interactive API reference page
+    media/                 # Media library: poster grid, player, publish + play-key UI
+    api-docs/              # API reference page — renders docs/api.md fetched from /api/docs.md
   components/
     layout/                # Sidebar, settings modal (sessions tab), top bar
     ui/                    # Shared Radix-based design system components
@@ -180,6 +185,9 @@ client/src/
     permissions.ts         # Permission flags + UI metadata
   providers/               # QueryClient, DialogProvider, ThemeProvider, UploadProvider
 
+docs/
+  api.md                   # THE public API reference — single source; served raw at
+                           #   GET /api/docs.md and rendered by the /api-docs page
 public/                    # Built client output, served by Express
 data/                      # Runtime state: app.env, app.db, storage/, thumbnails/ (gitignored)
 ```
@@ -196,8 +204,9 @@ Every data endpoint lives under `/api/*` so it can never collide with an SPA cli
 | `/api/keys`, `/api/admin/keys` | `keys.ts` |
 | `/api/users`, `/api/audit`, `/api/admin` | `users.ts`, `audit.ts`, `admin.ts` |
 | `/api/torrents`, `/api/admin/torrents` | `torrents.ts` |
+| `/api/media` | `media.ts` — library browse, publish, stream, play keys |
 | `/api/cluster`, `/api/admin/cluster` | `cluster.ts` |
-| `/api` (self-prefixed paths) | `directories.ts`, `dropbox.ts`, `public.ts` (`/file/:slug*`), public folder routes (`/d/:slug*`) |
+| `/api` (self-prefixed paths) | `directories.ts`, `dropbox.ts`, `docs.ts` (`/docs.md`), `public.ts` (`/file/:slug*`), public folder routes (`/d/:slug*`) |
 
 ---
 
@@ -262,7 +271,7 @@ Failed logins feed `security/lockout.ts`, which counts per-username *and* per-IP
 
 Defined in `server/src/permissions.ts` (`BOOL_FLAGS`) and mirrored in `client/src/config/permissions.ts`:
 
-`can_upload` · `can_upload_client_encrypted` · `can_delete` · `can_regenerate_links` · `can_delete_links` · `can_create_directories` · `can_manage_lifecycle` · `can_use_api_keys` · `can_view_admin` · `can_manage_users` · `can_manage_storage` · `can_manage_api_keys` · `can_manage_cluster` · `can_use_torrents`
+`can_upload` · `can_upload_client_encrypted` · `can_delete` · `can_regenerate_links` · `can_delete_links` · `can_create_directories` · `can_manage_lifecycle` · `can_use_api_keys` · `can_view_admin` · `can_manage_users` · `can_manage_storage` · `can_manage_api_keys` · `can_manage_cluster` · `can_use_torrents` · `can_watch_media`
 
 Plus the non-boolean `quota_bytes`, `max_file_bytes`, `archive_after_idle_days`. `master` bypasses every check.
 
@@ -300,6 +309,37 @@ Notes:
 - `TORRENT_CONTENT_PATH` exists because the import reads files directly off disk, and qBittorrent's view of the download directory differs from this server's as soon as either side is containerized. Debrid jobs never need it: `importer.ts::localJobDir` branches on `provider` and returns our own staging root.
 - Everything (routes, poller, nav item) is inert unless a Real-Debrid token **or** `QBITTORRENT_URL` + `QBITTORRENT_SAVE_PATH` are set; the API answers 503 and the admin Torrents tab says so.
 
+### Media library
+
+Folders published with `directories.is_library` become browsable collections on
+`/watch`; their video/audio children are the playable titles. `library_visibility`
+is `public` (anyone, no account, like a share link) or `restricted` (an account
+holding `can_watch_media`; the owner and masters always qualify). `library_kind`
+picks the presentation — `movie` (one title) vs `series` (episode list).
+
+External players carry no session cookie, so restricted titles are also reachable
+with a **play key** (`media/playKeys.ts`): an AES-GCM sealed token appended to the
+stream URL as `?k=`, scoped to one file or one collection. Verification is a
+decrypt rather than a join (mpv issues a Range request per seek), with
+`media_play_keys` as the revocation list behind it.
+
+- **An unknown `jti` is rejected, not trusted.** That strictness is what makes the
+  `media_playkey_prune` job safe: it only deletes rows already past `expires_at`,
+  by which point the token is refused on expiry anyway, so a pruned revocation can
+  never revive a working key.
+- **Play keys are node-local**, like sessions. The token pins the minting node's
+  `NODE_ID`; presented to a peer it fails with a "wrong node" error rather than a
+  bare 401. `media_play_keys` is deliberately absent from `REPLICATED_TABLES`.
+- **Entitlement is re-checked per stream request**, not just at mint time, so
+  revoking `can_watch_media` kills outstanding keys immediately.
+- **Seeking depends on storage form.** An untransformed file is served with
+  `Accept-Ranges: bytes`; encrypted/compressed/archived titles are reproduced from
+  byte zero (`storage/streaming.ts`) and stream 200-only. `entries[].seekable`
+  tells the client which is which.
+- `content_blobs.media_width/height/duration_seconds` were never written by
+  anything until now — `storage/mediaProbe.ts` fills them via ffprobe at publish
+  time, keyed on the blob so dedup shares the result.
+
 ### Session management
 
 - The `sessions` row holds: `id` (the signed cookie's sid), `user_id`, `csrf_token`, `created_at`, `last_seen_at`, `expires_at`, `ip_address`, `user_agent`. 24-hour TTL.
@@ -325,11 +365,12 @@ Non-obvious rules that are easy to re-break. Each one has bitten this codebase a
 
 - **Wrap every `async` route handler in `asyncHandler`** (`middleware/asyncHandler.ts`). This is Express **4**, which does not await handlers — a rejected promise becomes an unhandled rejection and the request hangs forever with no response ever sent, rather than producing a 500.
 - **`express.json()` runs with an explicit 8 MB limit**, not the 100 KB default, because `POST /api/torrents` accepts base64 `.torrent` payloads up to 2 MiB (base64 inflates 4/3). Keep the limit above `MAX_TORRENT_FILE_BYTES * 4/3`.
-- **Deleting a user requires clearing every table that FKs to `users`** — `PRAGMA foreign_keys = ON` means a missed one throws instead of cascading. Currently: `permissions`, `sessions`, `credentials`, `files`, `directories`, `directory_collaborators` (both `user_id` and `invited_by_id`), `api_keys`, `dropbox_upload_links`, `remote_upload_jobs`, `torrent_jobs`, and `cluster_nodes.created_by_id`.
+- **Deleting a user requires clearing every table that FKs to `users`** — `PRAGMA foreign_keys = ON` means a missed one throws instead of cascading. Currently: `permissions`, `sessions`, `credentials`, `files`, `directories`, `directory_collaborators` (both `user_id` and `invited_by_id`), `api_keys`, `dropbox_upload_links`, `remote_upload_jobs`, `torrent_jobs`, `media_play_keys`, and `cluster_nodes.created_by_id`.
 - **`/account/reset` must not delete the user's `permissions` row** — that would silently reset an admin-assigned quota to the default. Reset purges *content*; only true account deletion purges identity.
 - **Decrypt/decompress order depends on the producer.** `archived && !compressed` is `ZSTD(ENC(x))` (decompress, then decrypt); every other compressed+encrypted combination is `ENC(ZSTD(x))` (decrypt, then decompress). `routes/public.ts` and `storage/zip.ts` both branch on this — keep them in sync.
 - **`TRUST_PROXY` must be set behind a TLS-terminating proxy.** Otherwise `req.protocol` stays `http` in prod and `httpsRedirect` 308s in an infinite loop.
 - **Anything added to `permissions` or `users` must also be added to `cluster/replication.ts`'s `TABLE_COLUMNS`**, or the column silently resets to its default on every peer during replication.
+- **A play key must never be trusted on a jti that isn't in `media_play_keys`.** Treating a missing row as valid would make the prune job a revocation-bypass.
 - **Deleting a file must also call `deleteThumbnail(fileId)`** — the thumbnail cache is keyed by file id and is not reference-counted.
 - **A debrid retry decides re-import vs. re-download by the `data/debrid/_sources/<tag>.complete` marker**, not by "the staging directory has files in it". A transfer aborted halfway also leaves files there, and importing those would silently store truncated content. The marker is written only after the last byte of the last link lands (`debrid.ts::markTransferComplete`), and lives outside the job directory so the importer never sees it as content.
 - **Real-Debrid file paths are attacker-controlled** (they come out of the torrent): `debrid.ts` runs every one through `sanitizeSegment` + `safeJoin` before creating anything.
@@ -346,6 +387,7 @@ Non-obvious rules that are easy to re-break. Each one has bitten this codebase a
 - Don't poll qBittorrent once per job — one list fetch per tick, grouped by tag
 - Don't gate Real-Debrid on `instantAvailability` — uncached torrents are supposed to go through it too
 - Don't `await` a Real-Debrid transfer inside the `torrent_poll` tick — it runs detached (`startDebridFetch`)
+- Don't write API reference content into `ApiDocsPage.tsx` — it renders `docs/api.md`; edit the markdown
 - Don't soft-delete API keys — hard delete them so they leave the admin panel immediately
 - Don't wrap `DropdownMenuTrigger`'s `asChild` button in a `Tooltip` — it breaks click events
 - Don't use `bg-brand-gradient/90` — opacity modifiers don't apply to CSS variable gradients

@@ -23,9 +23,11 @@ import {
 	directoriesRouter,
 	publicDirectoriesRouter,
 } from "./routes/directories.ts";
+import { docsRouter } from "./routes/docs.ts";
 import { dropboxRouter } from "./routes/dropbox.ts";
 import { adminFilesRouter, filesRouter, linksRouter } from "./routes/files.ts";
 import { adminKeysRouter, keysRouter } from "./routes/keys.ts";
+import { mediaRouter } from "./routes/media.ts";
 import { mfaRouter } from "./routes/mfa.ts";
 import { publicRouter } from "./routes/public.ts";
 import { remoteUploadRouter } from "./routes/remoteUpload.ts";
@@ -72,7 +74,9 @@ export function createApp(state: AppState): Express {
 	app.use("/api/admin/directories", adminDirectoriesRouter(state));
 	app.use("/api", directoriesRouter(state));
 	app.use("/api", dropboxRouter(state));
+	app.use("/api", docsRouter(state));
 	app.use("/api/admin", adminRouter(state));
+	app.use("/api/media", mediaRouter(state));
 	app.use("/api/torrents", torrentsRouter(state));
 	app.use("/api/admin/torrents", adminTorrentsRouter(state));
 	app.use("/api/cluster", clusterRouter(state));

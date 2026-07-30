@@ -27,6 +27,11 @@ export interface Directory {
 	expires_at: string | null;
 	created_at: string;
 	role: "owner" | "editor" | null;
+	/** Published into the media library — see features/media. */
+	is_library: boolean;
+	library_visibility: "public" | "restricted";
+	library_kind: "movie" | "series";
+	library_overview: string | null;
 }
 
 export interface DirectoryMember {

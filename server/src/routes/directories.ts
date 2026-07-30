@@ -186,6 +186,12 @@ function serializeDirectories(
 			expires_at: d.expires_at,
 			created_at: d.created_at,
 			role: user ? directoryRole(db, d, user) : null,
+			// Media library publication state, so the folder list can offer
+			// publish/unpublish without a second round trip (routes/media.ts).
+			is_library: !!d.is_library,
+			library_visibility: d.library_visibility,
+			library_kind: d.library_kind,
+			library_overview: d.library_overview,
 		};
 	});
 }

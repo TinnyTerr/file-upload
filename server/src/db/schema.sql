@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS permissions (
   can_manage_api_keys INTEGER NOT NULL DEFAULT 0,
   can_manage_cluster INTEGER NOT NULL DEFAULT 0,
   can_use_torrents INTEGER NOT NULL DEFAULT 0,
+  can_watch_media INTEGER NOT NULL DEFAULT 0,
   quota_bytes INTEGER NOT NULL DEFAULT 107374182400,
   max_file_bytes INTEGER NOT NULL DEFAULT 10737418240,
   archive_after_idle_days INTEGER NOT NULL DEFAULT 5,
@@ -94,9 +95,24 @@ CREATE TABLE IF NOT EXISTS directories (
   expires_at TEXT,
   hide_uploader INTEGER NOT NULL DEFAULT 0,
   saved_from_directory_id INTEGER,
+  -- Media library ("watch") publication. A folder flagged is_library becomes a
+  -- browsable collection whose video/audio children are its playable entries;
+  -- a single-video folder published as library_kind='movie' renders as one
+  -- title rather than an episode list.
+  is_library INTEGER NOT NULL DEFAULT 0,
+  -- 'public' (anyone, no login) or 'restricted' (an account holding
+  -- can_watch_media, the owner, or a master).
+  library_visibility TEXT NOT NULL DEFAULT 'restricted',
+  library_kind TEXT NOT NULL DEFAULT 'series',
+  library_overview TEXT,
+  -- A file in this folder used as cover art; NULL falls back to the first
+  -- playable entry's generated thumbnail.
+  library_poster_file_id INTEGER,
+  library_published_at TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_directories_slug ON directories(slug);
+CREATE INDEX IF NOT EXISTS ix_directories_is_library ON directories(is_library);
 CREATE INDEX IF NOT EXISTS ix_directories_owner_id ON directories(owner_id);
 
 CREATE TABLE IF NOT EXISTS files (
@@ -276,6 +292,40 @@ CREATE TABLE IF NOT EXISTS dropbox_upload_links (
 CREATE INDEX IF NOT EXISTS ix_dropbox_upload_links_owner_id ON dropbox_upload_links(owner_id);
 CREATE INDEX IF NOT EXISTS ix_dropbox_upload_links_target_directory_id ON dropbox_upload_links(target_directory_id);
 CREATE INDEX IF NOT EXISTS ix_dropbox_upload_links_token_hash ON dropbox_upload_links(token_hash);
+
+-- Playback keys for account-restricted media. The credential the client holds
+-- is a *sealed token* (crypto/secretbox.ts, AES-256-GCM under MASTER_KEY_B64)
+-- carrying jti/scope/user/expiry/node, so the stream endpoint validates it
+-- cryptographically without a lookup. This table is the revocation list that
+-- makes an already-issued token killable, plus the record the UI lists.
+--
+-- Lookup is strict: an unknown jti is rejected. That is what lets the prune
+-- job delete rows -- it only ever deletes rows whose `expires_at` has passed,
+-- by which point the sealed token is refused on expiry anyway, so a pruned
+-- revocation can never resurrect a working key.
+--
+-- Deliberately NOT replicated (like `sessions`): a key is minted by, used
+-- against, and revoked on one node. `node_id` records the minting node so a
+-- token presented elsewhere gets a "wrong node" error instead of a bare 401.
+CREATE TABLE IF NOT EXISTS media_play_keys (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  jti TEXT NOT NULL UNIQUE,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  -- Exactly one of these is set: a key scoped to one file, or to every
+  -- playable entry of one published collection.
+  file_id INTEGER REFERENCES files(id) ON DELETE CASCADE,
+  directory_id INTEGER REFERENCES directories(id) ON DELETE CASCADE,
+  label TEXT,
+  node_id TEXT NOT NULL DEFAULT '',
+  bound_ip TEXT,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_media_play_keys_jti ON media_play_keys(jti);
+CREATE INDEX IF NOT EXISTS ix_media_play_keys_user_id ON media_play_keys(user_id);
+CREATE INDEX IF NOT EXISTS ix_media_play_keys_expires_at ON media_play_keys(expires_at);
 
 CREATE TABLE IF NOT EXISTS cluster_nodes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

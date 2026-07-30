@@ -28,6 +28,7 @@ import {
 } from "../storage/accounting.ts";
 import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
 import { deleteThumbnail } from "../storage/thumbnail.ts";
+import { revokeUserPlayKeys } from "./media.ts";
 
 const log = getLogger("app.routes.users");
 
@@ -53,6 +54,7 @@ const MASTER_ALL_TRUE: PermissionFlag[] = [
 	"can_manage_api_keys",
 	"can_use_torrents",
 	"can_manage_cluster",
+	"can_watch_media",
 ];
 
 function serializePermissions(perm: PermissionRow) {
@@ -475,6 +477,9 @@ export function usersRouter(state: AppState): Router {
 				db.run("DELETE FROM torrent_jobs WHERE owner_id = $id", {
 					$id: userId,
 				});
+				db.run("DELETE FROM media_play_keys WHERE user_id = $id", {
+					$id: userId,
+				});
 				db.run(
 					"UPDATE cluster_nodes SET created_by_id = NULL WHERE created_by_id = $id",
 					{ $id: userId },
@@ -554,6 +559,13 @@ export function usersRouter(state: AppState): Router {
 							$userId: userId,
 						},
 					);
+				}
+				// Losing watch entitlement kills outstanding play keys. The stream
+				// endpoint re-checks entitlement per request anyway, so this is
+				// belt-and-braces -- but it also clears the now-dead keys out of the
+				// user's own list instead of leaving them there until expiry.
+				if (body.can_watch_media !== undefined && !body.can_watch_media) {
+					revokeUserPlayKeys(db, userId);
 				}
 				if (body.max_file_bytes !== undefined) {
 					db.run(

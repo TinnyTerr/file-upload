@@ -59,6 +59,49 @@ export function createSqliteDb(path: string): Db {
 		"can_use_torrents",
 		"can_use_torrents INTEGER NOT NULL DEFAULT 0",
 	);
+	ensureColumn(
+		sqlite,
+		"permissions",
+		"can_watch_media",
+		"can_watch_media INTEGER NOT NULL DEFAULT 0",
+	);
+	// Media library publication -- folders that predate it are unpublished.
+	ensureColumn(
+		sqlite,
+		"directories",
+		"is_library",
+		"is_library INTEGER NOT NULL DEFAULT 0",
+	);
+	ensureColumn(
+		sqlite,
+		"directories",
+		"library_visibility",
+		"library_visibility TEXT NOT NULL DEFAULT 'restricted'",
+	);
+	ensureColumn(
+		sqlite,
+		"directories",
+		"library_kind",
+		"library_kind TEXT NOT NULL DEFAULT 'series'",
+	);
+	ensureColumn(
+		sqlite,
+		"directories",
+		"library_overview",
+		"library_overview TEXT",
+	);
+	ensureColumn(
+		sqlite,
+		"directories",
+		"library_poster_file_id",
+		"library_poster_file_id INTEGER",
+	);
+	ensureColumn(
+		sqlite,
+		"directories",
+		"library_published_at",
+		"library_published_at TEXT",
+	);
 	// Existing torrent jobs predate Real-Debrid, so they are qBittorrent jobs.
 	ensureColumn(
 		sqlite,

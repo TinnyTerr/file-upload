@@ -18,6 +18,7 @@ export const BOOL_FLAGS = [
 	"can_manage_api_keys",
 	"can_manage_cluster",
 	"can_use_torrents",
+	"can_watch_media",
 ] as const;
 
 export type PermissionFlag = (typeof BOOL_FLAGS)[number];
@@ -45,8 +46,8 @@ export function ensurePermissions(
          user_id, can_upload, can_upload_client_encrypted, can_delete, can_regenerate_links,
          can_delete_links, can_create_directories, can_manage_lifecycle, can_use_api_keys,
          can_view_admin, can_manage_users, can_manage_storage, can_manage_api_keys, can_manage_cluster,
-         can_use_torrents, created_at
-       ) VALUES ($userId, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, $createdAt)`,
+         can_use_torrents, can_watch_media, created_at
+       ) VALUES ($userId, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, $createdAt)`,
 			{ $userId: userId, $createdAt: nowIso() },
 		);
 	} else {

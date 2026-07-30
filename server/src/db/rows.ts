@@ -46,6 +46,7 @@ export interface PermissionRow {
 	can_manage_api_keys: number;
 	can_manage_cluster: number;
 	can_use_torrents: number;
+	can_watch_media: number;
 	quota_bytes: number;
 	max_file_bytes: number;
 	archive_after_idle_days: number;
@@ -116,7 +117,28 @@ export interface DirectoryRow {
 	expires_at: string | null;
 	hide_uploader: number;
 	saved_from_directory_id: number | null;
+	is_library: number;
+	library_visibility: string;
+	library_kind: string;
+	library_overview: string | null;
+	library_poster_file_id: number | null;
+	library_published_at: string | null;
 	created_at: string;
+}
+
+export interface MediaPlayKeyRow {
+	id: number;
+	jti: string;
+	user_id: number;
+	file_id: number | null;
+	directory_id: number | null;
+	label: string | null;
+	node_id: string;
+	bound_ip: string | null;
+	expires_at: string;
+	revoked_at: string | null;
+	created_at: string;
+	last_used_at: string | null;
 }
 
 export interface LinkRow {

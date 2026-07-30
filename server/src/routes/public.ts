@@ -3,7 +3,6 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { type Request, type Response, Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
-import { fetchBlobFromPeers } from "../cluster/blobs.ts";
 import { touchBlobAccess } from "../cluster/cacheEviction.ts";
 import { getMasterKey } from "../config.ts";
 import { decryptStream } from "../crypto/aead.ts";
@@ -18,8 +17,12 @@ import { renderSpa } from "../spa.ts";
 import { fileHashes } from "../storage/blobs.ts";
 import { decompressStream } from "../storage/compress.ts";
 import { safeJoin, storageRoot } from "../storage/paths.ts";
+import {
+	decompressFromDecrypted,
+	decryptFromDecompressed,
+	ensureBlobAvailable,
+} from "../storage/streaming.ts";
 import { getOrCreateThumbnail } from "../storage/thumbnail.ts";
-import { writeStreamToFile } from "../storage/zip.ts";
 
 const log = getLogger("app.public");
 const CHUNK = 256 * 1024;
@@ -40,34 +43,6 @@ const SECURITY_HEADERS: Record<string, string> = {
 	"Referrer-Policy": "no-referrer",
 	"Content-Security-Policy": CSP,
 };
-
-/** Read-time cluster failover: if this file is a deduped, content-addressed
- * blob (blob_id set) and the local bytes are missing, try pulling them from
- * any active peer that still has them (see server/src/cluster/blobs.ts).
- * Best-effort and silent on failure -- the caller re-checks existsSync and
- * falls back to its usual "file missing from storage" 500. */
-async function ensureBlobAvailable(
-	state: AppState,
-	f: FileRow,
-	fullPath: string,
-): Promise<void> {
-	if (!f.blob_id) return;
-	const blob = state.db.get<{ stored_sha256: string; transform_key: string }>(
-		"SELECT stored_sha256, transform_key FROM content_blobs WHERE id = $id",
-		{ $id: f.blob_id },
-	);
-	if (!blob) return;
-	try {
-		await fetchBlobFromPeers(state, {
-			storedSha256: blob.stored_sha256,
-			transformKey: blob.transform_key,
-			dest: fullPath,
-			blobId: f.blob_id ?? undefined,
-		});
-	} catch {
-		// best-effort -- caller falls back to a 500 if this didn't help
-	}
-}
 
 function contentDisposition(filename: string): string {
 	const cleaned = [...filename]
@@ -619,49 +594,4 @@ export function publicRouter(state: AppState): Router {
 	});
 
 	return router;
-}
-
-async function* decompressFromDecrypted(
-	path: string,
-	originalSize: number,
-	key: Buffer,
-): AsyncGenerator<Buffer> {
-	// upload-time compression: stored as ENC(ZSTD(x)) -> decrypt, then decompress.
-	// decryptStream reads from disk directly; we can't decompress a live async
-	// generator with node:zlib's stream API, so stream through a temp file --
-	// writeStreamToFile honors backpressure instead of buffering the whole
-	// (potentially huge) file in memory before writing it out.
-	const { mkdtemp, unlink, rm } = await import("node:fs/promises");
-	const { tmpdir } = await import("node:os");
-	const { join } = await import("node:path");
-	const dir = await mkdtemp(join(tmpdir(), "fu-raw-"));
-	const tmp1 = join(dir, "step1");
-	try {
-		await writeStreamToFile(decryptStream(key, path), tmp1);
-		for await (const c of decompressStream(tmp1, originalSize)) yield c;
-	} finally {
-		await unlink(tmp1).catch(() => {});
-		await rm(dir, { recursive: true, force: true }).catch(() => {});
-	}
-}
-
-async function* decryptFromDecompressed(
-	path: string,
-	originalSize: number,
-	key: Buffer,
-): AsyncGenerator<Buffer> {
-	// archive job: stored as ZSTD(ENC(x)) -> decompress, then decrypt. Same
-	// streamed-through-a-temp-file approach as decompressFromDecrypted above.
-	const { mkdtemp, unlink, rm } = await import("node:fs/promises");
-	const { tmpdir } = await import("node:os");
-	const { join } = await import("node:path");
-	const dir = await mkdtemp(join(tmpdir(), "fu-raw-"));
-	const tmp1 = join(dir, "step1");
-	try {
-		await writeStreamToFile(decompressStream(path, originalSize), tmp1);
-		for await (const c of decryptStream(key, tmp1)) yield c;
-	} finally {
-		await unlink(tmp1).catch(() => {});
-		await rm(dir, { recursive: true, force: true }).catch(() => {});
-	}
 }

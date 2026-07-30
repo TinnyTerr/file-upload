@@ -1,5 +1,6 @@
 import {
 	BookText,
+	Clapperboard,
 	Download,
 	FolderUp,
 	KeyRound,
@@ -28,6 +29,13 @@ export const NAV_ITEMS: NavItem[] = [
 		icon: FolderUp,
 		description: "Upload, share and manage your files",
 		feature: "files",
+	},
+	{
+		label: "Library",
+		to: "/watch",
+		icon: Clapperboard,
+		description: "Browse and stream published media",
+		feature: "media",
 	},
 	{
 		label: "Torrents",

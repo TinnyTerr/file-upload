@@ -4,6 +4,7 @@ import { syncCheckJob } from "../cluster/digest.ts";
 import { checkMasterLivenessJob } from "../cluster/election.ts";
 import { heartbeatJob } from "../cluster/membership.ts";
 import { getLogger } from "../logging.ts";
+import { prunePlayKeys } from "../media/playKeys.ts";
 import { sweepStaleParts } from "../routes/files.ts";
 import { resetInterruptedImports, torrentPollJob } from "../torrents/poller.ts";
 import {
@@ -51,6 +52,13 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 			id: "sweep_stale_parts",
 			intervalMs: HOUR_MS,
 			run: () => sweepStaleParts(),
+		},
+		// Only deletes already-expired rows, so a revocation is never dropped
+		// while the token it kills could still be presented -- media/playKeys.ts.
+		{
+			id: "media_playkey_prune",
+			intervalMs: HOUR_MS,
+			run: () => prunePlayKeys(db),
 		},
 		{
 			id: "cluster_heartbeat",

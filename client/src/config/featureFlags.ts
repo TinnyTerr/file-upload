@@ -15,6 +15,7 @@ export const FEATURES = {
 	remoteUpload: true,
 	cluster: true,
 	torrents: true,
+	media: true,
 } as const;
 
 export type FeatureFlag = keyof typeof FEATURES;

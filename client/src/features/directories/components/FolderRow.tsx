@@ -1,5 +1,6 @@
 import {
 	ChevronDown,
+	Clapperboard,
 	ExternalLink,
 	Eye,
 	FilePlus,
@@ -39,6 +40,10 @@ import {
 } from "@/features/files/components/ShareModal";
 import { EncryptionBadge, iconForType } from "@/features/files/lib/fileMeta";
 import { folderUrl, shareUrl } from "@/features/files/lib/shareUrl";
+import {
+	type PublishTarget,
+	PublishToLibraryDialog,
+} from "@/features/media/components/PublishToLibraryDialog";
 import { formatBytes } from "@/lib/bytes";
 import { cn } from "@/lib/cn";
 import { useDialogs } from "@/providers/DialogProvider";
@@ -63,6 +68,9 @@ function extractClientKey(value: string): string {
 export function FolderRow({ dir }: { dir: Directory }) {
 	const [expanded, setExpanded] = useState(false);
 	const [linksOpen, setLinksOpen] = useState(false);
+	const [publishTarget, setPublishTarget] = useState<PublishTarget | null>(
+		null,
+	);
 	const [infoEntry, setInfoEntry] = useState<ShareEntry | null>(null);
 	const [unlockOpen, setUnlockOpen] = useState(false);
 	const [keyInput, setKeyInput] = useState("");
@@ -191,6 +199,33 @@ export function FolderRow({ dir }: { dir: Directory }) {
 									onClick={() => setLinksOpen(true)}
 								>
 									<Link2 />
+								</Button>
+							</Tooltip>
+						)}
+						{dir.role === "owner" && (
+							<Tooltip
+								content={
+									dir.is_library
+										? "Library settings"
+										: "Publish to the media library"
+								}
+							>
+								<Button
+									variant="ghost"
+									size="icon"
+									className={cn(dir.is_library && "text-primary")}
+									onClick={() =>
+										setPublishTarget({
+											directoryId: dir.id,
+											title: dir.title,
+											isPublished: dir.is_library,
+											visibility: dir.library_visibility,
+											kind: dir.library_kind,
+											overview: dir.library_overview,
+										})
+									}
+								>
+									<Clapperboard />
 								</Button>
 							</Tooltip>
 						)}
@@ -323,11 +358,25 @@ export function FolderRow({ dir }: { dir: Directory }) {
 					</span>
 					<EncryptionBadge mode={dir.encryption_mode} />
 					{dir.role === "editor" && <Badge variant="secondary">shared</Badge>}
+					{dir.is_library && (
+						<Badge variant="outline" className="gap-1">
+							<Clapperboard className="size-3" />
+							{dir.library_visibility === "public" ? "Public" : "Library"}
+						</Badge>
+					)}
 				</div>
 				<p className="mt-0.5 text-xs text-muted-foreground">
 					{dir.file_count} files · {formatBytes(dir.total_bytes)}
 				</p>
 			</ListRow>
+
+			<PublishToLibraryDialog
+				target={publishTarget}
+				open={publishTarget !== null}
+				onOpenChange={(o) => {
+					if (!o) setPublishTarget(null);
+				}}
+			/>
 
 			<FolderLinksModal
 				open={linksOpen}

@@ -178,6 +178,49 @@ export function getUploadUser(state: AppState): RequestHandler {
 	};
 }
 
+/** Read-only sibling of getUploadUser: Bearer API key OR session cookie, with
+ * no permission and no CSRF check. Safe to use on GETs only -- CSRF exists to
+ * stop cross-site *writes*, and demanding the header here would lock out plain
+ * `fetch`/curl callers that legitimately hold a session. */
+export function requireReadUser(state: AppState): RequestHandler {
+	return (req: Request, res: Response, next: NextFunction): void => {
+		const db = state.db;
+		const authHeader = req.header("authorization") ?? "";
+		if (authHeader.startsWith("Bearer ")) {
+			const apiKey = resolveApiKey(state, req, res);
+			if (!apiKey) return;
+			const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
+				$id: apiKey.owner_id,
+			});
+			if (!user || user.must_change_credentials) {
+				res.status(401).json({ detail: "invalid api key owner" });
+				return;
+			}
+			req.apiKey = apiKey;
+			req.currentUser = user;
+			next();
+			return;
+		}
+
+		const cookieValue = req.cookies?.[COOKIE_NAME] as string | undefined;
+		const row = state.sessionManager.resolve(db, cookieValue);
+		if (!row) {
+			res.status(401).json({ detail: "not authenticated" });
+			return;
+		}
+		const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
+			$id: row.user_id,
+		});
+		if (!user || user.must_change_credentials) {
+			res.status(401).json({ detail: "not authenticated" });
+			return;
+		}
+		req.sessionRow = row;
+		req.currentUser = user;
+		next();
+	};
+}
+
 /** Mirrors app/deps.py::require_api_key (Bearer-only auth). */
 export function requireApiKey(state: AppState): RequestHandler {
 	return (req: Request, res: Response, next: NextFunction): void => {

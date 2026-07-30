@@ -52,6 +52,21 @@ const TorrentsPage = lazy(() =>
 		default: m.TorrentsPage,
 	})),
 );
+const WatchLayout = lazy(() =>
+	import("@/features/media/components/WatchLayout").then((m) => ({
+		default: m.WatchLayout,
+	})),
+);
+const MediaPage = lazy(() =>
+	import("@/features/media/components/MediaPage").then((m) => ({
+		default: m.MediaPage,
+	})),
+);
+const CollectionPage = lazy(() =>
+	import("@/features/media/components/CollectionPage").then((m) => ({
+		default: m.CollectionPage,
+	})),
+);
 const ClusterPage = lazy(() =>
 	import("@/features/cluster/components/ClusterPage").then((m) => ({
 		default: m.ClusterPage,
@@ -127,6 +142,21 @@ export default function App() {
 						</PublicShell>
 					}
 				/>
+
+				{/* The media library: its own layout, because public collections have
+				    to render for signed-out visitors while signed-in users still get
+				    the app chrome. Per-collection entitlement is enforced server-side. */}
+				<Route
+					path="/watch"
+					element={
+						<Gated feature="media" label="Media library">
+							<WatchLayout />
+						</Gated>
+					}
+				>
+					<Route index element={<MediaPage />} />
+					<Route path=":slug" element={<CollectionPage />} />
+				</Route>
 
 				{/* App chrome layout — all children require auth */}
 				<Route element={<AppShell />}>
