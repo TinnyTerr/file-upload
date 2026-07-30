@@ -192,3 +192,6 @@ server.log
 /data/
 public/
 node_modules/
+# Claude Code local state
+.claude/settings.local.json
+.claude/worktrees/

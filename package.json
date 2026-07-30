@@ -10,7 +10,8 @@
 		"dev": "bun --cwd=server run dev & bun --cwd=client run dev & wait",
 		"build": "bun --cwd=client run build",
 		"start": "bun run build && bun --cwd=server run start",
-		"typecheck": "bun --cwd=client run typecheck && bun --cwd=server run typecheck"
+		"typecheck": "bun --cwd=client run typecheck && bun --cwd=server run typecheck",
+		"doctor": "npx react-doctor@latest"
 	},
 	"dependencies": {
 		"@biomejs/biome": "^2.5.6"
