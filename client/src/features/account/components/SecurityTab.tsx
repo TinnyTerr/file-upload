@@ -37,27 +37,16 @@ function TotpSetupModal({
 		qc.invalidateQueries({ queryKey: MFA_KEY });
 		toast.success("Authenticator app added");
 	});
-	const [code, setCode] = useState("");
-	const [label, setLabel] = useState("");
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: deliberately keyed on `open` alone -- this runs the open/close transition. start()/reset() are re-created every render and start() advances state.step, so adding them loops.
 	React.useEffect(() => {
 		if (open && state.step === "idle") void start();
-		if (!open) {
-			reset();
-			setCode("");
-			setLabel("");
-		}
+		if (!open) reset();
 	}, [open]);
 
 	React.useEffect(() => {
 		if (state.step === "done") onOpenChange(false);
 	}, [state.step, onOpenChange]);
-
-	const handleSubmit = (e: React.FormEvent) => {
-		e.preventDefault();
-		void confirm(code, label);
-	};
 
 	return (
 		<SubModal
@@ -66,59 +55,91 @@ function TotpSetupModal({
 			title="Set up authenticator app"
 		>
 			{(state.step === "secret-issued" || state.step === "confirming") && (
-				<form onSubmit={handleSubmit} className="space-y-4">
-					<p className="text-sm text-muted-foreground">
-						Scan this QR code with your authenticator app, then enter the
-						6-digit code it shows.
-					</p>
-					<div className="flex justify-center">
-						<QRCode value={state.otpauthUrl} size={180} />
-					</div>
-					<p className="break-all rounded-md bg-secondary/40 px-3 py-2 text-center font-mono text-xs text-muted-foreground">
-						{state.secret}
-					</p>
-					<div className="space-y-1.5">
-						<Label>Label (optional)</Label>
-						<Input
-							value={label}
-							onChange={(e) => setLabel(e.target.value)}
-							placeholder="Phone"
-						/>
-					</div>
-					<div className="space-y-1.5">
-						<Label>6-digit code</Label>
-						<Input
-							value={code}
-							onChange={(e) =>
-								setCode(e.target.value.replace(/\D/g, "").slice(0, 6))
-							}
-							inputMode="numeric"
-							autoComplete="one-time-code"
-							placeholder="123456"
-							required
-						/>
-					</div>
-					{error && <ErrorMsg message={error} />}
-					<div className="flex justify-end gap-2">
-						<Button
-							type="button"
-							variant="ghost"
-							onClick={() => onOpenChange(false)}
-						>
-							Cancel
-						</Button>
-						<Button
-							type="submit"
-							loading={state.step === "confirming"}
-							disabled={code.length !== 6}
-						>
-							Confirm
-						</Button>
-					</div>
-				</form>
+				// Mounted only while open, so the code/label fields start blank every time.
+				<TotpSetupForm
+					otpauthUrl={state.otpauthUrl}
+					secret={state.secret}
+					confirming={state.step === "confirming"}
+					error={error}
+					onConfirm={confirm}
+					onOpenChange={onOpenChange}
+				/>
 			)}
 			{state.step === "idle" && error && <ErrorMsg message={error} />}
 		</SubModal>
+	);
+}
+
+function TotpSetupForm({
+	otpauthUrl,
+	secret,
+	confirming,
+	error,
+	onConfirm,
+	onOpenChange,
+}: {
+	otpauthUrl: string;
+	secret: string;
+	confirming: boolean;
+	error: string | null;
+	onConfirm: (code: string, label: string) => void;
+	onOpenChange: (v: boolean) => void;
+}) {
+	const [code, setCode] = useState("");
+	const [label, setLabel] = useState("");
+
+	const handleSubmit = (e: React.FormEvent) => {
+		e.preventDefault();
+		void onConfirm(code, label);
+	};
+
+	return (
+		<form onSubmit={handleSubmit} className="space-y-4">
+			<p className="text-sm text-muted-foreground">
+				Scan this QR code with your authenticator app, then enter the 6-digit
+				code it shows.
+			</p>
+			<div className="flex justify-center">
+				<QRCode value={otpauthUrl} size={180} />
+			</div>
+			<p className="break-all rounded-md bg-secondary/40 px-3 py-2 text-center font-mono text-xs text-muted-foreground">
+				{secret}
+			</p>
+			<div className="space-y-1.5">
+				<Label>Label (optional)</Label>
+				<Input
+					value={label}
+					onChange={(e) => setLabel(e.target.value)}
+					placeholder="Phone"
+				/>
+			</div>
+			<div className="space-y-1.5">
+				<Label>6-digit code</Label>
+				<Input
+					value={code}
+					onChange={(e) =>
+						setCode(e.target.value.replace(/\D/g, "").slice(0, 6))
+					}
+					inputMode="numeric"
+					autoComplete="one-time-code"
+					placeholder="123456"
+					required
+				/>
+			</div>
+			{error && <ErrorMsg message={error} />}
+			<div className="flex justify-end gap-2">
+				<Button
+					type="button"
+					variant="ghost"
+					onClick={() => onOpenChange(false)}
+				>
+					Cancel
+				</Button>
+				<Button type="submit" loading={confirming} disabled={code.length !== 6}>
+					Confirm
+				</Button>
+			</div>
+		</form>
 	);
 }
 
@@ -130,52 +151,71 @@ function PasskeyAddModal({
 	onOpenChange: (v: boolean) => void;
 }) {
 	const qc = useQueryClient();
-	const [label, setLabel] = useState("");
 	const { register, submitting, error } = usePasskeyEnrollment(() => {
 		qc.invalidateQueries({ queryKey: MFA_KEY });
 		toast.success("Passkey added");
 		onOpenChange(false);
 	});
 
-	React.useEffect(() => {
-		if (!open) setLabel("");
-	}, [open]);
+	return (
+		<SubModal open={open} onOpenChange={onOpenChange} title="Add a passkey">
+			{/* Mounted only while open, so the label field starts blank every time. */}
+			<PasskeyAddForm
+				submitting={submitting}
+				error={error}
+				onRegister={register}
+				onOpenChange={onOpenChange}
+			/>
+		</SubModal>
+	);
+}
+
+function PasskeyAddForm({
+	submitting,
+	error,
+	onRegister,
+	onOpenChange,
+}: {
+	submitting: boolean;
+	error: string | null;
+	onRegister: (label?: string) => void;
+	onOpenChange: (v: boolean) => void;
+}) {
+	const [label, setLabel] = useState("");
 
 	const handleSubmit = (e: React.FormEvent) => {
 		e.preventDefault();
-		void register(label || undefined);
+		void onRegister(label || undefined);
 	};
 
 	return (
-		<SubModal open={open} onOpenChange={onOpenChange} title="Add a passkey">
-			<form onSubmit={handleSubmit} className="space-y-4">
-				<p className="text-sm text-muted-foreground">
-					Your browser will prompt you to use a fingerprint, face scan, security
-					key, or device PIN.
-				</p>
-				<div className="space-y-1.5">
-					<Label>Label (optional)</Label>
-					<Input
-						value={label}
-						onChange={(e) => setLabel(e.target.value)}
-						placeholder="Laptop"
-					/>
-				</div>
-				{error && <ErrorMsg message={error} />}
-				<div className="flex justify-end gap-2">
-					<Button
-						type="button"
-						variant="ghost"
-						onClick={() => onOpenChange(false)}
-					>
-						Cancel
-					</Button>
-					<Button type="submit" loading={submitting}>
-						Continue
-					</Button>
-				</div>
-			</form>
-		</SubModal>
+		<form onSubmit={handleSubmit} className="space-y-4">
+			<p className="text-sm text-muted-foreground">
+				Your browser will prompt you to use a fingerprint, face scan, security
+				key, or device PIN.
+			</p>
+			<div className="space-y-1.5">
+				<Label>Label (optional)</Label>
+				<Input
+					value={label}
+					onChange={(e) => setLabel(e.target.value)}
+					placeholder="Laptop"
+				/>
+			</div>
+			{error && <ErrorMsg message={error} />}
+			<div className="flex justify-end gap-2">
+				<Button
+					type="button"
+					variant="ghost"
+					onClick={() => onOpenChange(false)}
+				>
+					Cancel
+				</Button>
+				<Button type="submit" loading={submitting}>
+					Continue
+				</Button>
+			</div>
+		</form>
 	);
 }
 

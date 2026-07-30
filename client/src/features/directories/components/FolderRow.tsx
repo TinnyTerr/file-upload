@@ -76,9 +76,10 @@ export function FolderRow({ dir }: { dir: Directory }) {
 	const [keyInput, setKeyInput] = useState("");
 	const [keyError, setKeyError] = useState<string | null>(null);
 	const [unlocking, setUnlocking] = useState(false);
-	const [clientKey, setClientKey] = useState<Uint8Array | null>(null);
+	// Neither is rendered — `clientKeyB64` (set alongside the key) drives the UI.
+	const clientKey = useRef<Uint8Array | null>(null);
 	const [clientKeyB64, setClientKeyB64] = useState<string | null>(null);
-	const [pendingFiles, setPendingFiles] = useState<File[] | null>(null);
+	const pendingFiles = useRef<File[] | null>(null);
 	const [previewMember, setPreviewMember] = useState<DirectoryMember | null>(
 		null,
 	);
@@ -117,8 +118,8 @@ export function FolderRow({ dir }: { dir: Directory }) {
 	};
 
 	const openAddFiles = () => {
-		if (dir.encryption_mode === "client" && !clientKey) {
-			setPendingFiles(null);
+		if (dir.encryption_mode === "client" && !clientKey.current) {
+			pendingFiles.current = null;
 			setUnlockOpen(true);
 			return;
 		}
@@ -127,12 +128,12 @@ export function FolderRow({ dir }: { dir: Directory }) {
 
 	const onFilesSelected = (files: File[]) => {
 		if (!files.length) return;
-		if (dir.encryption_mode === "client" && !clientKey) {
-			setPendingFiles(files);
+		if (dir.encryption_mode === "client" && !clientKey.current) {
+			pendingFiles.current = files;
 			setUnlockOpen(true);
 			return;
 		}
-		addFiles(files, clientKey ?? undefined);
+		addFiles(files, clientKey.current ?? undefined);
 	};
 
 	const unlockFolder = async () => {
@@ -147,14 +148,14 @@ export function FolderRow({ dir }: { dir: Directory }) {
 		try {
 			const normalized = extractClientKey(keyInput);
 			const key = await verifyFolderKey(normalized, dir.key_check_blob);
-			setClientKey(key);
+			clientKey.current = key;
 			setClientKeyB64(normalized);
 			setKeyInput("");
 			setUnlockOpen(false);
-			if (pendingFiles?.length) {
-				const files = pendingFiles;
-				setPendingFiles(null);
-				addFiles(files, key);
+			const queued = pendingFiles.current;
+			if (queued?.length) {
+				pendingFiles.current = null;
+				addFiles(queued, key);
 			}
 		} catch (err) {
 			setKeyError(err instanceof Error ? err.message : "Invalid folder key.");
@@ -400,7 +401,7 @@ export function FolderRow({ dir }: { dir: Directory }) {
 				onOpenChange={(o) => {
 					setUnlockOpen(o);
 					if (!o) {
-						setPendingFiles(null);
+						pendingFiles.current = null;
 						setKeyError(null);
 					}
 				}}

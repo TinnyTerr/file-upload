@@ -21,7 +21,7 @@ import {
 	User as UserIcon,
 	X,
 } from "lucide-react";
-import * as React from "react";
+import type * as React from "react";
 import { useCallback, useRef, useState } from "react";
 import type { Area } from "react-easy-crop";
 import Cropper from "react-easy-crop";
@@ -175,19 +175,24 @@ function ChangeUsernameModal({
 	open: boolean;
 	onOpenChange: (v: boolean) => void;
 }) {
+	return (
+		<SubModal open={open} onOpenChange={onOpenChange} title="Change Username">
+			{/* Mounted only while open, so the form starts blank every time. */}
+			<ChangeUsernameForm onOpenChange={onOpenChange} />
+		</SubModal>
+	);
+}
+
+function ChangeUsernameForm({
+	onOpenChange,
+}: {
+	onOpenChange: (v: boolean) => void;
+}) {
 	const { user, refresh } = useAuth();
 	const [username, setUsername] = useState(user?.username ?? "");
 	const [currentPassword, setCurrentPassword] = useState("");
 	const [submitting, setSubmitting] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-
-	React.useEffect(() => {
-		if (open) {
-			setUsername(user?.username ?? "");
-			setCurrentPassword("");
-			setError(null);
-		}
-	}, [open, user?.username]);
 
 	const handleSubmit = async (e: React.FormEvent) => {
 		e.preventDefault();
@@ -214,43 +219,41 @@ function ChangeUsernameModal({
 	};
 
 	return (
-		<SubModal open={open} onOpenChange={onOpenChange} title="Change Username">
-			<form onSubmit={handleSubmit} className="space-y-4">
-				<div className="space-y-1.5">
-					<Label htmlFor="cun-new">New username</Label>
-					<Input
-						id="cun-new"
-						autoComplete="username"
-						value={username}
-						onChange={(e) => setUsername(e.target.value)}
-						required
-					/>
-				</div>
-				<div className="space-y-1.5">
-					<Label htmlFor="cun-pw">Current password (to confirm)</Label>
-					<PasswordInput
-						id="cun-pw"
-						autoComplete="current-password"
-						value={currentPassword}
-						onChange={(e) => setCurrentPassword(e.target.value)}
-						required
-					/>
-				</div>
-				{error && <ErrorMsg message={error} />}
-				<div className="flex justify-end gap-2 pt-1">
-					<Button
-						type="button"
-						variant="ghost"
-						onClick={() => onOpenChange(false)}
-					>
-						Cancel
-					</Button>
-					<Button type="submit" loading={submitting}>
-						Save
-					</Button>
-				</div>
-			</form>
-		</SubModal>
+		<form onSubmit={handleSubmit} className="space-y-4">
+			<div className="space-y-1.5">
+				<Label htmlFor="cun-new">New username</Label>
+				<Input
+					id="cun-new"
+					autoComplete="username"
+					value={username}
+					onChange={(e) => setUsername(e.target.value)}
+					required
+				/>
+			</div>
+			<div className="space-y-1.5">
+				<Label htmlFor="cun-pw">Current password (to confirm)</Label>
+				<PasswordInput
+					id="cun-pw"
+					autoComplete="current-password"
+					value={currentPassword}
+					onChange={(e) => setCurrentPassword(e.target.value)}
+					required
+				/>
+			</div>
+			{error && <ErrorMsg message={error} />}
+			<div className="flex justify-end gap-2 pt-1">
+				<Button
+					type="button"
+					variant="ghost"
+					onClick={() => onOpenChange(false)}
+				>
+					Cancel
+				</Button>
+				<Button type="submit" loading={submitting}>
+					Save
+				</Button>
+			</div>
+		</form>
 	);
 }
 
@@ -267,21 +270,25 @@ function ChangePasswordModal({
 	open: boolean;
 	onOpenChange: (v: boolean) => void;
 }) {
+	return (
+		<SubModal open={open} onOpenChange={onOpenChange} title="Change Password">
+			{/* Mounted only while open, so the form starts blank every time. */}
+			<ChangePasswordForm onOpenChange={onOpenChange} />
+		</SubModal>
+	);
+}
+
+function ChangePasswordForm({
+	onOpenChange,
+}: {
+	onOpenChange: (v: boolean) => void;
+}) {
 	const { user, refresh } = useAuth();
 	const [cur, setCur] = useState("");
 	const [next, setNext] = useState("");
 	const [confirm, setConfirm] = useState("");
 	const [submitting, setSubmitting] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-
-	React.useEffect(() => {
-		if (open) {
-			setCur("");
-			setNext("");
-			setConfirm("");
-			setError(null);
-		}
-	}, [open]);
 
 	const handleSubmit = async (e: React.FormEvent) => {
 		e.preventDefault();
@@ -314,56 +321,54 @@ function ChangePasswordModal({
 	};
 
 	return (
-		<SubModal open={open} onOpenChange={onOpenChange} title="Change Password">
-			<form onSubmit={handleSubmit} className="space-y-4">
-				<div className="space-y-1.5">
-					<Label htmlFor="cpw-cur">Current password</Label>
-					<PasswordInput
-						id="cpw-cur"
-						autoComplete="current-password"
-						value={cur}
-						onChange={(e) => setCur(e.target.value)}
-						required
-					/>
-				</div>
-				<div className="space-y-1.5">
-					<Label htmlFor="cpw-new">New password</Label>
-					<PasswordInput
-						id="cpw-new"
-						autoComplete="new-password"
-						value={next}
-						onChange={(e) => setNext(e.target.value)}
-						required
-					/>
-				</div>
-				<div className="space-y-1.5">
-					<Label htmlFor="cpw-con">Confirm new password</Label>
-					<PasswordInput
-						id="cpw-con"
-						autoComplete="new-password"
-						value={confirm}
-						onChange={(e) => setConfirm(e.target.value)}
-						required
-					/>
-				</div>
-				<p className="text-xs text-muted-foreground">
-					Minimum {MIN_PW} characters.
-				</p>
-				{error && <ErrorMsg message={error} />}
-				<div className="flex justify-end gap-2 pt-1">
-					<Button
-						type="button"
-						variant="ghost"
-						onClick={() => onOpenChange(false)}
-					>
-						Cancel
-					</Button>
-					<Button type="submit" loading={submitting}>
-						Save
-					</Button>
-				</div>
-			</form>
-		</SubModal>
+		<form onSubmit={handleSubmit} className="space-y-4">
+			<div className="space-y-1.5">
+				<Label htmlFor="cpw-cur">Current password</Label>
+				<PasswordInput
+					id="cpw-cur"
+					autoComplete="current-password"
+					value={cur}
+					onChange={(e) => setCur(e.target.value)}
+					required
+				/>
+			</div>
+			<div className="space-y-1.5">
+				<Label htmlFor="cpw-new">New password</Label>
+				<PasswordInput
+					id="cpw-new"
+					autoComplete="new-password"
+					value={next}
+					onChange={(e) => setNext(e.target.value)}
+					required
+				/>
+			</div>
+			<div className="space-y-1.5">
+				<Label htmlFor="cpw-con">Confirm new password</Label>
+				<PasswordInput
+					id="cpw-con"
+					autoComplete="new-password"
+					value={confirm}
+					onChange={(e) => setConfirm(e.target.value)}
+					required
+				/>
+			</div>
+			<p className="text-xs text-muted-foreground">
+				Minimum {MIN_PW} characters.
+			</p>
+			{error && <ErrorMsg message={error} />}
+			<div className="flex justify-end gap-2 pt-1">
+				<Button
+					type="button"
+					variant="ghost"
+					onClick={() => onOpenChange(false)}
+				>
+					Cancel
+				</Button>
+				<Button type="submit" loading={submitting}>
+					Save
+				</Button>
+			</div>
+		</form>
 	);
 }
 
@@ -434,18 +439,20 @@ function CropModal({
 }) {
 	const [crop, setCrop] = useState({ x: 0, y: 0 });
 	const [zoom, setZoom] = useState(1);
-	const [croppedAreaPixels, setCroppedAreaPixels] = useState<Area | null>(null);
+	// Only read when Apply is pressed — a ref keeps every crop drag from re-rendering.
+	const croppedAreaPixels = useRef<Area | null>(null);
 	const [processing, setProcessing] = useState(false);
 
 	const onCropComplete = useCallback((_: Area, pixels: Area) => {
-		setCroppedAreaPixels(pixels);
+		croppedAreaPixels.current = pixels;
 	}, []);
 
 	const handleApply = async () => {
-		if (!croppedAreaPixels) return;
+		const pixels = croppedAreaPixels.current;
+		if (!pixels) return;
 		setProcessing(true);
 		try {
-			const blob = await getCroppedBlob(imageSrc, croppedAreaPixels);
+			const blob = await getCroppedBlob(imageSrc, pixels);
 			onCropped(blob);
 			onOpenChange(false);
 		} finally {
@@ -480,9 +487,15 @@ function CropModal({
 
 			{/* Zoom slider */}
 			<div className="mt-4 flex items-center gap-3">
-				<span className="text-xs text-muted-foreground w-8 shrink-0">Zoom</span>
+				<span
+					className="text-xs text-muted-foreground w-8 shrink-0"
+					id="crop-zoom-label"
+				>
+					Zoom
+				</span>
 				<input
 					type="range"
+					aria-labelledby="crop-zoom-label"
 					min={1}
 					max={3}
 					step={0.01}
@@ -518,7 +531,8 @@ function ProfileTab() {
 	const [rawSrc, setRawSrc] = useState<string | null>(null);
 	const [cropOpen, setCropOpen] = useState(false);
 	const [preview, setPreview] = useState<string | null>(null);
-	const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
+	// Never rendered — `preview` (the object URL) is what the UI keys off.
+	const previewBlob = useRef<Blob | null>(null);
 	const [uploading, setUploading] = useState(false);
 	const [removing, setRemoving] = useState(false);
 	const [error, setError] = useState<string | null>(null);
@@ -555,19 +569,20 @@ function ProfileTab() {
 	};
 
 	const handleCropped = (blob: Blob) => {
-		setPreviewBlob(blob);
+		previewBlob.current = blob;
 		setPreview(URL.createObjectURL(blob));
 	};
 
 	const handleUpload = async () => {
-		if (!previewBlob) return;
+		const blob = previewBlob.current;
+		if (!blob) return;
 		setUploading(true);
 		setError(null);
 		try {
-			await accountService.uploadAvatar(previewBlob);
+			await accountService.uploadAvatar(blob);
 			setAvatarVersion(Date.now());
 			setPreview(null);
-			setPreviewBlob(null);
+			previewBlob.current = null;
 			await refresh();
 			toast.success("Profile photo updated");
 		} catch (err) {
@@ -584,7 +599,7 @@ function ProfileTab() {
 			await accountService.deleteAvatar();
 			setAvatarVersion(Date.now());
 			setPreview(null);
-			setPreviewBlob(null);
+			previewBlob.current = null;
 			await refresh();
 			toast.success("Profile photo removed");
 		} catch (err) {
@@ -830,16 +845,33 @@ function DangerConfirmModal({
 	confirmLabel: string;
 	onConfirm: (password: string) => Promise<void>;
 }) {
+	return (
+		<SubModal open={open} onOpenChange={onOpenChange} title={title}>
+			{/* Mounted only while open, so the password field starts blank every time. */}
+			<DangerConfirmForm
+				description={description}
+				confirmLabel={confirmLabel}
+				onConfirm={onConfirm}
+				onOpenChange={onOpenChange}
+			/>
+		</SubModal>
+	);
+}
+
+function DangerConfirmForm({
+	description,
+	confirmLabel,
+	onConfirm,
+	onOpenChange,
+}: {
+	description: string;
+	confirmLabel: string;
+	onConfirm: (password: string) => Promise<void>;
+	onOpenChange: (v: boolean) => void;
+}) {
 	const [pw, setPw] = useState("");
 	const [submitting, setSubmitting] = useState(false);
 	const [error, setError] = useState<string | null>(null);
-
-	React.useEffect(() => {
-		if (open) {
-			setPw("");
-			setError(null);
-		}
-	}, [open]);
 
 	const handleSubmit = async (e: React.FormEvent) => {
 		e.preventDefault();
@@ -859,7 +891,7 @@ function DangerConfirmModal({
 	};
 
 	return (
-		<SubModal open={open} onOpenChange={onOpenChange} title={title}>
+		<>
 			<p className="mb-4 text-sm text-muted-foreground">{description}</p>
 			<form onSubmit={handleSubmit} className="space-y-4">
 				<div className="space-y-1.5">
@@ -892,7 +924,7 @@ function DangerConfirmModal({
 					</Button>
 				</div>
 			</form>
-		</SubModal>
+		</>
 	);
 }
 
