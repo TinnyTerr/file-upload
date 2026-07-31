@@ -3,5 +3,14 @@
 	"references": [
 		{ "path": "./tsconfig.app.json" },
 		{ "path": "./tsconfig.node.json" }
-	]
+	],
+	// Duplicated from tsconfig.app.json on purpose: this solution-style config is
+	// the one non-tsc tools (bun, editors opening a file outside a project) find
+	// first, and without the alias here they can't resolve any "@/..." import.
+	"compilerOptions": {
+		"baseUrl": ".",
+		"paths": {
+			"@/*": ["./src/*"]
+		}
+	}
 }

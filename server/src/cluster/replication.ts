@@ -56,6 +56,8 @@ const TABLE_COLUMNS: Record<ReplicatedTable, string[]> = {
 		"can_manage_cluster",
 		"can_use_torrents",
 		"can_watch_media",
+		"require_mfa",
+		"require_passkey",
 		"quota_bytes",
 		"max_file_bytes",
 		"archive_after_idle_days",
@@ -85,9 +87,12 @@ const TABLE_COLUMNS: Record<ReplicatedTable, string[]> = {
 		"owner_id",
 		"slug",
 		"title",
+		"parent_directory_id",
 		"encryption_mode",
 		"enc_key_blob",
 		"enc_access_blob",
+		"access_is_password",
+		"encryption_overridden",
 		"key_check_blob",
 		"total_bytes",
 		"expires_at",
@@ -99,6 +104,7 @@ const TABLE_COLUMNS: Record<ReplicatedTable, string[]> = {
 		"library_overview",
 		"library_poster_file_id",
 		"library_published_at",
+		"gallery_view",
 		"created_at",
 	],
 	directory_links: [
@@ -128,6 +134,9 @@ const TABLE_COLUMNS: Record<ReplicatedTable, string[]> = {
 		"encryption_mode",
 		"enc_key_blob",
 		"enc_access_blob",
+		"access_is_password",
+		"seal_salt",
+		"encryption_overridden",
 		"compressed",
 		"archived",
 		"archive_codec",
@@ -284,9 +293,33 @@ export function exportAll(db: Db): SerializedRow[] {
 	return rows;
 }
 
+/** A directory and every folder above it, root first.
+ *
+ * Deliberately not `directoryTree.ts::ancestorChain`: that one throws past
+ * `MAX_DEPTH` because corrupt data is a bug there. Here a peer that is behind
+ * should still receive whatever chain exists, so this bails at the bound and
+ * ships what it has rather than aborting the replication of a live upload. */
+function ancestorDirectoryChain(db: Db, directoryId: number): Row[] {
+	const chain: Row[] = [];
+	const seen = new Set<number>();
+	let id: number | null = directoryId;
+	for (let i = 0; id !== null && i <= 10; i++) {
+		if (seen.has(id)) break;
+		seen.add(id);
+		const d: Row | undefined = db.get<Row>(
+			"SELECT * FROM directories WHERE id = $id",
+			{ $id: id },
+		);
+		if (!d) break;
+		chain.push(d);
+		id = (d.parent_directory_id as number | null) ?? null;
+	}
+	return chain.reverse();
+}
+
 /** Everything a peer needs to make one uploaded file fully usable: the
- * file, its blob, its links, the owner (+permission) and any containing
- * directory. */
+ * file, its blob, its links, the owner (+permission) and every folder above
+ * it. */
 export function collectFileRows(db: Db, fileId: number): SerializedRow[] {
 	const f = db.get<Row>("SELECT * FROM files WHERE id = $id", { $id: fileId });
 	if (!f) return [];
@@ -308,10 +341,14 @@ export function collectFileRows(db: Db, fileId: number): SerializedRow[] {
 		if (blob) rows.push(serializeRow("content_blobs", blob));
 	}
 	if (f.directory_id) {
-		const d = db.get<Row>("SELECT * FROM directories WHERE id = $id", {
-			$id: f.directory_id as number,
-		});
-		if (d) {
+		// The whole ancestor chain, root first. `parent_directory_id` is a real
+		// FK and peers run with `PRAGMA foreign_keys = ON`, so shipping only the
+		// containing folder makes the peer's transaction fail outright whenever
+		// that folder's parent was never replicated -- which is the normal case
+		// for a folder no file was ever uploaded directly into. Rows keep their
+		// relative order through applyRows' stable sort, so parents land first.
+		const chain = ancestorDirectoryChain(db, f.directory_id as number);
+		for (const d of chain) {
 			rows.push(serializeRow("directories", d));
 			for (const dl of db.all<Row>(
 				"SELECT * FROM directory_links WHERE directory_id = $id",

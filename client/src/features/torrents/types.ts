@@ -27,7 +27,10 @@ export interface TorrentJob {
 	dl_speed: number;
 	eta_seconds: number | null;
 	info_hash: string | null;
+	/** Where the import landed. */
 	directory_id: number | null;
+	/** Where it was asked to land. */
+	target_directory_id: number | null;
 	imported_file_count: number;
 	error: string | null;
 	created_at: string;
@@ -86,6 +89,9 @@ export interface AddTorrentInput {
 	/** Base64-encoded .torrent metainfo file. */
 	torrent_file_b64?: string;
 	filename?: string;
+	/** Destination folder. A multi-file torrent still gets its own folder,
+	 * created underneath this one. Omitted = the root. */
+	directory_id?: number | null;
 }
 
 /** PUT /admin/torrents/debrid — omit a field to leave it unchanged. */

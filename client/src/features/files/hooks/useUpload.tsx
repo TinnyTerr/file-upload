@@ -8,6 +8,8 @@ import {
 	useState,
 } from "react";
 import { toast } from "sonner";
+import { dirKeys } from "@/features/directories/hooks/queryKeys";
+import { driveKeys } from "@/features/drive/hooks/queryKeys";
 import {
 	performUpload,
 	type UploadOutcome,
@@ -35,6 +37,9 @@ interface UploadState {
 	start: (
 		files: File[],
 		options: UploadOptions,
+		/** One fixed client key for the whole batch, e.g. the key of the
+		 * end-to-end folder these files are being uploaded into. */
+		presetKey?: Uint8Array,
 	) => Promise<{ filename: string; outcome: UploadOutcome }[]>;
 	cancel: (id: string) => void;
 	clearFinished: () => void;
@@ -64,6 +69,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 		async (
 			files: File[],
 			options: UploadOptions,
+			presetKey?: Uint8Array,
 		): Promise<{ filename: string; outcome: UploadOutcome }[]> => {
 			if (!files.length) return [];
 			const succeeded: { filename: string; outcome: UploadOutcome }[] = [];
@@ -86,6 +92,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 					const outcome = await performUpload({
 						file: files[i],
 						options,
+						presetKey,
 						signal: controller.signal,
 						onProgress: ({ phase, percent }) =>
 							update(item.id, { status: phase, percent }),
@@ -110,6 +117,10 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 			setBusy(false);
 			qc.invalidateQueries({ queryKey: filesKeys.list });
 			qc.invalidateQueries({ queryKey: filesKeys.usage });
+			// The Drive explorer shows one level at a time; the upload may have
+			// landed in a level other than the one currently on screen.
+			qc.invalidateQueries({ queryKey: driveKeys.all });
+			qc.invalidateQueries({ queryKey: dirKeys.list });
 			return succeeded;
 		},
 		[qc, update],

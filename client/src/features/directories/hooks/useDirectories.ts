@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { errorMessage } from "@/config/api";
+import { driveKeys } from "@/features/drive/hooks/queryKeys";
 import { filesKeys } from "@/features/files/hooks/queryKeys";
 import { dirService } from "../services/dirService";
 import { dirKeys } from "./queryKeys";
@@ -17,9 +18,30 @@ export function useCreateDirectory() {
 		onSuccess: () => {
 			toast.success("Folder created");
 			qc.invalidateQueries({ queryKey: dirKeys.list });
+			qc.invalidateQueries({ queryKey: driveKeys.all });
 		},
 		onError: (err) =>
 			toast.error("Couldn't create folder", { description: errorMessage(err) }),
+	});
+}
+
+/** Switch the public folder page between the plain list and the gallery. */
+export function useSetGalleryView(dirId: number) {
+	const qc = useQueryClient();
+	return useMutation({
+		mutationFn: (galleryView: boolean) =>
+			dirService.setGalleryView(dirId, galleryView),
+		onSuccess: (dir) => {
+			toast.success(
+				dir.gallery_view ? "Gallery view enabled" : "Gallery view disabled",
+			);
+			qc.invalidateQueries({ queryKey: dirKeys.list });
+			qc.invalidateQueries({ queryKey: driveKeys.all });
+		},
+		onError: (err) =>
+			toast.error("Couldn't change the folder view", {
+				description: errorMessage(err),
+			}),
 	});
 }
 
@@ -38,6 +60,8 @@ export function useDeleteDirectory() {
 		onSuccess: () => {
 			toast.success("Folder deleted");
 			qc.invalidateQueries({ queryKey: dirKeys.list });
+			qc.invalidateQueries({ queryKey: driveKeys.all });
+			qc.invalidateQueries({ queryKey: filesKeys.list });
 			qc.invalidateQueries({ queryKey: filesKeys.usage });
 		},
 		onError: (err) =>

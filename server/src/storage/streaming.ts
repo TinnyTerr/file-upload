@@ -12,8 +12,10 @@ import type { AppState } from "../appState.ts";
 import { fetchBlobFromPeers } from "../cluster/blobs.ts";
 import { getMasterKey } from "../config.ts";
 import { decryptStream } from "../crypto/aead.ts";
+import { resolveFileEncryption } from "../crypto/effectiveEncryption.ts";
 import { openBox } from "../crypto/secretbox.ts";
 import type { FileRow } from "../db/rows.ts";
+import type { Db } from "../db/types.ts";
 import { decompressStream } from "./compress.ts";
 import { writeStreamToFile } from "./zip.ts";
 
@@ -48,8 +50,10 @@ export async function ensureBlobAvailable(
 /** True when the bytes on disk are already the bytes to send, so the response
  * can advertise `Accept-Ranges` and serve seeks with a plain read at an offset.
  * Anything else has to be decrypted and/or decompressed from byte zero. */
-export function isDirectlyStreamable(f: FileRow): boolean {
-	return f.encryption_mode === "none" && !f.compressed && !f.archived;
+export function isDirectlyStreamable(db: Db, f: FileRow): boolean {
+	return (
+		resolveFileEncryption(db, f).mode === "none" && !f.compressed && !f.archived
+	);
 }
 
 export async function* decompressFromDecrypted(
@@ -108,7 +112,10 @@ export function plaintextStream(
 	f: FileRow,
 	fullPath: string,
 ): AsyncGenerator<Buffer> {
-	const needsDecrypt = f.encryption_mode === "server";
+	// The key may live on an ancestor folder rather than on this row -- see
+	// crypto/effectiveEncryption.ts.
+	const eff = resolveFileEncryption(state.db, f);
+	const needsDecrypt = eff.mode === "server";
 	const needsDecompress = !!(f.compressed || f.archived);
 
 	if (f.archived && !f.auto_unarchive_on_download) {
@@ -118,14 +125,14 @@ export function plaintextStream(
 	}
 
 	if (needsDecrypt) {
-		if (!f.enc_key_blob) {
+		if (!eff.keyBlob) {
 			throw new PlaintextUnavailable("encryption key not stored");
 		}
 		let perFileKey: Buffer;
 		try {
 			perFileKey = openBox(
 				getMasterKey(state.settings),
-				Buffer.from(f.enc_key_blob),
+				Buffer.from(eff.keyBlob),
 			);
 		} catch {
 			throw new PlaintextUnavailable("failed to recover encryption key");

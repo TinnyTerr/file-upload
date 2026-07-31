@@ -3,7 +3,14 @@ import { type Response, Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
 import { setEnvValue } from "../config.ts";
+import { resolveDirectoryEncryption } from "../crypto/effectiveEncryption.ts";
 import { nowIso, type TorrentJobRow, type UserRow } from "../db/rows.ts";
+import {
+	depthOf,
+	getDirectory,
+	isEditor,
+	MAX_DEPTH,
+} from "../directoryTree.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
@@ -93,6 +100,7 @@ function serializeJob(
 		eta_seconds: job.eta_seconds,
 		info_hash: job.info_hash,
 		directory_id: job.directory_id,
+		target_directory_id: job.target_directory_id,
 		imported_file_count: job.imported_file_count,
 		error: job.error,
 		created_at: job.created_at,
@@ -218,6 +226,48 @@ export function torrentsRouter(state: AppState): Router {
 					};
 				}
 
+				// Optional destination folder. Validated before anything is
+				// dispatched, so a bad target costs no torrent client work.
+				let targetDirectoryId: number | null = null;
+				const rawDir = body.directory_id;
+				if (rawDir !== undefined && rawDir !== null && rawDir !== "") {
+					const dirId = Number(rawDir);
+					if (!Number.isInteger(dirId)) {
+						res.status(400).json({ detail: "invalid directory_id" });
+						return;
+					}
+					const target = getDirectory(db, dirId);
+					if (!target) {
+						res.status(404).json({ detail: "directory not found" });
+						return;
+					}
+					if (!isEditor(db, target, user)) {
+						res.status(403).json({ detail: "not your directory" });
+						return;
+					}
+					// A multi-file torrent creates its own folder underneath, so the
+					// target has to have room for one more level.
+					if (depthOf(db, target.id) + 1 > MAX_DEPTH) {
+						res.status(400).json({
+							detail: `folders can be nested at most ${MAX_DEPTH} deep`,
+						});
+						return;
+					}
+					// The import fills this folder server-side, which an end-to-end
+					// folder forbids (routes/files.ts::finalizeStoredFile). Refusing
+					// here rather than at import time saves downloading the whole
+					// torrent only to fail — and saves orphaning a folder per retry.
+					const targetMode = resolveDirectoryEncryption(db, target).mode;
+					if (targetMode === "client" || targetMode === "sealed") {
+						res.status(409).json({
+							detail:
+								"this folder is end-to-end encrypted; the server cannot decrypt into it",
+						});
+						return;
+					}
+					targetDirectoryId = target.id;
+				}
+
 				const active = db.get<{ n: number }>(
 					`SELECT COUNT(*) as n FROM torrent_jobs WHERE owner_id = $id AND status IN (${IN_FLIGHT_SQL})`,
 					{ $id: user.id },
@@ -244,12 +294,13 @@ export function torrentsRouter(state: AppState): Router {
 				const dispatch = await dispatchTorrent(state, source, tag);
 
 				db.run(
-					`INSERT INTO torrent_jobs (owner_id, name, source, info_hash, tag, save_path, provider, debrid_id,
-           fallback_reason, status, created_at, updated_at)
-         VALUES ($ownerId, $name, $source, $hash, $tag, $savePath, $provider, $debridId, $fallbackReason,
-           'queued', $now, $now)`,
+					`INSERT INTO torrent_jobs (owner_id, target_directory_id, name, source, info_hash, tag,
+           save_path, provider, debrid_id, fallback_reason, status, created_at, updated_at)
+         VALUES ($ownerId, $targetDir, $name, $source, $hash, $tag, $savePath, $provider, $debridId,
+           $fallbackReason, 'queued', $now, $now)`,
 					{
 						$ownerId: user.id,
+						$targetDir: targetDirectoryId,
 						$name: name,
 						$source: magnet
 							? magnet.slice(0, 2048)

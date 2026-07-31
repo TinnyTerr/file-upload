@@ -32,6 +32,23 @@ export class LockoutPolicy {
 		);
 	}
 
+	/** The same rolling-window check against an arbitrary identifier namespace.
+	 * Password-locked share links use it keyed on the slug: the thing being
+	 * guessed there is a resource, not an account, so it needs its own counter
+	 * rather than the username/ip ones (see routes/publicAccess.ts). */
+	isIdentifierLocked(db: Db, identifier: string, type: string): boolean {
+		return this.isLocked(db, identifier, type);
+	}
+
+	/** Clears an identifier's counter after a success. `resetSuccess` is the
+	 * username-typed special case of this. */
+	resetIdentifier(db: Db, identifier: string, type: string): void {
+		db.run(
+			"DELETE FROM login_attempts WHERE identifier = $identifier AND identifier_type = $type",
+			{ $identifier: identifier, $type: type },
+		);
+	}
+
 	private isLocked(db: Db, identifier: string, type: string): boolean {
 		const row = db.get<LoginAttemptRow>(
 			"SELECT * FROM login_attempts WHERE identifier = $identifier AND identifier_type = $type",

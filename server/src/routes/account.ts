@@ -222,6 +222,8 @@ export function accountRouter(state: AppState): Router {
 			can_manage_cluster: !!perm.can_manage_cluster,
 			can_use_torrents: !!perm.can_use_torrents,
 			can_watch_media: !!perm.can_watch_media,
+			require_mfa: !!perm.require_mfa,
+			require_passkey: !!perm.require_passkey,
 		});
 	});
 

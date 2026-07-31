@@ -16,6 +16,18 @@ export function EncryptionBanner({
 				tone: "muted",
 				text: "Public file. Anyone with this link can download it.",
 			};
+		if (mode === "sealed")
+			return hasKey
+				? {
+						icon: ShieldAlert,
+						tone: "warning",
+						text: "Sealed. The server encrypted this once and then discarded the key — it decrypts here, in your browser.",
+					}
+				: {
+						icon: ShieldX,
+						tone: "danger",
+						text: "Sealed with a key the server does not have. Supply the key or password it was sealed with.",
+					};
 		if (mode === "client")
 			return hasKey
 				? {

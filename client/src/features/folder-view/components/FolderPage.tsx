@@ -1,46 +1,86 @@
-import { Download, Eye, FolderArchive, FolderX, Save } from "lucide-react";
-import { useMemo, useState } from "react";
+import {
+	ArrowLeft,
+	Download,
+	FolderArchive,
+	FolderX,
+	Save,
+} from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
+import { usePublicShellWidth } from "@/components/layout/PublicShell";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
-import { ListRow } from "@/components/ui/list-row";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { UserAvatar } from "@/components/ui/user-avatar";
 import { useAuth } from "@/features/auth/hooks/auth";
 import { EncryptionBanner } from "@/features/download/components/EncryptionBanner";
-import { isPreviewableType } from "@/features/download/components/FilePreview";
-import { iconForType } from "@/features/files/lib/fileMeta";
 import { formatBytes } from "@/lib/bytes";
 import { readClientKeyFromHash, readServerKeyFromQuery } from "@/lib/download";
-import {
-	downloadMember,
-	useDirInfo,
-	useFolderZip,
-} from "../hooks/useFolderView";
+import { useFolderKeys } from "../hooks/useFolderKeys";
+import { useDirInfo, useFolderZip } from "../hooks/useFolderView";
 import { useSaveFolder } from "../hooks/useSaveFolder";
 import type { PublicDirMember } from "../services/publicDirService";
+import { FolderBreadcrumbs } from "./FolderBreadcrumbs";
 import { FolderFilePreviewModal } from "./FolderFilePreviewModal";
+import { FolderGallery } from "./FolderGallery";
+import { FolderListing } from "./FolderListing";
+import { FolderUnlockPrompt } from "./FolderUnlockPrompt";
 
 export function FolderPage() {
 	const { slug = "" } = useParams();
-	const { data: info, isLoading, isError } = useDirInfo(slug);
+	// Which folder in the shared tree is open. Null is the link's own folder.
+	const [dir, setDir] = useState<number | null>(null);
+	const { data: info, isLoading, isError } = useDirInfo(slug, dir);
 	const { user } = useAuth();
 	const saveFolder = useSaveFolder();
+	const keys = useFolderKeys();
 	const [previewMember, setPreviewMember] = useState<PublicDirMember | null>(
 		null,
 	);
 
 	const clientKey = useMemo(() => readClientKeyFromHash(), []);
 	const serverKey = useMemo(() => readServerKeyFromQuery(), []);
-	const keys = { clientKey, serverKey };
+	const { downloadAll, status, progress } = useFolderZip(slug, keys);
 
-	const { downloadAll, status, progress } = useFolderZip(
-		slug,
-		info?.title ?? "folder",
-		info?.encryption_mode ?? "none",
-	);
+	// Seed from the URL once the entry folder's shape is known: the link that
+	// got the visitor here carries the entry folder's key, and nothing else's.
+	const seeded = useRef(false);
+	useEffect(() => {
+		if (seeded.current || !info) return;
+		seeded.current = true;
+		const value =
+			info.encryption_mode === "client" || info.encryption_mode === "sealed"
+				? clientKey
+				: info.encryption_mode === "server"
+					? serverKey
+					: null;
+		if (!value) return;
+		keys
+			.unlock({
+				slug,
+				dirId: null,
+				keyScope: info.key_scope,
+				mode: info.encryption_mode,
+				keyCheckBlob: info.key_check_blob,
+				value,
+			})
+			// A wrong key in the URL just means the prompt is shown instead.
+			.catch(() => {});
+	}, [info, clientKey, serverKey, keys, slug]);
+
+	// A poster grid needs the room; the plain list stays where it was.
+	usePublicShellWidth(info?.gallery_view ? "wide" : "narrow");
+
+	const goTo = (next: number | null) => setDir(next);
+	/** Up one level. Derived from the breadcrumb rather than a visit history,
+	 * so "back" always means the containing folder, however the visitor got
+	 * here — including out of a folder they never managed to unlock. */
+	const goUp = (trail: { id: number }[]) => {
+		const parent = trail.length >= 2 ? trail[trail.length - 2].id : null;
+		setDir(parent === info?.entry_id ? null : parent);
+	};
 
 	if (isLoading) {
 		return (
@@ -63,16 +103,40 @@ export function FolderPage() {
 		);
 	}
 
-	const hasKey =
-		info.encryption_mode === "client"
-			? !!clientKey
-			: info.encryption_mode === "server"
-				? !!serverKey
-				: true;
+	const unlocked = keys.isUnlocked(info);
+	const atEntry = dir === null || dir === info.entry_id;
 	const zipping = status === "working";
+
+	// A folder whose key the visitor doesn't hold shows the prompt instead of
+	// its contents — with a way back out, so it's a wrong turn, not a dead end.
+	if (!unlocked) {
+		return (
+			<div className="space-y-4">
+				<FolderBreadcrumbs trail={info.breadcrumbs} onNavigate={goTo} />
+				<FolderUnlockPrompt
+					title={info.title}
+					mode={info.encryption_mode}
+					passwordLocked={info.password_locked}
+					onBack={atEntry ? null : () => goUp(info.breadcrumbs)}
+					onUnlock={(value) =>
+						keys.unlock({
+							slug,
+							dirId: dir,
+							keyScope: info.key_scope,
+							mode: info.encryption_mode,
+							keyCheckBlob: info.key_check_blob,
+							value,
+						})
+					}
+				/>
+			</div>
+		);
+	}
 
 	return (
 		<div className="space-y-4">
+			<FolderBreadcrumbs trail={info.breadcrumbs} onNavigate={goTo} />
+
 			<Card>
 				<CardContent className="space-y-5 p-6">
 					<div className="flex items-start gap-4">
@@ -82,14 +146,24 @@ export function FolderPage() {
 						<div className="min-w-0 flex-1">
 							<h1 className="break-words text-xl font-bold">{info.title}</h1>
 							<p className="mt-1 text-sm text-muted-foreground">
+								{info.directories.length > 0 &&
+									`${info.directories.length} folder${info.directories.length === 1 ? "" : "s"} · `}
 								{info.file_count} files · {formatBytes(info.total_bytes)}
 							</p>
 						</div>
+						{!atEntry && (
+							<Button
+								variant="ghost"
+								size="sm"
+								onClick={() => goUp(info.breadcrumbs)}
+							>
+								<ArrowLeft /> Back
+							</Button>
+						)}
 					</div>
 
-					<EncryptionBanner mode={info.encryption_mode} hasKey={hasKey} />
+					<EncryptionBanner mode={info.encryption_mode} hasKey={unlocked} />
 
-					{/* Uploader info */}
 					{info.uploader && (
 						<div className="flex items-center gap-2 text-sm text-muted-foreground">
 							<UserAvatar
@@ -108,13 +182,17 @@ export function FolderPage() {
 						<Button
 							size="lg"
 							className="w-full"
-							disabled={
-								(info.encryption_mode !== "none" && !hasKey) ||
-								zipping ||
-								info.file_count === 0
-							}
+							disabled={zipping || info.file_count === 0}
 							loading={zipping}
-							onClick={() => downloadAll(info.files, keys)}
+							onClick={() =>
+								downloadAll({
+									dir,
+									title: info.title,
+									keyScope: info.key_scope,
+									mode: info.encryption_mode,
+									members: info.files,
+								})
+							}
 						>
 							<Download /> {zipping ? "Preparing…" : "Download all (.zip)"}
 						</Button>
@@ -127,13 +205,18 @@ export function FolderPage() {
 								}
 							/>
 						)}
-						{user && (
+						{user && atEntry && (
 							<Button
 								variant="secondary"
 								className="w-full"
 								loading={saveFolder.isPending}
 								disabled={info.already_saved}
-								onClick={() => saveFolder.mutate(slug)}
+								onClick={() =>
+									saveFolder.mutate({
+										slug,
+										accessKey: keys.held(info.key_scope)?.secret,
+									})
+								}
 							>
 								<Save />{" "}
 								{info.already_saved
@@ -145,69 +228,29 @@ export function FolderPage() {
 				</CardContent>
 			</Card>
 
-			<Card>
-				<CardContent className="space-y-2 p-5">
-					<h2 className="text-sm font-semibold">Files</h2>
-					{info.files.length === 0 ? (
-						<p className="py-2 text-sm text-muted-foreground">
-							This folder is empty.
-						</p>
-					) : (
-						<div className="space-y-1.5">
-							{info.files.map((m) => {
-								const Icon = iconForType(m.content_type);
-								const canView =
-									info.encryption_mode === "none" &&
-									isPreviewableType(m.content_type);
-								return (
-									<ListRow
-										key={m.slug}
-										leading={
-											<Icon className="size-4 shrink-0 text-muted-foreground" />
-										}
-										trailing={
-											<div className="flex items-center gap-1">
-												{canView && (
-													<Button
-														variant="ghost"
-														size="icon"
-														onClick={() => setPreviewMember(m)}
-													>
-														<Eye />
-													</Button>
-												)}
-												<Button
-													variant="ghost"
-													size="icon"
-													disabled={info.encryption_mode !== "none" && !hasKey}
-													onClick={() =>
-														downloadMember(m, info.encryption_mode, keys)
-													}
-												>
-													<Download />
-												</Button>
-											</div>
-										}
-									>
-										<span
-											className="flex items-center gap-2 truncate text-sm"
-											title={m.filename}
-										>
-											<span className="truncate">{m.filename}</span>
-											<span className="shrink-0 text-xs text-muted-foreground">
-												{formatBytes(m.size_bytes)}
-											</span>
-										</span>
-									</ListRow>
-								);
-							})}
-						</div>
-					)}
-				</CardContent>
-			</Card>
+			{info.gallery_view ? (
+				<FolderGallery
+					info={info}
+					keys={keys}
+					onNavigate={goTo}
+					onOpenMember={setPreviewMember}
+				/>
+			) : (
+				<FolderListing
+					info={info}
+					keys={keys}
+					onNavigate={goTo}
+					onOpenMember={setPreviewMember}
+				/>
+			)}
 
 			<FolderFilePreviewModal
 				member={previewMember}
+				accessKey={
+					previewMember && previewMember.encryption_mode === "server"
+						? (keys.held(previewMember.key_scope)?.secret ?? null)
+						: null
+				}
 				open={previewMember !== null}
 				onOpenChange={(open) => !open && setPreviewMember(null)}
 			/>

@@ -449,7 +449,9 @@ function bulkCandidates(
 			params.$ownerId = ownerId;
 		}
 		if (action === "archive_files")
-			clauses.push("archived = 0 AND encryption_mode != 'client'");
+			clauses.push(
+				"archived = 0 AND encryption_mode NOT IN ('client', 'sealed')",
+			);
 		else if (action === "unarchive_files") clauses.push("archived = 1");
 		const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 		const rows = db.all<FileRow>(

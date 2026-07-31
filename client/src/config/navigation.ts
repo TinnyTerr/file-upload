@@ -2,7 +2,7 @@ import {
 	BookText,
 	Clapperboard,
 	Download,
-	FolderUp,
+	HardDrive,
 	KeyRound,
 	type LucideIcon,
 	Network,
@@ -24,10 +24,10 @@ export interface NavItem {
 
 export const NAV_ITEMS: NavItem[] = [
 	{
-		label: "Files",
+		label: "Drive",
 		to: "/files",
-		icon: FolderUp,
-		description: "Upload, share and manage your files",
+		icon: HardDrive,
+		description: "Browse, upload and share your folders and files",
 		feature: "files",
 	},
 	{

@@ -40,16 +40,34 @@ export function iconForType(
 	return FileIcon;
 }
 
-export function EncryptionBadge({ mode }: { mode: EncryptionMode }) {
+/** `inherited` means the key lives on a folder further up rather than on this
+ * row, which changes what "change the encryption" would even act on -- worth a
+ * visual distinction, not just a tooltip. */
+export function EncryptionBadge({
+	mode,
+	inherited = false,
+}: {
+	mode: EncryptionMode;
+	inherited?: boolean;
+}) {
+	// The variants all set `border-transparent`, so an inherited badge has to
+	// re-colour the border for the dash to be visible at all.
+	const dashed = inherited ? "border-dashed border-current/50" : undefined;
+	if (mode === "sealed")
+		return (
+			<Badge variant="warning" className={dashed}>
+				<ShieldAlert /> sealed
+			</Badge>
+		);
 	if (mode === "client")
 		return (
-			<Badge variant="warning">
+			<Badge variant="warning" className={dashed}>
 				<ShieldAlert /> e2e
 			</Badge>
 		);
 	if (mode === "server")
 		return (
-			<Badge variant="accent">
+			<Badge variant="accent" className={dashed}>
 				<ShieldCheck /> server
 			</Badge>
 		);

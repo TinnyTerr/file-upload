@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import {
 	createReadStream,
 	createWriteStream,
@@ -21,14 +21,27 @@ import { recordAudit } from "../audit.ts";
 import { replicateFile } from "../cluster/replication.ts";
 import { getMasterKey } from "../config.ts";
 import { encryptFile } from "../crypto/aead.ts";
+import {
+	keyScopeOf,
+	recoverAccessSecret,
+	resolveDirectoryEncryption,
+	resolveFileEncryption,
+} from "../crypto/effectiveEncryption.ts";
+import {
+	deriveSealKey,
+	SEAL_SALT_BYTES,
+	sealKdfId,
+} from "../crypto/passwordKey.ts";
 import { openBox, seal } from "../crypto/secretbox.ts";
 import {
+	type DirectoryRow,
 	type FileRow,
 	type LinkRow,
 	nowIso,
 	type PermissionRow,
 	type UserRow,
 } from "../db/rows.ts";
+import { buildPathIndex, getDirectory, isEditor } from "../directoryTree.ts";
 import { HttpError } from "../httpError.ts";
 import { consumeUse, newSlug, resolveActiveLink } from "../links.ts";
 import { getLogger } from "../logging.ts";
@@ -41,6 +54,12 @@ import {
 	requirePermission,
 } from "../middleware/deps.ts";
 import { ensurePermissions } from "../permissions.ts";
+import {
+	type AccessCheck,
+	checkLinkAccess,
+	LINK_ACCESS_IDENTIFIER,
+	validateAccessPassword,
+} from "../security/accessLock.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import {
 	enforceGlobalUploadCapacity,
@@ -55,6 +74,16 @@ import {
 } from "../storage/blobs.ts";
 import { compressFile, shouldCompress } from "../storage/compress.ts";
 import { safeJoin, storageRoot } from "../storage/paths.ts";
+import {
+	blobsEqual,
+	rewriteFileEncryption,
+	type TargetEncryption,
+} from "../storage/rekey.ts";
+import {
+	ensureBlobAvailable,
+	PlaintextUnavailable,
+	plaintextStream,
+} from "../storage/streaming.ts";
 import { deleteThumbnail } from "../storage/thumbnail.ts";
 import { memberSource, safeArcname } from "../storage/zip.ts";
 
@@ -77,18 +106,6 @@ const UNSAFE_CT = new Set([
 interface SumRow {
 	total: number | null;
 }
-interface DirRow {
-	id: number;
-	owner_id: number;
-	encryption_mode: string;
-	enc_key_blob: Uint8Array | null;
-	enc_access_blob: Uint8Array | null;
-	total_bytes: number;
-}
-interface CollabRow {
-	id: number;
-}
-
 /** Exported for reuse by dropbox.ts (owner-quota lookups on behalf of the
  * dropbox link's owner, mirroring app/routes/dropbox.py's import from
  * app/routes/files.py). */
@@ -101,22 +118,16 @@ export function usedBytes(state: AppState, userId: number): number {
 	);
 }
 
-/** Exported for reuse by dropbox.ts. */
+/** Exported for reuse by dropbox.ts. Ancestor-aware since folders nest: a
+ * grant made on a parent folder carries into everything below it. */
 export function canEditDirectory(
 	state: AppState,
 	directoryId: number,
 	user: UserRow,
 ): boolean {
-	const { db } = state;
-	const dir = db.get<DirRow>("SELECT * FROM directories WHERE id = $id", {
-		$id: directoryId,
-	});
+	const dir = getDirectory(state.db, directoryId);
 	if (!dir) return false;
-	if (user.role === "master" || dir.owner_id === user.id) return true;
-	return !!db.get<CollabRow>(
-		"SELECT id FROM directory_collaborators WHERE directory_id = $dir AND user_id = $user AND role = 'editor'",
-		{ $dir: directoryId, $user: user.id },
-	);
+	return isEditor(state.db, dir, user);
 }
 
 function fileUrl(req: Request, slug: string): string {
@@ -138,7 +149,7 @@ interface PreparedUpload {
 	isPermanent: boolean;
 	tempDays: number | null;
 	randomizeFilename: boolean;
-	directory: DirRow | null;
+	directory: DirectoryRow | null;
 	perm: PermissionRow;
 }
 
@@ -160,16 +171,18 @@ function prepareUpload(
 		throw new HttpError(400, "invalid encryption_mode");
 	}
 
-	let directory: DirRow | null = null;
+	let directory: DirectoryRow | null = null;
 	if (opts.directoryId !== null) {
 		directory =
-			state.db.get<DirRow>("SELECT * FROM directories WHERE id = $id", {
+			state.db.get<DirectoryRow>("SELECT * FROM directories WHERE id = $id", {
 				$id: opts.directoryId,
 			}) ?? null;
 		if (!directory) throw new HttpError(404, "directory not found");
 		if (!canEditDirectory(state, directory.id, user))
 			throw new HttpError(403, "not your directory");
-		encryptionMode = directory.encryption_mode;
+		// A file placed in a folder takes the folder's *effective* encryption --
+		// which may be defined several levels up (crypto/effectiveEncryption.ts).
+		encryptionMode = resolveDirectoryEncryption(state.db, directory).mode;
 		compress = false;
 		isPermanent = true;
 		tempDays = null;
@@ -246,7 +259,7 @@ interface FinalizeOpts {
 	req: Request;
 	user: UserRow;
 	perm: PermissionRow;
-	directory: DirRow | null;
+	directory: DirectoryRow | null;
 	workPath: string;
 	relPath: string;
 	stored: number;
@@ -264,6 +277,16 @@ interface FinalizeOpts {
 	expiresInSeconds: number | null;
 	sourceType?: string;
 	savedFromFileId?: number | null;
+	/**
+	 * The bytes in `workPath` are already ciphertext the caller encrypted.
+	 *
+	 * Only the two browser/API upload routes can honestly claim this, and only
+	 * they may target an end-to-end folder. Saying `encryptionMode: "client"` is
+	 * not the same claim: every server-side path copies its directory's mode
+	 * into that field, so trusting it would let a dropbox link file an anonymous
+	 * uploader's plaintext under a mode that promises ciphertext.
+	 */
+	clientCiphertext?: boolean;
 }
 
 /** Mirrors app/routes/files.py::_finalize_stored_file -- quota check, optional
@@ -275,6 +298,38 @@ export async function finalizeStoredFile(
 	const { db } = state;
 	const basePath = join(storageRoot(), opts.relPath);
 	const directoryId = directory ? directory.id : null;
+
+	// A file dropped into a folder is encrypted with whatever protects that
+	// folder -- resolved, because the key may sit several levels up. The caller's
+	// `encryptionMode` only decides anything for a root-level upload. Callers
+	// that pass a directory (dropbox, remote upload, torrent import) therefore
+	// can't get this wrong, whatever they pass.
+	const dirEff = directory ? resolveDirectoryEncryption(db, directory) : null;
+	// End-to-end folders are the one destination the server cannot fill on
+	// someone's behalf: it has no key, so it would file plaintext under a mode
+	// that promises ciphertext. Only a browser holding the folder's key may
+	// upload here, and it says so by passing `client` itself. Everything that
+	// finalizes server-side (dropbox, remote upload, torrent import) is refused.
+	if (
+		dirEff &&
+		(dirEff.mode === "client" || dirEff.mode === "sealed") &&
+		!opts.clientCiphertext
+	) {
+		try {
+			unlinkSync(opts.workPath);
+		} catch {
+			// best-effort
+		}
+		throw new HttpError(
+			409,
+			"this folder is end-to-end encrypted; it can only be uploaded to from a browser holding its key",
+		);
+	}
+	const encryptionMode = dirEff ? dirEff.mode : opts.encryptionMode;
+	// A file in a folder follows that folder's chain rather than pinning its own
+	// copy of the key, so re-keying the folder later reaches it. `client` is
+	// never inheritable -- only the browser has that key.
+	const overridden = directory && encryptionMode !== "client" ? 0 : 1;
 
 	let plainHashes: Awaited<ReturnType<typeof hashFile>>;
 	try {
@@ -322,11 +377,7 @@ export async function finalizeStoredFile(
 			.trim();
 		if (UNSAFE_CT.has(ct)) ct = "application/octet-stream";
 
-		if (
-			opts.compress &&
-			opts.encryptionMode !== "client" &&
-			shouldCompress(ct)
-		) {
+		if (opts.compress && encryptionMode !== "client" && shouldCompress(ct)) {
 			const compressed = `${basePath}.zst.work`;
 			await compressFile(current, compressed);
 			unlinkSync(current);
@@ -348,10 +399,10 @@ export async function finalizeStoredFile(
 			`INSERT INTO files (
          owner_id, directory_id, storage_path, original_filename, source_type,
          saved_from_file_id, size_bytes, stored_size_bytes, content_type, encryption_mode,
-         compressed, is_permanent, expires_at, delete_if_idle_days, archive_after_idle_days,
-         auto_unarchive_on_download, created_at
+         encryption_overridden, compressed, is_permanent, expires_at, delete_if_idle_days,
+         archive_after_idle_days, auto_unarchive_on_download, created_at
        ) VALUES ($ownerId, $dirId, $relPath, $displayName, $sourceType, $savedFrom, $size, 0, $ct, $enc,
-         $compressed, $isPermanent, $expiresAt, $deleteIfIdle, $archiveAfterIdle, $autoUnarchive, $now)`,
+         $overridden, $compressed, $isPermanent, $expiresAt, $deleteIfIdle, $archiveAfterIdle, $autoUnarchive, $now)`,
 			{
 				$ownerId: user.id,
 				$dirId: directoryId,
@@ -361,7 +412,8 @@ export async function finalizeStoredFile(
 				$savedFrom: opts.savedFromFileId ?? null,
 				$size: sizeBytes,
 				$ct: ct,
-				$enc: opts.encryptionMode,
+				$enc: encryptionMode,
+				$overridden: overridden,
 				$compressed: fileCompressed ? 1 : 0,
 				$isPermanent: opts.isPermanent ? 1 : 0,
 				$expiresAt: expiresAt,
@@ -379,17 +431,14 @@ export async function finalizeStoredFile(
 		let encAccessBlobVal: Buffer | null = null;
 		let accessKey: string | null = null;
 
-		if (opts.encryptionMode === "server") {
+		if (encryptionMode === "server") {
 			const masterKey = getMasterKey(state.settings);
 			let perFileKey: Buffer;
-			if (directory) {
-				if (!directory.enc_key_blob)
-					throw new HttpError(500, "directory key missing");
-				perFileKey = openBox(masterKey, Buffer.from(directory.enc_key_blob));
-				encKeyBlobVal = Buffer.from(directory.enc_key_blob);
-				encAccessBlobVal = directory.enc_access_blob
-					? Buffer.from(directory.enc_access_blob)
-					: null;
+			if (dirEff) {
+				if (!dirEff.keyBlob) throw new HttpError(500, "directory key missing");
+				// Encrypted with the folder chain's key, but not carrying a copy of
+				// it: the row inherits (`overridden = 0`) and reads resolve upward.
+				perFileKey = openBox(masterKey, Buffer.from(dirEff.keyBlob));
 			} else {
 				perFileKey = randomBytes(32);
 				accessKey = randomBytes(18).toString("base64url");
@@ -405,7 +454,7 @@ export async function finalizeStoredFile(
 		mkdirSync(join(basePath, ".."), { recursive: true });
 		renameSync(current, basePath);
 		const storedHashes = await hashFile(basePath);
-		const transformKey = `${opts.encryptionMode}:compressed=${fileCompressed ? 1 : 0}`;
+		const transformKey = `${encryptionMode}:compressed=${fileCompressed ? 1 : 0}`;
 		const blob = attachBlob(db, {
 			finalPath: basePath,
 			relPath: opts.relPath,
@@ -465,7 +514,7 @@ export async function finalizeStoredFile(
 			ip: clientIp(state, req),
 		});
 		log.info(
-			`upload finalized file_id=${fileObj.id} owner_id=${user.id} stored_bytes=${blob.stored_size_bytes} size_bytes=${sizeBytes} encryption=${opts.encryptionMode} compressed=${fileCompressed} directory_id=${directoryId}`,
+			`upload finalized file_id=${fileObj.id} owner_id=${user.id} stored_bytes=${blob.stored_size_bytes} size_bytes=${sizeBytes} encryption=${encryptionMode} compressed=${fileCompressed} directory_id=${directoryId}`,
 		);
 		// Best-effort, fire-and-forget cluster replication -- never adds peer
 		// round-trip latency to the upload response, and a no-op without any
@@ -483,7 +532,7 @@ export async function finalizeStoredFile(
 			url: baseUrl,
 			raw_url: `${baseUrl}/raw`,
 			access_key: accessKey,
-			encryption_mode: opts.encryptionMode,
+			encryption_mode: encryptionMode,
 			max_uses: opts.maxUses,
 			expires_at: expiresLink,
 			compressed: fileCompressed,
@@ -505,32 +554,27 @@ export async function finalizeStoredFile(
 	}
 }
 
-function recoverAccessKey(
-	state: AppState,
-	f: { encryption_mode: string; enc_access_blob: Uint8Array | null },
-): string | null {
-	if (f.encryption_mode !== "server" || !f.enc_access_blob) return null;
-	try {
-		return openBox(
-			getMasterKey(state.settings),
-			Buffer.from(f.enc_access_blob),
-		).toString("utf-8");
-	} catch {
-		return null;
-	}
+/** The `?ek=` secret for a server-mode file. Resolved, since a file inside a
+ * folder normally has no access blob of its own -- the folder's is the one that
+ * opens it (crypto/effectiveEncryption.ts). */
+function recoverAccessKey(state: AppState, f: FileRow): string | null {
+	return recoverAccessSecret(
+		getMasterKey(state.settings),
+		resolveFileEncryption(state.db, f),
+	);
 }
 
+/** Throttled per slug when the file's secret is a password rather than a random
+ * token (security/accessLock.ts). */
 function verifyFileAccessKey(
 	state: AppState,
 	f: FileRow,
 	ek: string | null,
-): boolean {
-	if (f.encryption_mode !== "server") return true;
-	const expected = recoverAccessKey(state, f);
-	if (expected === null || !ek) return false;
-	const a = Buffer.from(ek);
-	const b = Buffer.from(expected);
-	return a.length === b.length && timingSafeEqual(a, b);
+): AccessCheck {
+	const eff = resolveFileEncryption(state.db, f);
+	return checkLinkAccess(state, keyScopeOf(eff, `file:${f.id}`), eff, ek, {
+		allowMissingSecret: true,
+	});
 }
 
 // ── chunked upload token helpers ────────────────────────────────────────────
@@ -695,7 +739,12 @@ export function sweepStaleParts(): void {
 	});
 }
 
-function serializeFiles(
+/** Exported for reuse by the directory-children endpoint in directories.ts, so
+ * the Drive explorer sees exactly the same file shape whichever level it asks
+ * for. (The dependency only runs directories.ts -> files.ts; files.ts takes its
+ * tree helpers from directoryTree.ts precisely so the two never import each
+ * other.) */
+export function serializeFiles(
 	state: AppState,
 	req: Request,
 	files: FileRow[],
@@ -729,11 +778,15 @@ function serializeFiles(
 	}
 	return files.map((f) => {
 		const links = linksByFile.get(f.id) ?? [];
+		// Effective state -- an inheriting file's key lives on the folder above it
+		// (crypto/effectiveEncryption.ts); `encryption_overridden` says which.
+		const eff = resolveFileEncryption(db, f);
 		return {
 			id: f.id,
 			owner_id: f.owner_id,
 			owner_username: usernameMap.get(f.owner_id) ?? `user:${f.owner_id}`,
 			blob_id: f.blob_id,
+			directory_id: f.directory_id,
 			original_filename: f.original_filename,
 			source_type: f.source_type,
 			saved_from_file_id: f.saved_from_file_id,
@@ -741,7 +794,17 @@ function serializeFiles(
 			stored_size_bytes: f.stored_size_bytes,
 			hashes: fileHashes(db, f),
 			content_type: f.content_type,
-			encryption_mode: f.encryption_mode,
+			encryption_mode: eff.mode,
+			encryption_overridden: !!f.encryption_overridden,
+			inherited_from_directory_id: eff.sourceDirectoryId,
+			password_locked: eff.passwordLocked,
+			// A sealed file's salt is not a secret, and the browser needs it (plus
+			// the derivation parameters) to rebuild the key from the password it
+			// was sealed with -- the server keeps nothing that could do it for us.
+			seal_salt: f.seal_salt
+				? Buffer.from(f.seal_salt).toString("base64url")
+				: null,
+			seal_kdf: f.seal_salt ? sealKdfId() : null,
 			compressed: !!f.compressed,
 			archived: !!f.archived,
 			lifecycle_state: f.lifecycle_state,
@@ -763,6 +826,25 @@ function serializeFiles(
 			})),
 		};
 	});
+}
+
+/** Everything that has to happen when a file row goes away: its links, the
+ * containing folder's byte tally, the blob reference, the thumbnail cache
+ * (keyed by file id and *not* ref-counted -- see CLAUDE.md) and finally the
+ * row. Returns nothing; the physical unlink is queued internally. */
+export function purgeFile(state: AppState, fileObj: FileRow): void {
+	const { db } = state;
+	db.run("DELETE FROM links WHERE file_id = $id", { $id: fileObj.id });
+	if (fileObj.directory_id !== null) {
+		db.run(
+			"UPDATE directories SET total_bytes = MAX(0, COALESCE(total_bytes, 0) - $dec) WHERE id = $id",
+			{ $dec: fileObj.size_bytes ?? 0, $id: fileObj.directory_id },
+		);
+	}
+	const unlinkAfterCommit = [releaseBlob(db, fileObj)];
+	db.run("DELETE FROM files WHERE id = $id", { $id: fileObj.id });
+	deleteThumbnail(fileObj.id);
+	unlinkQueued(unlinkAfterCommit);
 }
 
 function boolField(v: unknown, dflt: boolean): boolean {
@@ -885,6 +967,9 @@ export function filesRouter(state: AppState): Router {
 						user,
 						perm: prepared.perm,
 						directory: prepared.directory,
+						// Whatever arrived on this route is what the uploader produced;
+						// for an end-to-end folder that has to be ciphertext already.
+						clientCiphertext: true,
 						workPath,
 						relPath,
 						stored,
@@ -1157,10 +1242,10 @@ export function filesRouter(state: AppState): Router {
 					return;
 				}
 
-				let directory: DirRow | null = null;
+				let directory: DirectoryRow | null = null;
 				if (meta.dir !== null) {
 					directory =
-						db.get<DirRow>("SELECT * FROM directories WHERE id = $id", {
+						db.get<DirectoryRow>("SELECT * FROM directories WHERE id = $id", {
 							$id: meta.dir,
 						}) ?? null;
 					if (!directory) {
@@ -1184,6 +1269,7 @@ export function filesRouter(state: AppState): Router {
 					user,
 					perm,
 					directory,
+					clientCiphertext: true,
 					workPath: work,
 					relPath,
 					stored,
@@ -1294,10 +1380,9 @@ export function filesRouter(state: AppState): Router {
 				return;
 			}
 			const ek = typeof req.query.ek === "string" ? req.query.ek : null;
-			if (!verifyFileAccessKey(state, source, ek)) {
-				res
-					.status(401)
-					.json({ detail: "missing or invalid access key (?ek=)" });
+			const access = verifyFileAccessKey(state, source, ek);
+			if (!access.ok) {
+				res.status(access.status).json({ detail: access.detail });
 				return;
 			}
 			const perm = ensurePermissions(db, user.id, {
@@ -1311,6 +1396,7 @@ export function filesRouter(state: AppState): Router {
 				res.status(404).json({ detail: "not found" });
 				return;
 			}
+			const sourceEff = resolveFileEncryption(db, source);
 			if (source.blob_id) {
 				db.run(
 					"UPDATE content_blobs SET ref_count = ref_count + 1 WHERE id = $id",
@@ -1321,12 +1407,14 @@ export function filesRouter(state: AppState): Router {
 				`INSERT INTO files (
          owner_id, directory_id, blob_id, storage_path, original_filename, source_type,
          saved_from_file_id, size_bytes, stored_size_bytes, content_type, encryption_mode,
-         enc_key_blob, enc_access_blob, compressed, archived, archive_codec,
-         archive_original_stored_size_bytes, archive_saved_bytes, archive_after_idle_days,
-         lifecycle_state, is_permanent, delete_if_idle_days, auto_unarchive_on_download, created_at
+         enc_key_blob, enc_access_blob, access_is_password, seal_salt, compressed, archived,
+         archive_codec, archive_original_stored_size_bytes, archive_saved_bytes,
+         archive_after_idle_days, lifecycle_state, is_permanent, delete_if_idle_days,
+         auto_unarchive_on_download, created_at
        ) VALUES ($ownerId, NULL, $blobId, $path, $filename, 'saved', $savedFrom, $size, $storedSize, $ct, $enc,
-         $encKey, $encAccess, $compressed, $archived, $archiveCodec, $archiveOrigStored, $archiveSaved,
-         $archiveAfterIdle, $lifecycle, 1, $deleteIfIdle, $autoUnarchive, $now)`,
+         $encKey, $encAccess, $isPassword, $sealSalt, $compressed, $archived, $archiveCodec,
+         $archiveOrigStored, $archiveSaved, $archiveAfterIdle, $lifecycle, 1, $deleteIfIdle,
+         $autoUnarchive, $now)`,
 				{
 					$ownerId: user.id,
 					$blobId: source.blob_id,
@@ -1336,13 +1424,19 @@ export function filesRouter(state: AppState): Router {
 					$size: source.size_bytes,
 					$storedSize: source.stored_size_bytes,
 					$ct: source.content_type,
-					$enc: source.encryption_mode,
-					$encKey: source.enc_key_blob
-						? Buffer.from(source.enc_key_blob)
+					// The copy lands at the root as its own break point, so it needs
+					// the source's *resolved* key -- the source's own columns are NULL
+					// whenever it inherits from the folder it sits in.
+					$enc: sourceEff.mode,
+					$encKey: sourceEff.keyBlob ? Buffer.from(sourceEff.keyBlob) : null,
+					$encAccess: sourceEff.accessBlob
+						? Buffer.from(sourceEff.accessBlob)
 						: null,
-					$encAccess: source.enc_access_blob
-						? Buffer.from(source.enc_access_blob)
-						: null,
+					$isPassword: sourceEff.passwordLocked ? 1 : 0,
+					// A password-sealed file's salt is how the recipient rederives the
+					// key. It is not a secret, and without it the saved copy is
+					// permanently unopenable even by someone who knows the password.
+					$sealSalt: source.seal_salt ? Buffer.from(source.seal_salt) : null,
 					$compressed: source.compressed,
 					$archived: source.archived,
 					$archiveCodec: source.archive_codec,
@@ -1385,7 +1479,7 @@ export function filesRouter(state: AppState): Router {
 				saved_from_file_id: source.id,
 				source_type: "saved",
 				blob_id: saved.blob_id,
-				encryption_mode: saved.encryption_mode,
+				encryption_mode: resolveFileEncryption(db, saved).mode,
 				access_key: recoverAccessKey(state, saved),
 			});
 		},
@@ -1436,7 +1530,10 @@ export function filesRouter(state: AppState): Router {
 					res.status(403).json({ detail: `not your file: ${fid}` });
 					return;
 				}
-				if (f.encryption_mode === "client") continue;
+				// Neither can be decrypted server-side, so zipping them would bundle
+				// ciphertext nobody asked for.
+				const zipMode = resolveFileEncryption(db, f).mode;
+				if (zipMode === "client" || zipMode === "sealed") continue;
 				selected.push(f);
 			}
 			if (!selected.length) {
@@ -1460,7 +1557,7 @@ export function filesRouter(state: AppState): Router {
 			try {
 				for (const f of selected) {
 					const name = safeArcname(f.original_filename, seen);
-					const [src, isTemp] = await memberSource(masterKey, f);
+					const [src, isTemp] = await memberSource(db, masterKey, f);
 					if (isTemp) cleanup.push(src);
 					archive.file(src, { name });
 				}
@@ -1514,6 +1611,661 @@ export function filesRouter(state: AppState): Router {
 		});
 	});
 
+	/** Whoever may edit a file's placement: its owner, a master, or an editor of
+	 * the folder it currently sits in (which now includes editors of any folder
+	 * above that one). */
+	function canEditFile(f: FileRow, user: UserRow): boolean {
+		if (user.role === "master" || f.owner_id === user.id) return true;
+		if (f.directory_id === null) return false;
+		return canEditDirectory(state, f.directory_id, user);
+	}
+
+	/** Rename. Only the display name changes -- storage is content-addressed and
+	 * never named after the upload (see CLAUDE.md, "File storage"). */
+	router.patch(
+		"/:fileId(\\d+)",
+		requireSession(state),
+		requireCsrf,
+		requireActiveUser(state),
+		(req, res) => {
+			const user = req.currentUser!;
+			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: req.params.fileId,
+			});
+			if (!fileObj) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			if (!canEditFile(fileObj, user)) {
+				res.status(403).json({ detail: "not your file" });
+				return;
+			}
+			const raw = req.body?.original_filename;
+			if (typeof raw !== "string" || !raw.trim()) {
+				res.status(400).json({ detail: "original_filename is required" });
+				return;
+			}
+			// Strip any path the caller tried to smuggle in: this string ends up in
+			// Content-Disposition and in zip member names.
+			const name = basename(raw.replace(/\\/g, "/")).trim().slice(0, 512);
+			if (!name || name === "." || name === "..") {
+				res.status(400).json({ detail: "invalid filename" });
+				return;
+			}
+			db.run("UPDATE files SET original_filename = $name WHERE id = $id", {
+				$name: name,
+				$id: fileObj.id,
+			});
+			recordAudit(db, {
+				actor: user.username,
+				action: "file.renamed",
+				target: `file:${fileObj.id}`,
+				ip: clientIp(state, req),
+			});
+			const updated = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: fileObj.id,
+			})!;
+			res.json(serializeFiles(state, req, [updated])[0]!);
+		},
+	);
+
+	/** Move a file between folders. `directory_id: null` puts it at the root. */
+	router.patch(
+		"/:fileId(\\d+)/move",
+		requireSession(state),
+		requireCsrf,
+		requireActiveUser(state),
+		(req, res) => {
+			const user = req.currentUser!;
+			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: req.params.fileId,
+			});
+			if (!fileObj) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			if (!canEditFile(fileObj, user)) {
+				res.status(403).json({ detail: "not your file" });
+				return;
+			}
+			const body = req.body ?? {};
+			if (!("directory_id" in body)) {
+				res.status(400).json({ detail: "directory_id is required" });
+				return;
+			}
+			const raw = body.directory_id;
+			let targetId: number | null = null;
+			if (raw !== null && raw !== "" && raw !== undefined) {
+				const parsed = Number(raw);
+				if (!Number.isInteger(parsed)) {
+					res.status(400).json({ detail: "invalid directory_id" });
+					return;
+				}
+				if (!getDirectory(db, parsed)) {
+					res.status(404).json({ detail: "target directory not found" });
+					return;
+				}
+				if (!canEditDirectory(state, parsed, user)) {
+					res.status(403).json({ detail: "not your directory" });
+					return;
+				}
+				targetId = parsed;
+			} else if (user.role !== "master" && fileObj.owner_id !== user.id) {
+				// Moving to the root takes the file out of every folder the mover
+				// has rights through, so only its owner may do that.
+				res.status(403).json({ detail: "not your file" });
+				return;
+			}
+			if (targetId === fileObj.directory_id) {
+				res.json(serializeFiles(state, req, [fileObj])[0]!);
+				return;
+			}
+
+			// The file keeps the key its bytes are already encrypted under, and
+			// re-encrypting to match the destination folder is an explicit action
+			// (PATCH /files/:id/encryption, phase 6), not a side effect of moving.
+			// `encryption_overridden = 1` records that -- which means an inheriting
+			// file has to materialize the key it was resolving to first, since the
+			// move is precisely what cuts it off from the folder that held it.
+			const eff = resolveFileEncryption(db, fileObj);
+			db.transaction(() => {
+				if (fileObj.directory_id !== null) {
+					db.run(
+						"UPDATE directories SET total_bytes = MAX(0, COALESCE(total_bytes, 0) - $dec) WHERE id = $id",
+						{ $dec: fileObj.size_bytes ?? 0, $id: fileObj.directory_id },
+					);
+				}
+				if (targetId !== null) {
+					db.run(
+						"UPDATE directories SET total_bytes = COALESCE(total_bytes, 0) + $inc WHERE id = $id",
+						{ $inc: fileObj.size_bytes ?? 0, $id: targetId },
+					);
+				}
+				db.run(
+					`UPDATE files SET directory_id = $dir, encryption_overridden = 1,
+             encryption_mode = $mode, enc_key_blob = $key, enc_access_blob = $access,
+             access_is_password = $isPassword WHERE id = $id`,
+					{
+						$dir: targetId,
+						$mode: eff.mode,
+						$key: eff.keyBlob ? Buffer.from(eff.keyBlob) : null,
+						$access: eff.accessBlob ? Buffer.from(eff.accessBlob) : null,
+						$isPassword: eff.passwordLocked ? 1 : 0,
+						$id: fileObj.id,
+					},
+				);
+			});
+			recordAudit(db, {
+				actor: user.username,
+				action: "file.moved",
+				target: `file:${fileObj.id}->${targetId === null ? "root" : `directory:${targetId}`}`,
+				ip: clientIp(state, req),
+			});
+			const updated = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: fileObj.id,
+			})!;
+			res.json(serializeFiles(state, req, [updated])[0]!);
+		},
+	);
+
+	/** Change what protects one file. `{ mode: "none" | "server" }` gives it its
+	 * own key (or none); `{ adopt_parent: true }` puts it back under whatever
+	 * protects the folder it sits in. Either way the bytes are rewritten. */
+	router.patch(
+		"/:fileId(\\d+)/encryption",
+		requireSession(state),
+		requireCsrf,
+		requireActiveUser(state),
+		asyncHandler(async (req, res) => {
+			const user = req.currentUser!;
+			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: req.params.fileId,
+			});
+			if (!fileObj) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			if (!canEditFile(fileObj, user)) {
+				res.status(403).json({ detail: "not your file" });
+				return;
+			}
+			const body = req.body ?? {};
+			const adopt = body.adopt_parent === true;
+			const mode = typeof body.mode === "string" ? body.mode : null;
+			if (!adopt && mode !== "none" && mode !== "server") {
+				res.status(400).json({
+					detail: 'mode must be "none" or "server", or pass adopt_parent',
+				});
+				return;
+			}
+
+			const current = resolveFileEncryption(db, fileObj);
+			// The server has no key for these, so it cannot rewrite them. Going
+			// into or out of E2E is a browser-side re-upload (see docs/api.md and
+			// POST /files/:id/seal for the one-way server-side variant).
+			if (current.mode === "client" || current.mode === "sealed") {
+				res.status(409).json({
+					detail:
+						"end-to-end encrypted files can only be converted from the browser",
+				});
+				return;
+			}
+
+			const masterKey = getMasterKey(state.settings);
+			let next: { mode: string; keyBlob: Buffer | null };
+			let target: TargetEncryption;
+			let accessKey: string | null = null;
+
+			if (adopt) {
+				if (fileObj.directory_id === null) {
+					res.status(400).json({
+						detail: "a file outside any folder has nothing to inherit from",
+					});
+					return;
+				}
+				const dir = getDirectory(db, fileObj.directory_id);
+				if (!dir) {
+					res.status(404).json({ detail: "directory not found" });
+					return;
+				}
+				const dirEff = resolveDirectoryEncryption(db, dir);
+				if (dirEff.mode === "client") {
+					res.status(409).json({
+						detail:
+							"end-to-end encrypted folders can only be converted from the browser",
+					});
+					return;
+				}
+				let key: Buffer | null = null;
+				if (dirEff.mode === "server") {
+					if (!dirEff.keyBlob) {
+						res.status(500).json({ detail: "folder key missing" });
+						return;
+					}
+					key = openBox(masterKey, Buffer.from(dirEff.keyBlob));
+				}
+				accessKey = recoverAccessSecret(masterKey, dirEff);
+				next = { mode: dirEff.mode, keyBlob: dirEff.keyBlob as Buffer | null };
+				target = {
+					mode: dirEff.mode,
+					key,
+					keyBlob: null,
+					accessBlob: null,
+					accessIsPassword: 0,
+					overridden: 0,
+				};
+			} else if (mode === "server") {
+				// Random capability token unless the owner supplies a password
+				// (security/accessLock.ts).
+				const isPassword =
+					body.password === undefined || body.password === null ? 0 : 1;
+				const key = randomBytes(32);
+				accessKey = isPassword
+					? validateAccessPassword(body.password)
+					: randomBytes(18).toString("base64url");
+				const keyBlob = seal(masterKey, key);
+				next = { mode: "server", keyBlob };
+				target = {
+					mode: "server",
+					key,
+					keyBlob,
+					accessBlob: seal(masterKey, Buffer.from(accessKey)),
+					accessIsPassword: isPassword,
+					overridden: 1,
+				};
+			} else {
+				next = { mode: "none", keyBlob: null };
+				target = {
+					mode: "none",
+					key: null,
+					keyBlob: null,
+					accessBlob: null,
+					accessIsPassword: 0,
+					overridden: 1,
+				};
+			}
+
+			// Same state, different bookkeeping (e.g. adopting a parent that already
+			// holds this exact key): flip the flags without touching the bytes.
+			if (
+				next.mode === current.mode &&
+				blobsEqual(next.keyBlob, current.keyBlob)
+			) {
+				db.run(
+					`UPDATE files SET encryption_mode = $mode, enc_key_blob = $key,
+             enc_access_blob = $access, access_is_password = $isPassword,
+             encryption_overridden = $overridden WHERE id = $id`,
+					{
+						$mode: target.mode,
+						$key: target.keyBlob,
+						$access: target.accessBlob,
+						$isPassword: target.accessIsPassword,
+						$overridden: target.overridden,
+						$id: fileObj.id,
+					},
+				);
+			} else {
+				await rewriteFileEncryption(state, fileObj, target);
+			}
+
+			recordAudit(db, {
+				actor: user.username,
+				action: "file.encryption_changed",
+				target: `file:${fileObj.id}`,
+				ip: clientIp(state, req),
+			});
+			const updated = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: fileObj.id,
+			})!;
+			res.json({
+				...serializeFiles(state, req, [updated])[0]!,
+				access_key: accessKey ?? recoverAccessKey(state, updated),
+			});
+		}),
+	);
+
+	/** Seal & Forget: encrypt the file with a key the server immediately throws
+	 * away, returning it to the caller **once**.
+	 *
+	 * Afterwards the file behaves exactly like a `client`-mode one -- the server
+	 * can no longer read it, and the key travels in the URL *fragment*, never as
+	 * a `?ek=` query parameter. The honest difference from true end-to-end
+	 * encryption, which the UI must say plainly: the key existed in this
+	 * process's memory for the duration of this one request. It is never
+	 * written to disk or logs, but "attacker controls the server at the moment
+	 * of sealing" is a threat E2E resists and this does not.
+	 *
+	 * With `{password}` the key is derived from that password instead of being
+	 * random (crypto/passwordKey.ts), so there is something to remember rather
+	 * than something to write down -- at the cost of the file being only as
+	 * strong as the password, since nothing throttles an offline guess against
+	 * bytes an attacker already has. */
+	router.post(
+		"/:fileId(\\d+)/seal",
+		requireSession(state),
+		requireCsrf,
+		requireActiveUser(state),
+		asyncHandler(async (req, res) => {
+			const user = req.currentUser!;
+			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: req.params.fileId,
+			});
+			if (!fileObj) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			// Sealing is strictly more destructive than deleting: it is
+			// irreversible, and afterwards not even the owner can read the file
+			// back. So it takes the *delete* gate, not the edit gate -- an editor
+			// of the containing folder may move and rename, only the owner may
+			// make their file permanently unreadable.
+			const perm = ensurePermissions(db, user.id, {
+				master: user.role === "master",
+			});
+			if (!perm.can_delete) {
+				res.status(403).json({ detail: "deletion not permitted" });
+				return;
+			}
+			if (user.role !== "master" && fileObj.owner_id !== user.id) {
+				res.status(403).json({ detail: "not your file" });
+				return;
+			}
+			const current = resolveFileEncryption(db, fileObj);
+			if (current.mode === "client" || current.mode === "sealed") {
+				res.status(409).json({
+					detail:
+						"this file is already encrypted with a key the server cannot read",
+				});
+				return;
+			}
+
+			const raw = req.body?.password;
+			const usePassword = raw !== undefined && raw !== null;
+			let salt: Buffer | null = null;
+			let key: Buffer;
+			let revealed: string;
+			if (usePassword) {
+				const password = validateAccessPassword(raw);
+				salt = randomBytes(SEAL_SALT_BYTES);
+				key = await deriveSealKey(password, salt);
+				revealed = password;
+			} else {
+				key = randomBytes(32);
+				revealed = key.toString("base64url");
+			}
+
+			await rewriteFileEncryption(state, fileObj, {
+				mode: "sealed",
+				key,
+				keyBlob: null,
+				accessBlob: null,
+				accessIsPassword: 0,
+				overridden: 1,
+			});
+			db.run("UPDATE files SET seal_salt = $salt WHERE id = $id", {
+				$salt: salt,
+				$id: fileObj.id,
+			});
+			// Deliberately not logged, here or anywhere: the key is in the response
+			// body and nowhere else.
+			recordAudit(db, {
+				actor: user.username,
+				action: "file.sealed",
+				target: `file:${fileObj.id}`,
+				ip: clientIp(state, req),
+			});
+			log.info(
+				`file sealed file_id=${fileObj.id} owner_id=${fileObj.owner_id} password_derived=${usePassword}`,
+			);
+			const updated = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: fileObj.id,
+			})!;
+			res.json({
+				...serializeFiles(state, req, [updated])[0]!,
+				// Shown once. There is no second copy anywhere on this server.
+				key: revealed,
+				key_is_password: usePassword,
+				seal_salt: salt ? salt.toString("base64url") : null,
+				seal_kdf: usePassword ? sealKdfId() : null,
+			});
+		}),
+	);
+
+	/** The owner's own copy of a file's bytes.
+	 *
+	 * `/file/:slug/raw` exists for the public, and spends one use of the link it
+	 * came in on. An owner re-encrypting their own file in the browser (the
+	 * conversion flow below) would otherwise burn their share budget to do it,
+	 * and a file with no link at all would be unreachable to its own owner. So
+	 * this is the same read path with no link involved: session auth, edit
+	 * rights, no use consumed, no `last_downloaded_at` bump.
+	 *
+	 * What comes back is whatever the server can produce -- plaintext for
+	 * `none`/`server` (decompressing and decrypting as needed), and the raw
+	 * container for `client`/`sealed`, which is exactly what a browser holding
+	 * the key needs in order to decrypt it. */
+	router.get(
+		"/:fileId(\\d+)/content",
+		requireSession(state),
+		requireActiveUser(state),
+		asyncHandler(async (req, res) => {
+			const user = req.currentUser!;
+			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: req.params.fileId,
+			});
+			if (!fileObj) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			if (!canEditFile(fileObj, user)) {
+				res.status(403).json({ detail: "not your file" });
+				return;
+			}
+			let fullPath: string;
+			try {
+				fullPath = safeJoin(storageRoot(), fileObj.storage_path);
+			} catch {
+				res.status(500).json({ detail: "invalid storage path" });
+				return;
+			}
+			if (!existsSync(fullPath)) {
+				await ensureBlobAvailable(state, fileObj, fullPath);
+			}
+			if (!existsSync(fullPath)) {
+				res.status(500).json({ detail: "file missing from storage" });
+				return;
+			}
+			let source: AsyncGenerator<Buffer>;
+			try {
+				source = plaintextStream(state, fileObj, fullPath);
+			} catch (err) {
+				if (err instanceof PlaintextUnavailable) {
+					res.status(503).json({ detail: err.message });
+					return;
+				}
+				throw err;
+			}
+			res.writeHead(200, {
+				"X-Content-Type-Options": "nosniff",
+				"Referrer-Policy": "no-referrer",
+				"Content-Type": "application/octet-stream",
+			});
+			try {
+				for await (const chunk of source) {
+					if (!res.write(chunk))
+						await new Promise((resolve) => res.once("drain", resolve));
+				}
+				res.end();
+			} catch (err) {
+				log.error(
+					`owner content read failed file_id=${fileObj.id}: ${err instanceof Error ? err.message : String(err)}`,
+				);
+				res.destroy();
+			}
+		}),
+	);
+
+	/** Commit a browser-side end-to-end conversion.
+	 *
+	 * There is no server-side path into or out of `client`/`sealed` mode -- the
+	 * server has no key, so the crypto has to happen in the browser. The client
+	 * sequence is: upload the converted bytes as a **new** file (the ordinary
+	 * finalize flow), wait for that to succeed, then call this with the old
+	 * file's id. Both files exist for the duration of that window, which is
+	 * deliberate: the old one is only destroyed once the replacement is known to
+	 * be durable. Crashing mid-conversion leaves a duplicate, never a hole.
+	 *
+	 * The backend's whole job here is to make the transition *visible*. Nothing
+	 * else in the audit log distinguishes "a file was uploaded" from "content
+	 * that used to be unreadable by this server just passed through it in
+	 * plaintext", and that is exactly the moment worth recording. */
+	router.post(
+		"/:fileId(\\d+)/e2e-conversion",
+		requireSession(state),
+		requireCsrf,
+		requirePermission(state, "can_delete"),
+		(req, res) => {
+			const user = req.currentUser!;
+			const replacement = db.get<FileRow>(
+				"SELECT * FROM files WHERE id = $id",
+				{ $id: req.params.fileId },
+			);
+			if (!replacement) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			if (!canEditFile(replacement, user)) {
+				res.status(403).json({ detail: "not your file" });
+				return;
+			}
+			const replacedId = intField(req.body?.replaced_file_id);
+			if (replacedId === null) {
+				res.status(400).json({ detail: "replaced_file_id is required" });
+				return;
+			}
+			if (replacedId === replacement.id) {
+				res.status(400).json({ detail: "a file cannot replace itself" });
+				return;
+			}
+			const replaced = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: replacedId,
+			});
+			if (!replaced) {
+				res.status(404).json({ detail: "replaced file not found" });
+				return;
+			}
+			// Same rule the plain delete uses: an editor of the folder may move and
+			// rename, but only the owner (or a master) may destroy.
+			if (user.role !== "master" && replaced.owner_id !== user.id) {
+				res.status(403).json({ detail: "not your file" });
+				return;
+			}
+
+			const before = resolveFileEncryption(db, replaced).mode;
+			const after = resolveFileEncryption(db, replacement).mode;
+			const wasE2E = before === "client" || before === "sealed";
+			const isE2E = after === "client" || after === "sealed";
+			if (!wasE2E && !isE2E) {
+				res.status(400).json({
+					detail:
+						"neither file is end-to-end encrypted; use PATCH /files/:id/encryption instead",
+				});
+				return;
+			}
+
+			purgeFile(state, replaced);
+			recordAudit(db, {
+				actor: user.username,
+				// `file.e2e_decrypted` is the entry that matters: it marks when
+				// previously-unreadable content stopped being unreadable.
+				action: isE2E ? "file.e2e_sealed" : "file.e2e_decrypted",
+				target: `file:${replacement.id} replaces file:${replaced.id} (${before}->${after})`,
+				ip: clientIp(state, req),
+			});
+			const updated = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: replacement.id,
+			})!;
+			res.json({
+				...serializeFiles(state, req, [updated])[0]!,
+				replaced_file_id: replaced.id,
+				previous_encryption_mode: before,
+			});
+		},
+	);
+
+	/** Swap the `?ek=` secret without re-encrypting. `{password}` locks the file
+	 * behind a memorable password; an empty body mints a fresh random token. */
+	router.put(
+		"/:fileId(\\d+)/access",
+		requireSession(state),
+		requireCsrf,
+		requireActiveUser(state),
+		(req, res) => {
+			const user = req.currentUser!;
+			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: req.params.fileId,
+			});
+			if (!fileObj) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			if (!canEditFile(fileObj, user)) {
+				res.status(403).json({ detail: "not your file" });
+				return;
+			}
+			const eff = resolveFileEncryption(db, fileObj);
+			if (eff.mode !== "server") {
+				res
+					.status(400)
+					.json({ detail: "only server-encrypted files have an access key" });
+				return;
+			}
+			// The secret belongs to whichever node owns the key; changing it here
+			// would strand everything else resolving through that same folder.
+			if (!fileObj.encryption_overridden) {
+				res.status(409).json({
+					detail:
+						"this file inherits its key; set the password on the folder that owns it",
+					inherited_from_directory_id: eff.sourceDirectoryId,
+				});
+				return;
+			}
+			const raw = req.body?.password;
+			const isPassword = raw === undefined || raw === null ? 0 : 1;
+			const secret = isPassword
+				? validateAccessPassword(raw)
+				: randomBytes(18).toString("base64url");
+			db.run(
+				`UPDATE files SET enc_access_blob = $access, access_is_password = $isPassword
+         WHERE id = $id`,
+				{
+					$access: seal(getMasterKey(state.settings), Buffer.from(secret)),
+					$isPassword: isPassword,
+					$id: fileObj.id,
+				},
+			);
+			// A new secret means the old guessing history is meaningless. One
+			// reset, because the counter is keyed on the secret's owner rather
+			// than on each link that presents it.
+			state.lockout.resetIdentifier(
+				db,
+				`file:${fileObj.id}`,
+				LINK_ACCESS_IDENTIFIER,
+			);
+			recordAudit(db, {
+				actor: user.username,
+				action: "file.access_key_changed",
+				target: `file:${fileObj.id}`,
+				ip: clientIp(state, req),
+			});
+			res.json({
+				id: fileObj.id,
+				access_key: secret,
+				password_locked: !!isPassword,
+			});
+		},
+	);
+
 	router.delete(
 		"/:fileId(\\d+)",
 		requireSession(state),
@@ -1532,26 +2284,13 @@ export function filesRouter(state: AppState): Router {
 				res.status(403).json({ detail: "not your file" });
 				return;
 			}
-			db.run("DELETE FROM links WHERE file_id = $id", { $id: fileObj.id });
-			if (fileObj.directory_id !== null) {
-				db.run(
-					"UPDATE directories SET total_bytes = MAX(0, COALESCE(total_bytes, 0) - $dec) WHERE id = $id",
-					{
-						$dec: fileObj.size_bytes ?? 0,
-						$id: fileObj.directory_id,
-					},
-				);
-			}
-			const unlinkAfterCommit = [releaseBlob(db, fileObj)];
-			db.run("DELETE FROM files WHERE id = $id", { $id: fileObj.id });
-			deleteThumbnail(fileObj.id);
+			purgeFile(state, fileObj);
 			recordAudit(db, {
 				actor: user.username,
 				action: "file.deleted",
 				target: `file:${fileObj.id}`,
 				ip: clientIp(state, req),
 			});
-			unlinkQueued(unlinkAfterCommit);
 			res.json({ status: "deleted" });
 		},
 	);
@@ -1611,7 +2350,7 @@ export function filesRouter(state: AppState): Router {
 				slug,
 				url: base,
 				raw_url: `${base}/raw`,
-				encryption_mode: fileObj.encryption_mode,
+				encryption_mode: resolveFileEncryption(db, fileObj).mode,
 				access_key: recoverAccessKey(state, fileObj),
 			});
 		},
@@ -1625,11 +2364,25 @@ export function adminFilesRouter(state: AppState): Router {
 	const router = Router();
 	const { db } = state;
 
+	/** Every file in the system, not just the root-level ones.
+	 *
+	 * This used to filter on `directory_id IS NULL`, which was defensible when a
+	 * folder was a flat side-container; with a real tree it hid most of the
+	 * system from the one screen whose job is to show all of it. `directory_path`
+	 * is what makes a nested row identifiable — two files can share a name at
+	 * different depths. */
 	router.get("/", requireMaster(state), (req, res) => {
 		const files = db.all<FileRow>(
-			"SELECT * FROM files WHERE directory_id IS NULL ORDER BY created_at DESC",
+			"SELECT * FROM files ORDER BY created_at DESC",
 		);
-		res.json({ files: serializeFiles(state, req, files) });
+		const pathOf = buildPathIndex(db);
+		const rows = serializeFiles(state, req, files);
+		res.json({
+			files: rows.map((row, i) => ({
+				...row,
+				directory_path: pathOf(files[i]!.directory_id),
+			})),
+		});
 	});
 
 	return router;

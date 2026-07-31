@@ -29,9 +29,23 @@ import { folderUrl } from "@/features/files/lib/shareUrl";
 import type { EncryptionMode } from "@/features/files/types";
 import { useCreateDirectory } from "../hooks/useDirectories";
 import { createFolderKeyMaterial } from "../lib/folderKey";
+import type { Directory } from "../types";
 
-/** Create an empty folder (no upload required). */
-export function CreateFolderDialog({ trigger }: { trigger?: React.ReactNode }) {
+/** Create an empty folder.
+ *
+ * `parent` decides what the dialog even asks for. A root-level folder picks
+ * its own encryption; a nested one always inherits from the chain above it
+ * (the backend rejects an explicit mode on a child), so there is nothing to
+ * choose and we say so rather than showing a disabled control. */
+export function CreateFolderDialog({
+	parent = null,
+	trigger,
+	onCreated,
+}: {
+	parent?: Directory | null;
+	trigger?: React.ReactNode;
+	onCreated?: (dir: { id: number }) => void;
+}) {
 	const { can } = useAuth();
 	const create = useCreateDirectory();
 	const [open, setOpen] = useState(false);
@@ -42,29 +56,41 @@ export function CreateFolderDialog({ trigger }: { trigger?: React.ReactNode }) {
 	const [shareEntry, setShareEntry] = useState<ShareEntry | null>(null);
 	const [shareOpen, setShareOpen] = useState(false);
 
+	const nested = parent !== null;
+
 	const onCreate = async () => {
 		setError(null);
 		setCreatingKey(true);
 		try {
 			const finalTitle = title.trim() || "Untitled folder";
 			const keyMaterial =
-				mode === "client" ? await createFolderKeyMaterial() : null;
-			const created = await create.mutateAsync({
-				title: finalTitle,
-				encryption_mode: mode,
-				key_check_blob: keyMaterial?.keyCheckBlob ?? null,
-			});
+				!nested && mode === "client" ? await createFolderKeyMaterial() : null;
+			const created = await create.mutateAsync(
+				nested
+					? { title: finalTitle, parent_directory_id: parent.id }
+					: {
+							title: finalTitle,
+							encryption_mode: mode,
+							key_check_blob: keyMaterial?.keyCheckBlob ?? null,
+						},
+			);
 			setOpen(false);
 			setTitle("");
 			setMode("none");
-			setShareEntry({
-				filename: finalTitle,
-				mode,
-				baseUrl: folderUrl(created.slug),
-				accessKey: created.access_key,
-				clientKeyB64: keyMaterial?.clientKeyB64 ?? null,
-			});
-			setShareOpen(true);
+			onCreated?.(created);
+			// A nested folder has no key of its own to hand over, and its share
+			// link is one click away inside the folder -- only surface the
+			// save-this-now modal when there is actually a key to save.
+			if (!nested) {
+				setShareEntry({
+					filename: finalTitle,
+					mode,
+					baseUrl: folderUrl(created.slug),
+					accessKey: created.access_key,
+					clientKeyB64: keyMaterial?.clientKeyB64 ?? null,
+				});
+				setShareOpen(true);
+			}
 		} catch (err: any) {
 			setError(err.message || "Failed to create folder");
 		} finally {
@@ -86,7 +112,9 @@ export function CreateFolderDialog({ trigger }: { trigger?: React.ReactNode }) {
 					<DialogHeader>
 						<DialogTitle>New folder</DialogTitle>
 						<DialogDescription>
-							Create an empty folder, then add files to it later.
+							{parent
+								? `Creates a folder inside “${parent.title}”.`
+								: "Create an empty folder, then add files to it later."}
 						</DialogDescription>
 					</DialogHeader>
 					<div className="space-y-3">
@@ -100,32 +128,43 @@ export function CreateFolderDialog({ trigger }: { trigger?: React.ReactNode }) {
 								onChange={(e) => setTitle(e.target.value)}
 							/>
 						</div>
-						<div className="space-y-1.5">
-							<Label className="flex items-center gap-1.5">
-								Encryption
-								<Tooltip content="Files added later inherit this mode. Client mode uses one key for the whole folder.">
-									<Info className="size-3.5 text-muted-foreground" />
-								</Tooltip>
-							</Label>
-							<Select
-								value={mode}
-								onValueChange={(v) => setMode(v as EncryptionMode)}
-							>
-								<SelectTrigger>
-									<SelectValue />
-								</SelectTrigger>
-								<SelectContent>
-									<SelectItem value="none">None</SelectItem>
-									<SelectItem value="server">Server-side (?ek=)</SelectItem>
-									<SelectItem
-										value="client"
-										disabled={!can("can_upload_client_encrypted")}
-									>
-										End-to-end (#ek=)
-									</SelectItem>
-								</SelectContent>
-							</Select>
-						</div>
+						{parent ? (
+							<p className="rounded-md border border-border bg-secondary/20 px-3 py-2 text-xs text-muted-foreground">
+								Inherits{" "}
+								{parent.encryption_mode === "none"
+									? "no encryption"
+									: `${parent.encryption_mode} encryption`}{" "}
+								from “{parent.title}”. You can give it a key of its own
+								afterwards.
+							</p>
+						) : (
+							<div className="space-y-1.5">
+								<Label className="flex items-center gap-1.5">
+									Encryption
+									<Tooltip content="Everything created inside this folder inherits this, unless you give it its own key later.">
+										<Info className="size-3.5 text-muted-foreground" />
+									</Tooltip>
+								</Label>
+								<Select
+									value={mode}
+									onValueChange={(v) => setMode(v as EncryptionMode)}
+								>
+									<SelectTrigger>
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent>
+										<SelectItem value="none">None</SelectItem>
+										<SelectItem value="server">Server-side (?ek=)</SelectItem>
+										<SelectItem
+											value="client"
+											disabled={!can("can_upload_client_encrypted")}
+										>
+											End-to-end (#ek=)
+										</SelectItem>
+									</SelectContent>
+								</Select>
+							</div>
+						)}
 					</div>
 					{error && (
 						<div className="text-sm font-medium text-destructive">{error}</div>

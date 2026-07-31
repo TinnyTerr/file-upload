@@ -11,14 +11,15 @@ describe("UI design contracts", () => {
 		);
 	});
 
+	// The Files page became the Drive explorer; the panel that used to hold four
+	// upload tabs now holds the two that aren't "pick files from this machine".
 	test("upload tabs fit narrow mobile viewports", () => {
-		const source = read("src/features/files/components/UploadPanel.tsx");
-		const page = read("src/features/files/components/FilesPage.tsx");
+		const source = read("src/features/drive/components/DriveSidePanel.tsx");
+		const page = read("src/features/drive/components/DrivePage.tsx");
 
 		expect(source).toContain('aria-label="Upload method"');
 		expect(source).toContain("!grid");
-		expect(source).toContain("grid-cols-2 sm:grid-cols-4");
-		expect(source).not.toContain('className="grid w-full grid-cols-4"');
+		expect(source).toContain("grid-cols-2");
 		expect(page).toContain("lg:grid-cols-[minmax(0,1fr)_320px]");
 		expect(page).toContain("order-2 min-w-0");
 	});

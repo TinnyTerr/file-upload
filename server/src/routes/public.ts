@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { type Request, type Response, Router } from "express";
 import type { AppState } from "../appState.ts";
@@ -6,12 +5,18 @@ import { recordAudit } from "../audit.ts";
 import { touchBlobAccess } from "../cluster/cacheEviction.ts";
 import { getMasterKey } from "../config.ts";
 import { decryptStream } from "../crypto/aead.ts";
+import {
+	keyScopeOf,
+	resolveFileEncryption,
+} from "../crypto/effectiveEncryption.ts";
+import { sealKdfId } from "../crypto/passwordKey.ts";
 import { openBox } from "../crypto/secretbox.ts";
 import { type FileRow, nowIso, type UserRow } from "../db/rows.ts";
 import { consumeUse, resolveActiveLink } from "../links.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp } from "../middleware/auth.ts";
+import { checkLinkAccess } from "../security/accessLock.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
 import { renderSpa } from "../spa.ts";
 import { fileHashes } from "../storage/blobs.ts";
@@ -57,26 +62,6 @@ function contentDisposition(filename: string): string {
 	return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encoded}`;
 }
 
-function verifyAccessKey(
-	state: AppState,
-	f: FileRow,
-	ek: string | null,
-): boolean {
-	if (!f.enc_access_blob) return true; // legacy server-encrypted file — no credential required
-	if (!ek) return false;
-	try {
-		const expected = openBox(
-			getMasterKey(state.settings),
-			Buffer.from(f.enc_access_blob),
-		).toString("utf-8");
-		const a = Buffer.from(ek);
-		const b = Buffer.from(expected);
-		return a.length === b.length && timingSafeEqual(a, b);
-	} catch {
-		return false;
-	}
-}
-
 function parseRange(header: string, fileSize: number): [number, number] | null {
 	const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
 	if (!m) return null;
@@ -118,6 +103,40 @@ function escapeHtml(s: string): string {
 		.replace(/'/g, "&#39;");
 }
 
+/** Content types /preview knows how to serve inline. */
+function previewableType(contentType: string | null): boolean {
+	const ct = (contentType || "").toLowerCase();
+	return (
+		ct.startsWith("image/") ||
+		ct.startsWith("video/") ||
+		ct.startsWith("audio/") ||
+		ct === "application/pdf" ||
+		ct.startsWith("text/")
+	);
+}
+
+/**
+ * Whether `GET /file/:slug/preview` would serve this member's bytes.
+ *
+ * The gallery (see the public folder page) has to know *before* it renders a
+ * `<video>` whether that element will get media or a 403, and only the server
+ * knows about the storage transforms. Keep in step with the handler below --
+ * this is the same decision, answered ahead of time.
+ */
+export function previewEligible(
+	db: AppState["db"],
+	f: FileRow,
+	link: { max_uses: number | null },
+): boolean {
+	if (link.max_uses !== null) return false;
+	if (!previewableType(f.content_type)) return false;
+	if (f.archived) return false;
+	const mode = resolveFileEncryption(db, f).mode;
+	// `server` is served here too, gated on the same `?ek=` /raw wants; the
+	// server holds no key at all for `client`/`sealed`.
+	return mode === "none" || mode === "server";
+}
+
 function fileMetaTags(req: Request, state: AppState, slug: string): string {
 	const link = resolveActiveLink(state.db, slug);
 	if (!link) return "";
@@ -140,7 +159,7 @@ function fileMetaTags(req: Request, state: AppState, slug: string): string {
 	];
 	const eligible =
 		link.max_uses === null &&
-		f.encryption_mode === "none" &&
+		resolveFileEncryption(state.db, f).mode === "none" &&
 		!f.compressed &&
 		!f.archived;
 	const previewUrl = escapeHtml(
@@ -216,11 +235,22 @@ export function publicRouter(state: AppState): Router {
 			}
 		}
 
+		const eff = resolveFileEncryption(db, f);
 		res.json({
 			filename: f.original_filename,
 			size_bytes: f.size_bytes,
 			content_type: f.content_type,
-			encryption_mode: f.encryption_mode,
+			encryption_mode: eff.mode,
+			// Tells the download page to ask for a password rather than paste a key.
+			password_locked: eff.passwordLocked,
+			// Sealed files are decrypted in the browser like client-mode ones. When
+			// the key was derived from a password, these say how to rederive it --
+			// a salt is not a secret, and the server keeps nothing else (see
+			// crypto/passwordKey.ts).
+			seal_salt: f.seal_salt
+				? Buffer.from(f.seal_salt).toString("base64url")
+				: null,
+			seal_kdf: f.seal_salt ? sealKdfId() : null,
 			compressed: !!f.compressed,
 			archived: !!f.archived,
 			lifecycle_state: f.lifecycle_state,
@@ -248,11 +278,21 @@ export function publicRouter(state: AppState): Router {
 				res.status(404).json({ detail: "not found" });
 				return;
 			}
+			// Inheriting files carry no key of their own -- the folder chain above
+			// them does (crypto/effectiveEncryption.ts).
+			const eff = resolveFileEncryption(db, f);
 			const ek = typeof req.query.ek === "string" ? req.query.ek : null;
-			if (f.encryption_mode === "server" && !verifyAccessKey(state, f, ek)) {
-				res
-					.status(401)
-					.json({ detail: "missing or invalid access key (?ek=)" });
+			// Password-locked links are throttled per slug in here; a random-token
+			// link is still just a comparison (security/accessLock.ts).
+			const access = checkLinkAccess(
+				state,
+				keyScopeOf(eff, `file:${f.id}`),
+				eff,
+				ek,
+				{ allowMissingSecret: true },
+			);
+			if (!access.ok) {
+				res.status(access.status).json({ detail: access.detail });
 				return;
 			}
 			if (!consumeUse(db, req.params.slug)) {
@@ -290,7 +330,7 @@ export function publicRouter(state: AppState): Router {
 			}
 			touchBlobAccess(db, f.blob_id);
 
-			const needsDecrypt = f.encryption_mode === "server";
+			const needsDecrypt = eff.mode === "server";
 			const needsDecompress = !!(f.compressed || f.archived);
 
 			const baseHeaders: Record<string, string> = {
@@ -302,7 +342,7 @@ export function publicRouter(state: AppState): Router {
 			};
 
 			if (needsDecrypt) {
-				if (!f.enc_key_blob) {
+				if (!eff.keyBlob) {
 					res.status(500).json({ detail: "encryption key not stored" });
 					return;
 				}
@@ -310,7 +350,7 @@ export function publicRouter(state: AppState): Router {
 				try {
 					perFileKey = openBox(
 						getMasterKey(state.settings),
-						Buffer.from(f.enc_key_blob),
+						Buffer.from(eff.keyBlob),
 					);
 				} catch {
 					res.status(500).json({ detail: "failed to recover encryption key" });
@@ -451,22 +491,35 @@ export function publicRouter(state: AppState): Router {
 				res.status(404).json({ detail: "not found" });
 				return;
 			}
-			const ct = f.content_type || "";
-			if (
-				!(
-					ct.startsWith("image/") ||
-					ct.startsWith("video/") ||
-					ct.startsWith("audio/") ||
-					ct === "application/pdf" ||
-					ct.startsWith("text/")
-				)
-			) {
+			if (!previewableType(f.content_type)) {
 				res.status(403).json({ detail: "preview unavailable" });
 				return;
 			}
-			if (f.encryption_mode !== "none" || f.compressed || f.archived) {
+			// Archived bytes are zstd-wrapped on cold storage and need the
+			// unarchive path first; /raw is where that conversation happens.
+			if (f.archived) {
 				res.status(403).json({ detail: "preview unavailable" });
 				return;
+			}
+			const eff = resolveFileEncryption(db, f);
+			if (eff.mode === "client" || eff.mode === "sealed") {
+				// The server has no key for these -- only the holder of the fragment
+				// can turn them back into pixels, and it does that from /raw.
+				res.status(403).json({ detail: "preview unavailable" });
+				return;
+			}
+			if (eff.mode === "server") {
+				// Same gate /raw applies, including the per-slug throttle when the
+				// secret is a password. Preview consumes no link use, but a
+				// limited-use link never reaches here at all (checked above).
+				const ek = typeof req.query.ek === "string" ? req.query.ek : null;
+				const access = checkLinkAccess(state, req.params.slug, eff, ek, {
+					allowMissingSecret: true,
+				});
+				if (!access.ok) {
+					res.status(access.status).json({ detail: access.detail });
+					return;
+				}
 			}
 			let fullPath: string;
 			try {
@@ -483,6 +536,58 @@ export function publicRouter(state: AppState): Router {
 				return;
 			}
 			touchBlobAccess(db, f.blob_id);
+
+			// Anything stored transformed has to be reproduced from byte zero, so
+			// it goes out 200-only with no Accept-Ranges -- the same rule the media
+			// library's `seekable` flag reports (storage/streaming.ts). Archived
+			// files were refused above, so the only compressed layering that can
+			// reach here is upload-time ENC(ZSTD(x)).
+			const needsDecrypt = eff.mode === "server";
+			const needsDecompress = !!f.compressed;
+			if (needsDecrypt || needsDecompress) {
+				let source: AsyncIterable<Uint8Array>;
+				if (needsDecrypt) {
+					if (!eff.keyBlob) {
+						res.status(500).json({ detail: "encryption key not stored" });
+						return;
+					}
+					let perFileKey: Buffer;
+					try {
+						perFileKey = openBox(
+							getMasterKey(state.settings),
+							Buffer.from(eff.keyBlob),
+						);
+					} catch {
+						res
+							.status(500)
+							.json({ detail: "failed to recover encryption key" });
+						return;
+					}
+					source = needsDecompress
+						? decompressFromDecrypted(fullPath, f.size_bytes, perFileKey)
+						: decryptStream(perFileKey, fullPath);
+				} else {
+					source = decompressStream(fullPath, f.size_bytes);
+				}
+				res.writeHead(200, {
+					...SECURITY_HEADERS,
+					"Content-Type": f.content_type || "application/octet-stream",
+				});
+				try {
+					for await (const chunk of source) {
+						if (!res.write(chunk))
+							await new Promise((resolve) => res.once("drain", resolve));
+					}
+					res.end();
+				} catch (err) {
+					log.error(
+						`preview decrypt/decompress failed file_id=${f.id}: ${err instanceof Error ? err.message : String(err)}`,
+					);
+					res.destroy();
+				}
+				return;
+			}
+
 			const fileSize = statSync(fullPath).size;
 			const headers: Record<string, string> = {
 				...SECURITY_HEADERS,
@@ -550,7 +655,7 @@ export function publicRouter(state: AppState): Router {
 			const ct = f.content_type || "";
 			if (
 				(!ct.startsWith("image/") && !ct.startsWith("video/")) ||
-				f.encryption_mode !== "none" ||
+				resolveFileEncryption(db, f).mode !== "none" ||
 				f.compressed ||
 				f.archived
 			) {

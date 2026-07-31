@@ -5,8 +5,6 @@ import {
 	publicService,
 	rawPath,
 } from "@/features/download/services/publicService";
-import type { EncryptionMode } from "@/features/files/types";
-import { base64UrlToBytes } from "@/lib/base64url";
 import { saveBlob } from "@/lib/download";
 import { createZip } from "@/lib/zip";
 import { decryptBlob } from "@/workers/aeadClient";
@@ -15,84 +13,93 @@ import {
 	type PublicDirMember,
 	publicDirService,
 } from "../services/publicDirService";
+import type { FolderKeys } from "./useFolderKeys";
 
-export function useDirInfo(slug: string | undefined) {
+export function useDirInfo(slug: string | undefined, dir: number | null) {
 	return useQuery({
-		queryKey: ["public", "dir", slug],
-		queryFn: () => publicDirService.info(slug!),
+		queryKey: ["public", "dir", slug, dir ?? "entry"],
+		queryFn: () => publicDirService.info(slug!, dir),
 		enabled: !!slug,
 		retry: false,
 	});
 }
 
-/** Download a single member (navigate for none/server, decrypt for client). */
-export function downloadMember(
-	member: PublicDirMember,
-	mode: EncryptionMode,
-	keys: { clientKey?: string | null; serverKey?: string | null },
-) {
-	if (mode === "client") {
-		if (!keys.clientKey) {
-			toast.error("Missing decryption key (#ek=).");
+/** Download one member using whichever key its own scope resolves to. */
+export function downloadMember(member: PublicDirMember, keys: FolderKeys) {
+	const key = keys.held(member.key_scope);
+	if (
+		member.encryption_mode === "client" ||
+		member.encryption_mode === "sealed"
+	) {
+		if (!key?.bytes) {
+			toast.error("This file needs its own key before it can be decrypted.");
 			return Promise.resolve();
 		}
-		const keyBytes = base64UrlToBytes(keys.clientKey);
+		const bytes = key.bytes;
 		return publicService
 			.fetchRaw(member.slug)
-			.then((cipher) => decryptBlob(cipher, keyBytes))
+			.then((cipher) => decryptBlob(cipher, bytes))
 			.then((plain) => saveBlob(plain, member.filename))
 			.catch((e) =>
 				toast.error(e instanceof Error ? e.message : "Download failed"),
 			);
 	}
 	window.location.assign(
-		rawPath(member.slug, mode === "server" ? keys.serverKey : undefined),
+		rawPath(
+			member.slug,
+			member.encryption_mode === "server" ? key?.secret : undefined,
+		),
 	);
 	return Promise.resolve();
 }
 
-/** Download the whole folder as a ZIP. */
-export function useFolderZip(
-	slug: string,
-	title: string,
-	mode: EncryptionMode,
-) {
+/**
+ * Download one folder level as a ZIP.
+ *
+ * For `none`/`server` the server streams it, following the subtree as far as
+ * the presented key reaches. An end-to-end folder has to be assembled here,
+ * because only this browser can decrypt its members.
+ */
+export function useFolderZip(slug: string, keys: FolderKeys) {
 	const [status, setStatus] = useState<"idle" | "working" | "done" | "error">(
 		"idle",
 	);
 	const [progress, setProgress] = useState({ done: 0, total: 0 });
 
 	const downloadAll = useCallback(
-		async (
-			members: PublicDirMember[],
-			keys: { clientKey?: string | null; serverKey?: string | null },
-		) => {
-			// Server streams the ZIP for none/server modes.
-			if (mode !== "client") {
+		async (args: {
+			dir: number | null;
+			title: string;
+			keyScope: string;
+			mode: string;
+			members: PublicDirMember[];
+		}) => {
+			const key = keys.held(args.keyScope);
+			if (args.mode !== "client" && args.mode !== "sealed") {
 				window.location.assign(
-					dirZipPath(slug, mode === "server" ? keys.serverKey : undefined),
+					dirZipPath(slug, { dir: args.dir, accessKey: key?.secret }),
 				);
 				return;
 			}
-			if (!keys.clientKey) {
-				toast.error("Missing decryption key (#ek=) for this folder.");
+			if (!key?.bytes) {
+				toast.error("Unlock this folder first.");
 				return;
 			}
-			const keyBytes = base64UrlToBytes(keys.clientKey);
+			const bytes = key.bytes;
 			setStatus("working");
-			setProgress({ done: 0, total: members.length });
+			setProgress({ done: 0, total: args.members.length });
 			try {
 				const entries: { name: string; data: Uint8Array }[] = [];
-				for (let i = 0; i < members.length; i++) {
-					const cipher = await publicService.fetchRaw(members[i].slug);
-					const plain = await decryptBlob(cipher, keyBytes);
+				for (let i = 0; i < args.members.length; i++) {
+					const cipher = await publicService.fetchRaw(args.members[i].slug);
+					const plain = await decryptBlob(cipher, bytes);
 					entries.push({
-						name: members[i].filename,
+						name: args.members[i].filename,
 						data: new Uint8Array(await plain.arrayBuffer()),
 					});
-					setProgress({ done: i + 1, total: members.length });
+					setProgress({ done: i + 1, total: args.members.length });
 				}
-				saveBlob(createZip(entries), `${title || "folder"}.zip`);
+				saveBlob(createZip(entries), `${args.title || "folder"}.zip`);
 				setStatus("done");
 				toast.success("Folder downloaded & decrypted");
 			} catch (err) {
@@ -102,7 +109,7 @@ export function useFolderZip(
 				);
 			}
 		},
-		[slug, title, mode],
+		[slug, keys],
 	);
 
 	return { downloadAll, status, progress };

@@ -47,6 +47,8 @@ export interface PermissionRow {
 	can_manage_cluster: number;
 	can_use_torrents: number;
 	can_watch_media: number;
+	require_mfa: number;
+	require_passkey: number;
 	quota_bytes: number;
 	max_file_bytes: number;
 	archive_after_idle_days: number;
@@ -89,6 +91,9 @@ export interface FileRow {
 	encryption_mode: string;
 	enc_key_blob: Uint8Array | null;
 	enc_access_blob: Uint8Array | null;
+	access_is_password: number;
+	seal_salt: Uint8Array | null;
+	encryption_overridden: number;
 	compressed: number;
 	archived: number;
 	archive_codec: string | null;
@@ -109,9 +114,12 @@ export interface DirectoryRow {
 	owner_id: number;
 	slug: string;
 	title: string;
+	parent_directory_id: number | null;
 	encryption_mode: string;
 	enc_key_blob: Uint8Array | null;
 	enc_access_blob: Uint8Array | null;
+	access_is_password: number;
+	encryption_overridden: number;
 	key_check_blob: string | null;
 	total_bytes: number;
 	expires_at: string | null;
@@ -123,6 +131,7 @@ export interface DirectoryRow {
 	library_overview: string | null;
 	library_poster_file_id: number | null;
 	library_published_at: string | null;
+	gallery_view: number;
 	created_at: string;
 }
 
@@ -219,7 +228,10 @@ export interface RemoteUploadJobRow {
 export interface TorrentJobRow {
 	id: number;
 	owner_id: number;
+	/** Where the import landed (the folder created for a multi-file torrent). */
 	directory_id: number | null;
+	/** Where the requester asked for it to land. NULL = the root. */
+	target_directory_id: number | null;
 	name: string;
 	source: string;
 	info_hash: string | null;

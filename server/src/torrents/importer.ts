@@ -5,8 +5,15 @@ import { basename, join, relative, sep } from "node:path";
 import type { Request } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
+import { resolveDirectoryEncryption } from "../crypto/effectiveEncryption.ts";
 import type { DirectoryRow, TorrentJobRow, UserRow } from "../db/rows.ts";
 import { nowIso } from "../db/rows.ts";
+import {
+	depthOf,
+	getDirectory,
+	isEditor,
+	MAX_DEPTH,
+} from "../directoryTree.ts";
 import { HttpError } from "../httpError.ts";
 import { newSlug } from "../links.ts";
 import { getLogger } from "../logging.ts";
@@ -115,16 +122,28 @@ function createDirectory(
 	user: UserRow,
 	title: string,
 	req: Request,
+	parent: DirectoryRow | null,
 ): DirectoryRow {
 	const { db } = state;
 	const slug = newSlug();
+	// A child always inherits (`encryption_overridden = 0`) with its key columns
+	// left NULL -- the single copy of the key material lives on the break point
+	// above it, exactly as POST /directories does it. `encryption_mode` is the
+	// denormalized mirror the plain SQL filters elsewhere rely on.
+	const inheritedMode = parent
+		? resolveDirectoryEncryption(db, parent).mode
+		: "none";
 	db.run(
-		`INSERT INTO directories (owner_id, slug, title, encryption_mode, total_bytes, created_at)
-     VALUES ($ownerId, $slug, $title, 'none', 0, $now)`,
+		`INSERT INTO directories (owner_id, slug, title, parent_directory_id, encryption_mode,
+       encryption_overridden, total_bytes, created_at)
+     VALUES ($ownerId, $slug, $title, $parentId, $mode, $overridden, 0, $now)`,
 		{
 			$ownerId: user.id,
 			$slug: slug,
 			$title: title.slice(0, 512) || "Torrent",
+			$parentId: parent ? parent.id : null,
+			$mode: inheritedMode,
+			$overridden: parent ? 0 : 1,
 			$now: nowIso(),
 		},
 	);
@@ -197,8 +216,35 @@ export async function importCompletedTorrent(
 		throw new HttpError(413, "torrent would exceed your storage quota");
 	}
 
+	// Where the requester asked for it. Everything about that folder is
+	// re-checked here rather than trusted from queue time: a torrent can run for
+	// hours, and the folder may since have been deleted, moved deeper, had its
+	// encryption changed, or had the requester's rights revoked. Any of those
+	// means the import lands at the root instead of failing outright — the bytes
+	// are already downloaded, and losing them to a placement problem would be
+	// the worse outcome.
+	let target =
+		job.target_directory_id !== null
+			? getDirectory(db, job.target_directory_id)
+			: null;
+	if (target) {
+		const mode = resolveDirectoryEncryption(db, target).mode;
+		if (
+			mode === "client" ||
+			mode === "sealed" ||
+			!isEditor(db, target, user) ||
+			depthOf(db, target.id) + 1 > MAX_DEPTH
+		) {
+			log.warning(
+				`torrent target folder no longer usable job_id=${job.id} directory_id=${target.id}; importing to the root instead`,
+			);
+			target = null;
+		}
+	}
 	const directory =
-		files.length > 1 ? createDirectory(state, user, job.name, req) : null;
+		files.length > 1
+			? createDirectory(state, user, job.name, req, target)
+			: target;
 
 	let imported = 0;
 	for (const file of files) {

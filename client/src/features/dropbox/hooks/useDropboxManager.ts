@@ -49,34 +49,38 @@ export function useDropboxManager() {
 		});
 	}, []);
 
-	const create = useCallback(async (expiresInSeconds: number) => {
-		if (load()) {
-			toast.error("You already have an active receive link", {
-				description: "Cancel it before creating a new one.",
-			});
-			return;
-		}
-		setCreating(true);
-		try {
-			const res: DropboxLink = await dropboxService.create({
-				expires_in_seconds: expiresInSeconds,
-			});
-			const next: ActiveDropbox = {
-				token: res.token,
-				expires_at: res.expires_at,
-				created_at: new Date().toISOString(),
-			};
-			save(next);
-			setActive(next);
-			toast.success("Receive link created");
-		} catch (err) {
-			toast.error("Couldn't create receive link", {
-				description: errorMessage(err),
-			});
-		} finally {
-			setCreating(false);
-		}
-	}, []);
+	const create = useCallback(
+		async (expiresInSeconds: number, targetDirectoryId: number | null) => {
+			if (load()) {
+				toast.error("You already have an active receive link", {
+					description: "Cancel it before creating a new one.",
+				});
+				return;
+			}
+			setCreating(true);
+			try {
+				const res: DropboxLink = await dropboxService.create({
+					expires_in_seconds: expiresInSeconds,
+					target_directory_id: targetDirectoryId ?? undefined,
+				});
+				const next: ActiveDropbox = {
+					token: res.token,
+					expires_at: res.expires_at,
+					created_at: new Date().toISOString(),
+				};
+				save(next);
+				setActive(next);
+				toast.success("Receive link created");
+			} catch (err) {
+				toast.error("Couldn't create receive link", {
+					description: errorMessage(err),
+				});
+			} finally {
+				setCreating(false);
+			}
+		},
+		[],
+	);
 
 	const cancel = useCallback(async () => {
 		const current = load();

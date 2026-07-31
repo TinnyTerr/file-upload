@@ -44,7 +44,7 @@ export function PermissionsDialog({
 		}
 	};
 
-	const groups = ["essentials", "advanced", "admin"] as const;
+	const groups = ["essentials", "advanced", "security", "admin"] as const;
 
 	return (
 		<Dialog open={!!user} onOpenChange={(o) => !o && onClose()}>

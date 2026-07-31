@@ -38,6 +38,16 @@ export const filesService = {
 
 	delete: (fileId: number) => api.delete(`/files/${fileId}`),
 
+	rename: (fileId: number, originalFilename: string) =>
+		api.patch<FileObject>(`/files/${fileId}`, {
+			json: { original_filename: originalFilename },
+		}),
+
+	move: (fileId: number, directoryId: number | null) =>
+		api.patch<FileObject>(`/files/${fileId}/move`, {
+			json: { directory_id: directoryId },
+		}),
+
 	saveToMyFiles: (slug: string) =>
 		api.post<{ file_id: number; slug: string }>(`/files/${slug}/save`),
 
@@ -102,11 +112,19 @@ export const filesService = {
 		api.delete("/files/upload", { query: { upload_id: uploadId } }),
 
 	// --- remote URL upload (synchronous on the server) ---
-	remoteUpload: (url: string, originalFilename?: string) =>
+	remoteUpload: (
+		url: string,
+		originalFilename?: string,
+		directoryId?: number | null,
+	) =>
 		api.post<UploadResult & { job_id: number; status: string }>(
 			"/files/remote-upload",
 			{
-				json: { url, original_filename: originalFilename || undefined },
+				json: {
+					url,
+					original_filename: originalFilename || undefined,
+					directory_id: directoryId ?? undefined,
+				},
 			},
 		),
 

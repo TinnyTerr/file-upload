@@ -4,8 +4,10 @@ import { unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decryptStream } from "../crypto/aead.ts";
+import { resolveFileEncryption } from "../crypto/effectiveEncryption.ts";
 import { openBox } from "../crypto/secretbox.ts";
 import type { FileRow } from "../db/rows.ts";
+import type { Db } from "../db/types.ts";
 import { HttpError } from "../httpError.ts";
 import { decompressStream } from "./compress.ts";
 import { safeJoin, storageRoot } from "./paths.ts";
@@ -37,6 +39,21 @@ export function safeArcname(name: string, seen: Set<string>): string {
 	}
 	seen.add(candidate);
 	return candidate;
+}
+
+/** One folder component of an in-zip path. Same character rules as
+ * `safeArcname`, but for a directory name rather than a leaf -- a shared folder
+ * can nest now, and its structure has to survive into the archive without a
+ * title being able to smuggle a separator or a traversal segment in. */
+export function safeArcsegment(name: string): string {
+	const cleaned = name
+		.replace(/[\\/]/g, "_")
+		.split("")
+		.filter((c) => c.codePointAt(0)! >= 0x20)
+		.join("")
+		.trim();
+	if (!cleaned || cleaned === "." || cleaned === "..") return "folder";
+	return cleaned;
 }
 
 function newTempfile(suffix: string): string {
@@ -81,14 +98,17 @@ export async function writeStreamToFile(
  * ENC(ZSTD(x)) (decrypt-then-decompress). Mirrors routes/public.ts's raw
  * handler (`f.archived && !f.compressed` branch). */
 export async function memberSource(
+	db: Db,
 	masterKey: Buffer,
 	f: FileRow,
 ): Promise<[path: string, isTemp: boolean]> {
 	const full = safeJoin(storageRoot(), f.storage_path);
 	if (!existsSync(full)) throw new HttpError(500, "file missing from storage");
 
+	// An inheriting file's key lives on an ancestor folder, not on its own row.
+	const eff = resolveFileEncryption(db, f);
 	const needsDecompress = !!(f.compressed || f.archived);
-	const needsDecrypt = f.encryption_mode === "server";
+	const needsDecrypt = eff.mode === "server";
 	if (!needsDecompress && !needsDecrypt) return [full, false];
 
 	const decompressFirst = !!(f.archived && !f.compressed);
@@ -105,9 +125,8 @@ export async function memberSource(
 				src = dec;
 			}
 			if (needsDecrypt) {
-				if (!f.enc_key_blob)
-					throw new HttpError(500, "encryption key not stored");
-				const key = openBox(masterKey, Buffer.from(f.enc_key_blob));
+				if (!eff.keyBlob) throw new HttpError(500, "encryption key not stored");
+				const key = openBox(masterKey, Buffer.from(eff.keyBlob));
 				const plain = newTempfile(".plain");
 				try {
 					await writeStreamToFile(decryptStream(key, src), plain);
@@ -123,9 +142,8 @@ export async function memberSource(
 
 		// ENC(ZSTD(x)) -- decrypt, then decompress.
 		if (needsDecrypt) {
-			if (!f.enc_key_blob)
-				throw new HttpError(500, "encryption key not stored");
-			const key = openBox(masterKey, Buffer.from(f.enc_key_blob));
+			if (!eff.keyBlob) throw new HttpError(500, "encryption key not stored");
+			const key = openBox(masterKey, Buffer.from(eff.keyBlob));
 			const dec = newTempfile(".dec");
 			intermediate = dec;
 			await writeStreamToFile(decryptStream(key, src), dec);

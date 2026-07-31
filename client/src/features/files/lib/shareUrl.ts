@@ -21,9 +21,13 @@ export function folderUrl(slug: string): string {
 
 /**
  * Compose the full shareable URL including the encryption key:
- *  - server mode → `?ek=<accessKey>` (query, sent to server)
- *  - client mode → `#ek=<keyB64Url>` (fragment, never sent to server)
- *  - none        → bare URL
+ *  - server mode          → `?ek=<accessKey>` (query, sent to server)
+ *  - client/sealed mode   → `#ek=<keyB64Url>` (fragment, never sent to server)
+ *  - none                 → bare URL
+ *
+ * `sealed` behaves exactly like `client` here: the server threw the key away,
+ * so it can only ever travel in the fragment, and only whoever kept it can
+ * complete the URL.
  */
 export function shareUrl(
 	base: string,
@@ -32,7 +36,7 @@ export function shareUrl(
 ): string {
 	if (mode === "server" && opts.accessKey)
 		return `${base}?ek=${encodeURIComponent(opts.accessKey)}`;
-	if (mode === "client" && opts.clientKeyB64)
+	if ((mode === "client" || mode === "sealed") && opts.clientKeyB64)
 		return `${base}#ek=${opts.clientKeyB64}`;
 	return base;
 }

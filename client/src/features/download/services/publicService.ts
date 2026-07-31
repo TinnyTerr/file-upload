@@ -21,6 +21,12 @@ export interface PublicFileInfo {
 	hashes: Record<string, string> | null;
 	uploader: UploaderInfo | null;
 	already_saved: boolean;
+	/** The `?ek=` secret is a chosen password, so guesses are throttled. */
+	password_locked: boolean;
+	/** Seal & Forget with a password: the salt and the derivation parameters
+	 * needed to rebuild the key in the browser. Null for a random seal. */
+	seal_salt: string | null;
+	seal_kdf: string | null;
 }
 
 export const publicService = {
@@ -65,4 +71,14 @@ export const rawPath = (slug: string, accessKey?: string | null) =>
 			: `/file/${slug}/raw`,
 	);
 
-export const previewPath = (slug: string) => apiPath(`/file/${slug}/preview`);
+/** Inline bytes for an unlimited-use link. `accessKey` is the folder's/file's
+ * `?ek=` — required for server-encrypted members, ignored otherwise. */
+export const previewPath = (slug: string, accessKey?: string | null) =>
+	apiPath(
+		accessKey
+			? `/file/${slug}/preview?ek=${encodeURIComponent(accessKey)}`
+			: `/file/${slug}/preview`,
+	);
+
+export const thumbnailPath = (slug: string) =>
+	apiPath(`/file/${slug}/thumbnail`);

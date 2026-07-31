@@ -4,6 +4,7 @@ import { AppShell } from "@/components/layout/AppShell";
 import { FeatureUnavailable } from "@/components/layout/FeatureUnavailable";
 import { FullPageSpinner } from "@/components/layout/FullPageSpinner";
 import {
+	MFA_SETUP_PATH,
 	RedirectIfAuthed,
 	RequireAuth,
 	RequireMaster,
@@ -15,7 +16,7 @@ import { ChangePage } from "@/features/auth/components/ChangePage";
 
 import { LoginPage } from "@/features/auth/components/LoginPage";
 import { useAuth } from "@/features/auth/hooks/auth";
-import { FilesPage } from "@/features/files/components/FilesPage";
+import { DrivePage } from "@/features/drive/components/DrivePage";
 
 const DownloadPage = lazy(() =>
 	import("@/features/download/components/DownloadPage").then((m) => ({
@@ -65,6 +66,11 @@ const MediaPage = lazy(() =>
 const CollectionPage = lazy(() =>
 	import("@/features/media/components/CollectionPage").then((m) => ({
 		default: m.CollectionPage,
+	})),
+);
+const MfaSetupPage = lazy(() =>
+	import("@/features/account/components/MfaSetupPage").then((m) => ({
+		default: m.MfaSetupPage,
 	})),
 );
 const ClusterPage = lazy(() =>
@@ -161,11 +167,21 @@ export default function App() {
 				{/* App chrome layout — all children require auth */}
 				<Route element={<AppShell />}>
 					<Route element={<RequireAuth />}>
+						{/* The explorer keeps the open folder in the URL, so `/files`
+						    and `/files/:dirId` are the same page at different depths. */}
 						<Route
 							path="/files"
 							element={
 								<Gated feature="files" label="Files">
-									<FilesPage />
+									<DrivePage />
+								</Gated>
+							}
+						/>
+						<Route
+							path="/files/:dirId"
+							element={
+								<Gated feature="files" label="Files">
+									<DrivePage />
 								</Gated>
 							}
 						/>
@@ -174,6 +190,14 @@ export default function App() {
 							element={
 								<Gated feature="account" label="Account settings">
 									<ChangePage />
+								</Gated>
+							}
+						/>
+						<Route
+							path={MFA_SETUP_PATH}
+							element={
+								<Gated feature="account" label="Account settings">
+									<MfaSetupPage />
 								</Gated>
 							}
 						/>

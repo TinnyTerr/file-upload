@@ -22,9 +22,14 @@ export function useDownload(
 	const [percent, setPercent] = useState(0);
 	const [error, setError] = useState<string | null>(null);
 
-	/** keys: clientKey (base64url, from #ek=) / serverKey (from ?ek=). */
+	/** keys: clientKey (base64url, from #ek=), serverKey (from ?ek=), or
+	 * sealKey (already derived from a Seal & Forget password). */
 	const download = useCallback(
-		async (keys: { clientKey?: string | null; serverKey?: string | null }) => {
+		async (keys: {
+			clientKey?: string | null;
+			serverKey?: string | null;
+			sealKey?: Uint8Array | null;
+		}) => {
 			setError(null);
 			try {
 				if (mode === "none") {
@@ -41,14 +46,16 @@ export function useDownload(
 					window.location.assign(rawPath(slug, keys.serverKey));
 					return;
 				}
-				// client mode → fetch ciphertext, decrypt in-browser, save plaintext.
-				if (!keys.clientKey) {
+				// client and sealed both mean the same thing here: the server holds
+				// no key, so the bytes come down as ciphertext and the browser is
+				// the only thing that can turn them back into a file.
+				if (!keys.clientKey && !keys.sealKey) {
 					setError(
 						"Missing decryption key (#ek=). You need the complete share link.",
 					);
 					return;
 				}
-				const keyBytes = base64UrlToBytes(keys.clientKey);
+				const keyBytes = keys.sealKey ?? base64UrlToBytes(keys.clientKey!);
 				setStatus("downloading");
 				setPercent(0);
 				const cipher = await publicService.fetchRaw(slug, (loaded, total) =>

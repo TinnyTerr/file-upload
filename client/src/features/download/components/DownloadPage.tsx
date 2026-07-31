@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { CopyButton } from "@/components/ui/copy-button";
 import { EmptyState } from "@/components/ui/empty-state";
+import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import {
 	Select,
@@ -19,6 +20,10 @@ import { UserAvatar } from "@/components/ui/user-avatar";
 import { useAuth } from "@/features/auth/hooks/auth";
 import { useSaveToMyFiles } from "@/features/files/hooks/useFiles";
 import { iconForType } from "@/features/files/lib/fileMeta";
+import {
+	deriveSealKey,
+	isSupportedSealKdf,
+} from "@/features/files/lib/sealKey";
 import { formatBytes } from "@/lib/bytes";
 import { readClientKeyFromHash, readServerKeyFromQuery } from "@/lib/download";
 import { useDownload } from "../hooks/useDownload";
@@ -42,6 +47,12 @@ export function DownloadPage() {
 		info?.encryption_mode ?? "none",
 	);
 	const [hashAlgo, setHashAlgo] = useState<string>("");
+	// Seal & Forget with a password: the key is rebuilt here from the password
+	// plus the salt the server publishes, and exists only in this tab.
+	const [sealPassword, setSealPassword] = useState("");
+	const [sealKey, setSealKey] = useState<Uint8Array | null>(null);
+	const [sealError, setSealError] = useState<string | null>(null);
+	const [deriving, setDeriving] = useState(false);
 
 	if (isLoading) {
 		return (
@@ -67,12 +78,35 @@ export function DownloadPage() {
 	}
 
 	const Icon = iconForType(info.content_type);
+	// A sealed file takes either a raw key from the fragment (random seal) or a
+	// password it derives one from.
+	const passwordSealed =
+		info.encryption_mode === "sealed" && isSupportedSealKdf(info.seal_kdf);
 	const hasKey =
 		info.encryption_mode === "client"
 			? !!clientKey
-			: info.encryption_mode === "server"
-				? !!serverKey
-				: true;
+			: info.encryption_mode === "sealed"
+				? !!clientKey || !!sealKey
+				: info.encryption_mode === "server"
+					? !!serverKey
+					: true;
+
+	const unlockSeal = async () => {
+		setSealError(null);
+		if (!info.seal_salt || !info.seal_kdf) return;
+		setDeriving(true);
+		try {
+			setSealKey(
+				await deriveSealKey(sealPassword, info.seal_salt, info.seal_kdf),
+			);
+		} catch (err) {
+			setSealError(
+				err instanceof Error ? err.message : "Couldn't derive the key",
+			);
+		} finally {
+			setDeriving(false);
+		}
+	};
 	const remaining =
 		info.max_uses != null ? Math.max(0, info.max_uses - info.use_count) : null;
 	const exhausted = remaining === 0;
@@ -111,6 +145,39 @@ export function DownloadPage() {
 
 					<EncryptionBanner mode={info.encryption_mode} hasKey={hasKey} />
 
+					{/* Deriving a key can't tell a right password from a wrong one --
+					    only the decrypt can. So the prompt comes back if the download
+					    failed, rather than stranding someone on a bad key. */}
+					{passwordSealed && (!sealKey || !!error) && (
+						<div className="space-y-2 rounded-lg border border-warning/30 bg-warning/5 p-3">
+							<p className="text-sm">
+								This file was sealed with a password. Deriving the key takes a
+								moment — it is deliberately slow, so guessing is expensive.
+							</p>
+							<div className="flex gap-2">
+								<Input
+									type="password"
+									placeholder="Seal password"
+									value={sealPassword}
+									onChange={(e) => setSealPassword(e.target.value)}
+									onKeyDown={(e) => {
+										if (e.key === "Enter") unlockSeal();
+									}}
+								/>
+								<Button
+									onClick={unlockSeal}
+									loading={deriving}
+									disabled={!sealPassword}
+								>
+									Unlock
+								</Button>
+							</div>
+							{sealError && (
+								<p className="text-sm text-destructive">{sealError}</p>
+							)}
+						</div>
+					)}
+
 					{/* Uploader info */}
 					{info.uploader && (
 						<div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -137,7 +204,7 @@ export function DownloadPage() {
 								busy
 							}
 							loading={busy}
-							onClick={() => download({ clientKey, serverKey })}
+							onClick={() => download({ clientKey, serverKey, sealKey })}
 						>
 							<Download />
 							{exhausted

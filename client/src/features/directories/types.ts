@@ -19,7 +19,14 @@ export interface Directory {
 	slug: string;
 	title: string;
 	url: string;
+	/** Containing folder, or null for a root-level folder. */
+	parent_directory_id: number | null;
+	subdirectory_count: number;
+	/** *Effective* mode -- see FileObject.encryption_mode. */
 	encryption_mode: EncryptionMode;
+	encryption_overridden: boolean;
+	inherited_from_directory_id: number | null;
+	password_locked: boolean;
 	key_check_blob: string | null;
 	access_key: string | null;
 	file_count: number;
@@ -32,6 +39,10 @@ export interface Directory {
 	library_visibility: "public" | "restricted";
 	library_kind: "movie" | "series";
 	library_overview: string | null;
+	/** Render the public page (/d/:slug) as a gallery instead of a file list. */
+	gallery_view: boolean;
+	/** Titles from the root down to the *containing* folder. Admin listing only. */
+	directory_path?: string[];
 }
 
 export interface DirectoryMember {
@@ -48,7 +59,11 @@ export interface CreateDirectoryResult {
 	id: number;
 	slug: string;
 	url: string;
+	parent_directory_id: number | null;
 	encryption_mode: EncryptionMode;
+	encryption_overridden: boolean;
+	inherited_from_directory_id: number | null;
+	password_locked: boolean;
 	key_check_blob: string | null;
 	access_key: string | null;
 }

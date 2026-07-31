@@ -73,7 +73,7 @@ export async function archiveIdleJob(db: Db): Promise<number> {
 	const unlinkAfterCommit: Array<string | null> = [];
 
 	const candidates = db.all<FileRow>(
-		`SELECT * FROM files WHERE lifecycle_state = 'active' AND archived = 0 AND encryption_mode != 'client'`,
+		`SELECT * FROM files WHERE lifecycle_state = 'active' AND archived = 0 AND encryption_mode NOT IN ('client', 'sealed')`,
 	);
 	log.info(`archive idle job started candidates=${candidates.length}`);
 
@@ -295,10 +295,10 @@ export async function archiveFileCore(
 		`archive requested file_id=${f.id} owner_id=${f.owner_id} actor=${actor}`,
 	);
 	if (f.archived) return serializeFileLifecycle(f);
-	if (f.encryption_mode === "client") {
+	if (f.encryption_mode === "client" || f.encryption_mode === "sealed") {
 		throw new HttpError(
 			400,
-			"client-side encrypted files cannot be archived server-side",
+			"files encrypted with a key the server does not hold cannot be archived server-side",
 		);
 	}
 

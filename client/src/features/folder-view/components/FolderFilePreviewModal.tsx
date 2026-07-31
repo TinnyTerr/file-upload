@@ -12,10 +12,13 @@ import type { PublicDirMember } from "../services/publicDirService";
  * rules as the single-file download page (unencrypted, unlimited-use link). */
 export function FolderFilePreviewModal({
 	member,
+	accessKey,
 	open,
 	onOpenChange,
 }: {
 	member: PublicDirMember | null;
+	/** The member's `?ek=`, for a server-encrypted one. */
+	accessKey?: string | null;
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 }) {
@@ -28,7 +31,7 @@ export function FolderFilePreviewModal({
 							<DialogTitle className="truncate">{member.filename}</DialogTitle>
 						</DialogHeader>
 						<PreviewMedia
-							src={previewPath(member.slug)}
+							src={previewPath(member.slug, accessKey)}
 							contentType={member.content_type}
 							filename={member.filename}
 						/>

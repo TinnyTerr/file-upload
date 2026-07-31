@@ -13,6 +13,10 @@ export interface ListRowProps {
 	/** Disable the hover background transition (e.g. for static/non-interactive rows). */
 	noHover?: boolean;
 	className?: string;
+	/** Escape hatch for the outer element — drag handlers, data attributes. */
+	containerProps?: React.HTMLAttributes<HTMLDivElement> & {
+		draggable?: boolean;
+	};
 }
 
 /** Shared bordered-row layout used across files, folders, keys, and admin lists. */
@@ -23,13 +27,16 @@ export function ListRow({
 	footer,
 	noHover,
 	className,
+	containerProps,
 }: ListRowProps) {
 	return (
 		<div
+			{...containerProps}
 			className={cn(
 				"rounded-lg border border-border bg-secondary/20",
 				!noHover && "transition-colors hover:bg-secondary/30",
 				className,
+				containerProps?.className,
 			)}
 		>
 			<div className="flex items-center gap-3 px-3 py-2">

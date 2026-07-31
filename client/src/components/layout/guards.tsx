@@ -2,13 +2,24 @@ import { Navigate, Outlet, useLocation } from "react-router-dom";
 import { useAuth } from "@/features/auth/hooks/auth";
 import { FullPageSpinner } from "./FullPageSpinner";
 
+export const MFA_SETUP_PATH = "/account/mfa-setup";
+
 /** Requires a logged-in user; redirects unauthenticated users to /login.
- *  Forces the credential-change flow when the account demands it. */
+ *  Forces the credential-change flow when the account demands it, and the MFA
+ *  enrollment flow when `require_mfa`/`require_passkey` is unmet. */
 export function RequireAuth() {
-	const { user, isLoading, mustChangeCredentials } = useAuth();
+	const { user, isLoading, mustChangeCredentials, mfaEnrollmentRequired } =
+		useAuth();
 	const location = useLocation();
 
 	if (isLoading) return <FullPageSpinner />;
+	if (mfaEnrollmentRequired) {
+		return location.pathname === MFA_SETUP_PATH ? (
+			<Outlet />
+		) : (
+			<Navigate to={MFA_SETUP_PATH} replace />
+		);
+	}
 	if (mustChangeCredentials) {
 		return location.pathname === "/account/change" ? (
 			<Outlet />
@@ -48,8 +59,10 @@ export function RequirePermission({
 
 /** Sends already-authenticated users away from public-only pages (e.g. login). */
 export function RedirectIfAuthed({ children }: { children: React.ReactNode }) {
-	const { user, isLoading, mustChangeCredentials } = useAuth();
+	const { user, isLoading, mustChangeCredentials, mfaEnrollmentRequired } =
+		useAuth();
 	if (isLoading) return <FullPageSpinner />;
+	if (mfaEnrollmentRequired) return <Navigate to={MFA_SETUP_PATH} replace />;
 	if (mustChangeCredentials) return <Navigate to="/account/change" replace />;
 	if (user) return <Navigate to="/files" replace />;
 	return <>{children}</>;

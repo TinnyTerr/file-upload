@@ -2,6 +2,7 @@ import { startAuthentication } from "@simplewebauthn/browser";
 import { useReducer } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
+import { MFA_SETUP_PATH } from "@/components/layout/guards";
 import { ApiError, errorMessage } from "@/config/api";
 import {
 	authService,
@@ -71,9 +72,10 @@ export function useLogin(connId: string | null) {
 
 	async function land(res: SessionResponse) {
 		await refresh();
-		const dest =
-			res.must_change_credentials || res.force_mfa_enrollment
-				? "/account/change"
+		const dest = res.must_change_credentials
+			? "/account/change"
+			: res.force_mfa_enrollment
+				? MFA_SETUP_PATH
 				: ((location.state as LocationState)?.from ?? "/files");
 		toast.success("Welcome back");
 		navigate(dest, { replace: true });

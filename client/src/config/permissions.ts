@@ -17,6 +17,10 @@ export const PERMISSION_FLAGS = [
 	"can_manage_cluster",
 	"can_use_torrents",
 	"can_watch_media",
+	// Restrictions rather than capabilities -- see the note on BOOL_FLAGS in
+	// server/src/permissions.ts.
+	"require_mfa",
+	"require_passkey",
 ] as const;
 
 export type PermissionFlag = (typeof PERMISSION_FLAGS)[number];
@@ -37,7 +41,7 @@ export interface PermissionMeta {
 	key: PermissionFlag;
 	label: string;
 	description: string;
-	group: "essentials" | "advanced" | "admin";
+	group: "essentials" | "advanced" | "admin" | "security";
 }
 
 export const PERMISSION_META: PermissionMeta[] = [
@@ -103,6 +107,20 @@ export const PERMISSION_META: PermissionMeta[] = [
 		description:
 			"Stream account-restricted media and mint playback keys for mpv.",
 		group: "advanced",
+	},
+	{
+		key: "require_mfa",
+		label: "Require two-factor",
+		description:
+			"Blocks the account until an authenticator app or passkey is enrolled, then demands it at every login.",
+		group: "security",
+	},
+	{
+		key: "require_passkey",
+		label: "Require a passkey",
+		description:
+			"Narrows the required second factor to WebAuthn — an authenticator app alone will not satisfy it.",
+		group: "security",
 	},
 	{
 		key: "can_view_admin",

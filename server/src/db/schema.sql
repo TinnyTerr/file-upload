@@ -33,6 +33,12 @@ CREATE TABLE IF NOT EXISTS permissions (
   can_manage_cluster INTEGER NOT NULL DEFAULT 0,
   can_use_torrents INTEGER NOT NULL DEFAULT 0,
   can_watch_media INTEGER NOT NULL DEFAULT 0,
+  -- Account-hardening requirements. `require_mfa` demands any second factor at
+  -- login; `require_passkey` narrows that to WebAuthn specifically (and implies
+  -- require_mfa). Either one blocks the account everywhere except MFA
+  -- enrollment until the matching credential exists.
+  require_mfa INTEGER NOT NULL DEFAULT 0,
+  require_passkey INTEGER NOT NULL DEFAULT 0,
   quota_bytes INTEGER NOT NULL DEFAULT 107374182400,
   max_file_bytes INTEGER NOT NULL DEFAULT 10737418240,
   archive_after_idle_days INTEGER NOT NULL DEFAULT 5,
@@ -87,9 +93,21 @@ CREATE TABLE IF NOT EXISTS directories (
   owner_id INTEGER NOT NULL REFERENCES users(id),
   slug TEXT NOT NULL UNIQUE,
   title TEXT NOT NULL DEFAULT 'Untitled folder',
+  -- Self-referential tree. NULL = a root-level folder (the only shape that
+  -- existed before nesting). At most MAX_DEPTH (10) ancestors, enforced in
+  -- directoryTree.ts on create and move.
+  parent_directory_id INTEGER REFERENCES directories(id),
   encryption_mode TEXT NOT NULL DEFAULT 'none',
   enc_key_blob BLOB,
   enc_access_blob BLOB,
+  -- 1 = the `?ek=` secret sealed in enc_access_blob is a human-chosen password
+  -- rather than a random token, so public verification of it has to be rate
+  -- limited per slug (security/lockout.ts).
+  access_is_password INTEGER NOT NULL DEFAULT 0,
+  -- 1 = this folder defines its own key (a "break point"); 0 = it inherits the
+  -- nearest overridden ancestor's. A root-level folder is always 1 -- there is
+  -- nothing above it to inherit from.
+  encryption_overridden INTEGER NOT NULL DEFAULT 1,
   key_check_blob TEXT,
   total_bytes INTEGER NOT NULL DEFAULT 0,
   expires_at TEXT,
@@ -109,9 +127,15 @@ CREATE TABLE IF NOT EXISTS directories (
   -- playable entry's generated thumbnail.
   library_poster_file_id INTEGER,
   library_published_at TEXT,
+  -- Presentation of the *public* folder page (/d/:slug) for links pointing at
+  -- this folder: 0 = the plain list, 1 = the gallery (poster tiles, inline
+  -- players). Purely cosmetic -- it gates nothing, and every read path ignores
+  -- it. Unrelated to is_library, which is the global /watch catalog.
+  gallery_view INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_directories_slug ON directories(slug);
+CREATE INDEX IF NOT EXISTS ix_directories_parent_directory_id ON directories(parent_directory_id);
 CREATE INDEX IF NOT EXISTS ix_directories_is_library ON directories(is_library);
 CREATE INDEX IF NOT EXISTS ix_directories_owner_id ON directories(owner_id);
 
@@ -131,6 +155,17 @@ CREATE TABLE IF NOT EXISTS files (
   encryption_mode TEXT NOT NULL DEFAULT 'none',
   enc_key_blob BLOB,
   enc_access_blob BLOB,
+  -- Same meaning as on directories.
+  access_is_password INTEGER NOT NULL DEFAULT 0,
+  -- Seal & Forget only: the public PBKDF2 salt for a sealed file whose key was
+  -- derived from a chosen password. NULL for a randomly keyed seal. Never a
+  -- secret -- the whole point is that the server keeps nothing that opens the
+  -- file (crypto/passwordKey.ts).
+  seal_salt BLOB,
+  -- Same meaning as on directories: 1 = this file holds its own key, 0 = it
+  -- inherits its containing folder's chain. 'client' and 'sealed' files are
+  -- always 1 -- those keys are never inheritable.
+  encryption_overridden INTEGER NOT NULL DEFAULT 1,
   compressed INTEGER NOT NULL DEFAULT 0,
   archived INTEGER NOT NULL DEFAULT 0,
   archive_codec TEXT,
@@ -250,7 +285,12 @@ CREATE INDEX IF NOT EXISTS ix_remote_upload_jobs_owner_id ON remote_upload_jobs(
 CREATE TABLE IF NOT EXISTS torrent_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   owner_id INTEGER NOT NULL REFERENCES users(id),
+  -- Where the import *landed*: the folder created for a multi-file torrent.
   directory_id INTEGER REFERENCES directories(id) ON DELETE SET NULL,
+  -- Where the requester asked for it to land. A multi-file torrent still gets
+  -- its own folder, created underneath this one; a single-file torrent becomes
+  -- a plain file inside it. NULL = the root, the original behavior.
+  target_directory_id INTEGER REFERENCES directories(id) ON DELETE SET NULL,
   name TEXT NOT NULL,
   source TEXT NOT NULL,
   info_hash TEXT,

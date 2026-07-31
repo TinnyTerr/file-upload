@@ -12,7 +12,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useAuth } from "@/features/auth/hooks/auth";
-import { useDirectories } from "@/features/directories/hooks/useDirectories";
+import { FolderPicker } from "@/features/drive/components/FolderPicker";
 import { cn } from "@/lib/cn";
 import { parseDuration } from "@/lib/time";
 import type { EncryptionMode, UploadOptions } from "../types";
@@ -91,13 +91,20 @@ export function UploadOptionsForm({
 	value,
 	onChange,
 	allowLifecycle = true,
+	/** Set when the destination folder dictates encryption (the Drive explorer
+	 * uploads into whatever folder is open, and the backend derives the mode
+	 * from that folder). The string explains what the files will get instead. */
+	encryptionLockedTo,
+	/** The Drive explorer already knows the destination from the URL. */
+	hideDirectoryPicker = false,
 }: {
 	value: UploadFormState;
 	onChange: (s: UploadFormState) => void;
 	allowLifecycle?: boolean;
+	encryptionLockedTo?: string | null;
+	hideDirectoryPicker?: boolean;
 }) {
 	const { can } = useAuth();
-	const { data: directories } = useDirectories();
 	const [showAdvanced, setShowAdvanced] = useState(false);
 	const set = <K extends keyof UploadFormState>(k: K, v: UploadFormState[K]) =>
 		onChange({ ...value, [k]: v });
@@ -115,49 +122,53 @@ export function UploadOptionsForm({
 							<Info className="size-3.5 text-muted-foreground" />
 						</Tooltip>
 					</Label>
-					<Select
-						value={value.encryption_mode}
-						onValueChange={(v) => set("encryption_mode", v as EncryptionMode)}
-					>
-						<SelectTrigger>
-							<SelectValue />
-						</SelectTrigger>
-						<SelectContent>
-							<SelectItem value="none">
-								None — link is the credential
-							</SelectItem>
-							<SelectItem value="server">Server-side (?ek=)</SelectItem>
-							<SelectItem value="client" disabled={!canClient}>
-								End-to-end (#ek=){!canClient ? " — not permitted" : ""}
-							</SelectItem>
-						</SelectContent>
-					</Select>
+					{encryptionLockedTo ? (
+						<p className="rounded-md border border-border bg-background/40 px-3 py-2 text-sm text-muted-foreground">
+							{encryptionLockedTo}
+						</p>
+					) : (
+						<Select
+							value={value.encryption_mode}
+							onValueChange={(v) => set("encryption_mode", v as EncryptionMode)}
+						>
+							<SelectTrigger>
+								<SelectValue />
+							</SelectTrigger>
+							<SelectContent>
+								<SelectItem value="none">
+									None — link is the credential
+								</SelectItem>
+								<SelectItem value="server">Server-side (?ek=)</SelectItem>
+								<SelectItem value="client" disabled={!canClient}>
+									End-to-end (#ek=){!canClient ? " — not permitted" : ""}
+								</SelectItem>
+							</SelectContent>
+						</Select>
+					)}
 				</div>
 
-				<div className="space-y-1.5">
-					<Label className="flex items-center gap-1.5">
-						Folder
-						<Tooltip content="Upload these files directly into a specific folder.">
-							<Info className="size-3.5 text-muted-foreground" />
-						</Tooltip>
-					</Label>
-					<Select
-						value={value.directory_id}
-						onValueChange={(v) => set("directory_id", v)}
-					>
-						<SelectTrigger>
-							<SelectValue placeholder="Select a folder..." />
-						</SelectTrigger>
-						<SelectContent>
-							<SelectItem value="none">None — upload loosely</SelectItem>
-							{directories?.map((dir) => (
-								<SelectItem key={dir.id} value={dir.id.toString()}>
-									{dir.title}
-								</SelectItem>
-							))}
-						</SelectContent>
-					</Select>
-				</div>
+				{!hideDirectoryPicker && (
+					<div className="space-y-1.5">
+						<Label className="flex items-center gap-1.5">
+							Folder
+							<Tooltip content="Upload these files directly into a specific folder. Its encryption wins over the setting above.">
+								<Info className="size-3.5 text-muted-foreground" />
+							</Tooltip>
+						</Label>
+						<FolderPicker
+							rootLabel="None — upload loosely"
+							className="max-h-44"
+							value={
+								value.directory_id === "none"
+									? null
+									: Number(value.directory_id)
+							}
+							onChange={(id) =>
+								set("directory_id", id === null ? "none" : String(id))
+							}
+						/>
+					</div>
+				)}
 			</div>
 
 			<div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

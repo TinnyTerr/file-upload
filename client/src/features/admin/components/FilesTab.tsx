@@ -3,6 +3,7 @@ import {
 	ArchiveRestore,
 	ChevronDown,
 	FileQuestion,
+	FolderTree,
 	Link2,
 	Search,
 	Trash2,
@@ -80,8 +81,23 @@ function AdminFileRow({
 							{file.compressed && <Badge variant="secondary">zst</Badge>}
 							{file.archived && <Badge variant="secondary">archived</Badge>}
 						</div>
-						<p className="text-xs text-muted-foreground">
-							{formatBytes(file.size_bytes)} · {formatDate(file.created_at)}
+						<p className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground">
+							<span>
+								{formatBytes(file.size_bytes)} · {formatDate(file.created_at)}
+							</span>
+							{/* Names repeat across a tree; the path is what tells two
+							    same-named files apart in a flat listing. */}
+							{file.directory_path && file.directory_path.length > 0 && (
+								<span
+									className="flex min-w-0 items-center gap-1"
+									title={file.directory_path.join(" / ")}
+								>
+									<FolderTree className="size-3 shrink-0" />
+									<span className="truncate">
+										{file.directory_path.join(" / ")}
+									</span>
+								</span>
+							)}
 						</p>
 					</div>
 					<div className="flex items-center gap-1">
@@ -216,6 +232,7 @@ export function FilesTab() {
 				f.original_filename.toLowerCase().includes(q) ||
 				(f.content_type ?? "").toLowerCase().includes(q) ||
 				(f.owner_username ?? "").toLowerCase().includes(q) ||
+				(f.directory_path ?? []).join("/").toLowerCase().includes(q) ||
 				String(f.owner_id) === q ||
 				String(f.id) === q,
 		);
@@ -238,7 +255,7 @@ export function FilesTab() {
 					<Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
 					<Input
 						className="pl-8"
-						placeholder="Filter by filename, type, owner or id…"
+						placeholder="Filter by filename, folder, type, owner or id…"
 						value={filter}
 						onChange={(e) => setFilter(e.target.value)}
 					/>

@@ -103,6 +103,59 @@ export function createSqliteDb(path: string): Db {
 		"can_watch_media",
 		"can_watch_media INTEGER NOT NULL DEFAULT 0",
 	);
+	// Account-hardening flags -- off for every pre-existing account, so nobody
+	// gets locked out of a running deployment by an upgrade.
+	ensureColumn(
+		sqlite,
+		"permissions",
+		"require_mfa",
+		"require_mfa INTEGER NOT NULL DEFAULT 0",
+	);
+	ensureColumn(
+		sqlite,
+		"permissions",
+		"require_passkey",
+		"require_passkey INTEGER NOT NULL DEFAULT 0",
+	);
+	// Directory nesting + encryption inheritance. Every pre-existing row is its
+	// own break point (`encryption_overridden = 1`), which is not merely safe but
+	// exactly right: the old model had no inheritance at all, so the resolver
+	// degrades to today's behavior for all pre-existing data.
+	ensureColumn(
+		sqlite,
+		"directories",
+		"parent_directory_id",
+		"parent_directory_id INTEGER REFERENCES directories(id)",
+	);
+	ensureColumn(
+		sqlite,
+		"directories",
+		"encryption_overridden",
+		"encryption_overridden INTEGER NOT NULL DEFAULT 1",
+	);
+	ensureColumn(
+		sqlite,
+		"files",
+		"encryption_overridden",
+		"encryption_overridden INTEGER NOT NULL DEFAULT 1",
+	);
+	// Password-locked access secrets. Every pre-existing `?ek=` is a random
+	// high-entropy token, which is exactly what the 0 default says.
+	ensureColumn(
+		sqlite,
+		"directories",
+		"access_is_password",
+		"access_is_password INTEGER NOT NULL DEFAULT 0",
+	);
+	ensureColumn(
+		sqlite,
+		"files",
+		"access_is_password",
+		"access_is_password INTEGER NOT NULL DEFAULT 0",
+	);
+	// Seal & Forget: only set on password-sealed files, so NULL is right for
+	// every row that predates it.
+	ensureColumn(sqlite, "files", "seal_salt", "seal_salt BLOB");
 	// Media library publication -- folders that predate it are unpublished.
 	ensureColumn(
 		sqlite,
@@ -140,12 +193,31 @@ export function createSqliteDb(path: string): Db {
 		"library_published_at",
 		"library_published_at TEXT",
 	);
+	// Gallery presentation of the public folder page. Folders that predate it
+	// keep the plain list they have always rendered as.
+	ensureColumn(
+		sqlite,
+		"directories",
+		"gallery_view",
+		"gallery_view INTEGER NOT NULL DEFAULT 0",
+	);
 	// Existing torrent jobs predate Real-Debrid, so they are qBittorrent jobs.
 	ensureColumn(
 		sqlite,
 		"torrent_jobs",
 		"provider",
 		"provider TEXT NOT NULL DEFAULT 'qbittorrent'",
+	);
+	// Destination folder. Jobs that predate it landed at the root, which is
+	// what NULL means. `ON DELETE SET NULL` has to be spelled out here as well
+	// as in schema.sql: an ALTER TABLE column carries only the constraints it
+	// declares, and without it deleting a folder that a queued torrent points
+	// at would throw a foreign-key violation on an upgraded database.
+	ensureColumn(
+		sqlite,
+		"torrent_jobs",
+		"target_directory_id",
+		"target_directory_id INTEGER REFERENCES directories(id) ON DELETE SET NULL",
 	);
 	ensureColumn(sqlite, "torrent_jobs", "debrid_id", "debrid_id TEXT");
 	ensureColumn(sqlite, "torrent_jobs", "debrid_status", "debrid_status TEXT");

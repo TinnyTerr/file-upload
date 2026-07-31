@@ -49,6 +49,19 @@ function EncryptionNote({ mode }: { mode: EncryptionMode }) {
 			</p>
 		);
 	}
+	if (mode === "sealed") {
+		return (
+			<p className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+				<ShieldAlert className="mt-0.5 size-4 shrink-0" />
+				<span className="min-w-0 leading-relaxed">
+					Sealed. This server threw the key away, so the URL below opens nothing
+					on its own — the recipient needs the key you saved when you sealed it,
+					appended as <code className={keyClass}>#ek=</code>, or the password it
+					was derived from.
+				</span>
+			</p>
+		);
+	}
 	if (mode === "server") {
 		return (
 			<p className="flex items-start gap-2 rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-accent">

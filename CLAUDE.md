@@ -128,10 +128,13 @@ server/src/
     securityHeaders.ts     # nosniff, DENY framing, no-referrer, HSTS in prod
     requestLogging.ts      # Method/path/status/duration at noise-proportional levels
     httpsRedirect.ts       # 308 http→https outside dev, honoring proxy headers
+  directoryTree.ts         # Folder tree: MAX_DEPTH, ancestor/subtree walks, editor checks
   crypto/
     aead.ts                # Streaming chunked AES-256-GCM file container ("FUPL" magic)
     secretbox.ts           # Single-shot AES-256-GCM for key/access blobs + sealed upload tokens
     secretEncrypt.ts       # Versioned single-shot AEAD for tiny secrets (TOTP seeds)
+    effectiveEncryption.ts # THE resolver: what key actually protects a row's bytes
+    passwordKey.ts         # PBKDF2-HMAC-SHA256 (600k) for password-derived seal keys
   storage/
     paths.ts               # storageRoot/thumbnailRoot, safeJoin traversal guard, fan-out rel paths
     blobs.ts               # Content-addressed dedup + ref counting (attachBlob / releaseBlob)
@@ -139,6 +142,7 @@ server/src/
     compress.ts            # zstd compress/decompress with zip-bomb guards
     zip.ts                 # safeArcname + memberSource (plaintext bytes for zip streaming)
     thumbnail.ts           # Cached JPEG thumbnails (sharp; ffmpeg for video frames)
+    rekey.ts               # Byte rewrite behind the encryption-change endpoints
     streaming.ts           # Shared read path: peer fetch-on-miss + plaintext stream
     mediaProbe.ts          # ffprobe backfill of content_blobs media_* columns
   cluster/                 # see "Cluster subsystem" above
@@ -162,7 +166,10 @@ client/src/
   features/
     auth/                  # Login page, second-factor step, auth context, login websocket
     account/               # Profile, avatar, password, security (MFA) tab
-    files/                 # File list, upload dropzone + core, link management, remote upload
+    drive/                 # The unified explorer: tree browsing, upload, move/rename,
+                           #   multi-select, drag & drop, the encryption side panel
+    files/                 # Upload core + options, link management, remote upload,
+                           #   share modal (the old Files *page* lives in drive/ now)
     directories/           # Folder list, folder links modal, folder upload
     download/              # Public download page (/file/:slug)
     folder-view/           # Public folder view (/d/:slug)
@@ -250,6 +257,19 @@ Failed logins feed `security/lockout.ts`, which counts per-username *and* per-IP
   - `usedStorageBytesForUser()` / `usedBytes()` — `SUM(size_bytes)` over that user's `files`. Logical, pre-dedup. Used for per-user quota, so dedup savings aren't silently handed to whoever uploaded second.
 - Archived blobs are excluded from dedup matching — their on-disk bytes are zstd-wrapped and don't match the identity they were minted for.
 
+### Folder tree
+
+`directories.parent_directory_id` makes folders a tree, at most `MAX_DEPTH = 10`
+levels deep (`server/src/directoryTree.ts`, which also owns `ancestorChain`,
+`subtree`, `subtreeHeight`, `isSelfOrDescendant`, `nearestOverride`,
+`directoryRole`/`isEditor` and `buildPathIndex`). A collaborator grant on a
+folder applies to everything beneath it, because the permission check walks the
+ancestor chain rather than looking at one row.
+
+`GET /directories/{id}/children` (and `/directories/root/children`) returns one
+level at a time — the Drive explorer paginates through the tree with it. There
+is deliberately no recursive dump endpoint.
+
 ### Encryption modes
 
 | Mode | Description |
@@ -257,21 +277,66 @@ Failed logins feed `security/lockout.ts`, which counts per-username *and* per-IP
 | `none` | No encryption. The link slug is the only credential. |
 | `server` | AES-GCM encrypted at rest. `?ek=` query param gates download; the server decrypts before streaming. |
 | `client` | E2E encrypted in the browser. Ciphertext stored server-side. The `#ek=` fragment never reaches the server. |
+| `sealed` | Seal & Forget (files only). The server encrypted it, returned the key once, and kept no copy. Every read path treats it exactly like `client`. |
 
 **Transform order matters and differs by producer** (see Gotchas): upload-time compression produces `ENC(ZSTD(x))` with `compressed = 1`; the archive job produces `ZSTD(ENC(x))` with `compressed = 0, archived = 1`.
+
+### Encryption inheritance
+
+`encryption_overridden` (on both `directories` and `files`) says whether a row
+holds a key of its own. `0` means it inherits from the nearest ancestor with
+`1` — a "break point" — and its own `enc_key_blob`/`enc_access_blob` columns are
+NULL. A root-level folder is always a break point.
+
+**Never read `enc_key_blob`/`enc_access_blob`/`encryption_mode` off a row for a
+read path.** `crypto/effectiveEncryption.ts` (`resolveDirectoryEncryption`,
+`resolveFileEncryption`) is the authority; `encryption_mode` survives on
+inheriting rows only as a denormalized mirror, because plain SQL filters in
+`jobs/lifecycle.ts`, `routes/admin.ts` and `storage/mediaProbe.ts` must not walk
+a tree per row — so anything that changes an effective mode has to rewrite its
+descendants' mirrors.
+
+Changing a node's encryption (`PATCH /{directories,files}/:id/encryption`)
+physically rewrites every affected descendant's bytes via
+`storage/rekey.ts`, synchronously. `client`/`sealed` are refused there: the
+server has no key, so that conversion is a browser-side
+download-decrypt-reupload committed by `POST /files/:id/e2e-conversion`.
+
+Public payloads carry a `key_scope` (`dir:7`, `file:34`) naming *which* secret
+opens each node, because one shared subtree can contain several break points.
+
+### Password locks
+
+`access_is_password` records that a `server`-mode node's `?ek=` secret is an
+owner-chosen password rather than a random 144-bit token. The secret is stored
+identically either way; the flag exists because a human password is guessable,
+so `security/accessLock.ts::checkLinkAccess` throttles public verification
+**per link slug** (a distributed guesser would sail past an IP-keyed limit)
+using `security/lockout.ts`'s `link_access` identifier type. Random-token links
+are deliberately unthrottled — throttling them would let anyone lock a public
+link out of service.
 
 ### Share links
 
 - `links` (files) and `directory_links` (folders) have identical shapes: `slug`, `max_uses`, `use_count`, `expires_at`, `active`, `hide_uploader`.
 - `hide_uploader` suppresses the uploader's name/avatar on the public page **and** in the API response.
 - Multiple links per file, each with its own limits. Folder public URLs resolve via `directory_links.slug`, never `directories.slug`; a default folder link is auto-created at folder creation.
+- A folder link covers a **subtree**. `/d/:slug/info`, `/preview-manifest` and `/zip` take `?dir=<id>`, bounded by `isSelfOrDescendant` — a node outside the link's own subtree answers 404, not 403, because a link must not confirm what exists elsewhere. `POST /d/:slug/unlock` proves a key for one node without starting a download.
+- The zip and `POST /d/:slug/save` both recurse **only as far as the presented key reaches**: plaintext descendants are included, a descendant holding its own key is skipped. Including it would hand away the entire point of a break point.
+- `directories.gallery_view` switches the public folder page from a file list to a gallery of poster tiles with inline players. Cosmetic only; read off the folder the *link* points at, so it doesn't change under a visitor mid-navigation. Unrelated to `is_library`, which is the global `/watch` catalog.
 - Use consumption is a single atomic `UPDATE … WHERE … RETURNING id` (`links.ts::consumeUse`) so concurrent downloads can't overshoot `max_uses`.
 
 ### Permissions
 
 Defined in `server/src/permissions.ts` (`BOOL_FLAGS`) and mirrored in `client/src/config/permissions.ts`:
 
-`can_upload` · `can_upload_client_encrypted` · `can_delete` · `can_regenerate_links` · `can_delete_links` · `can_create_directories` · `can_manage_lifecycle` · `can_use_api_keys` · `can_view_admin` · `can_manage_users` · `can_manage_storage` · `can_manage_api_keys` · `can_manage_cluster` · `can_use_torrents` · `can_watch_media`
+`can_upload` · `can_upload_client_encrypted` · `can_delete` · `can_regenerate_links` · `can_delete_links` · `can_create_directories` · `can_manage_lifecycle` · `can_use_api_keys` · `can_view_admin` · `can_manage_users` · `can_manage_storage` · `can_manage_api_keys` · `can_manage_cluster` · `can_use_torrents` · `can_watch_media` · `require_mfa` · `require_passkey`
+
+The last two are *restrictions*, not capabilities: they force an account to
+enrol a second factor (any, or a passkey specifically) and block it from every
+route except the MFA enrolment endpoints until it does. They are deliberately
+absent from `MASTER_ALL_TRUE` and the master seed — turning them on for every
+admin by default would lock the panel out.
 
 Plus the non-boolean `quota_bytes`, `max_file_bytes`, `archive_after_idle_days`. `master` bypasses every check.
 
@@ -376,6 +441,18 @@ Non-obvious rules that are easy to re-break. Each one has bitten this codebase a
 - **Real-Debrid file paths are attacker-controlled** (they come out of the torrent): `debrid.ts` runs every one through `sanitizeSegment` + `safeJoin` before creating anything.
 - **Don't add unbounded in-memory maps without a sweep.** Several registries (halt, login challenges, second-factor tickets, ws-token rate limiter) are process-local Maps that must prune expired entries or they grow forever.
 - **`safeJoin()` every path built from user or DB input** before touching the filesystem.
+- **Never read a row's own `enc_key_blob`/`enc_access_blob`/`encryption_mode` on a read path** — an inheriting row's are NULL and its mode is only a mirror. Go through `crypto/effectiveEncryption.ts`. A missed path fails loudly ("encryption key not stored") rather than silently using a stale key, which is the point.
+- **Only a caller that actually holds a folder's end-to-end key may upload into it.** `finalizeStoredFile` refuses a `client`/`sealed` destination unless the caller passes `clientCiphertext: true`, which only the two browser/API upload routes do. `encryptionMode: "client"` is *not* that claim — every server-side path copies its directory's mode into that field, so trusting it would let a dropbox link file an anonymous uploader's plaintext under a mode that promises ciphertext.
+- **A play key, an `?ek=` and a `#ek=` are three different things.** `server` secrets travel as a query parameter and the server compares them; `client`/`sealed` keys travel in the fragment and must never reach the server.
+- **An `ensureColumn` definition carries only the constraints it spells out.** A column added with `REFERENCES directories(id)` on an upgraded database has no `ON DELETE` action even if `schema.sql` says `ON DELETE SET NULL` — write the full clause in both places or deleting a referenced row throws.
+- **Deleting a directory must clear every table that FKs to it** without a cascade: `files`, `directory_links`, `directory_collaborators`, `dropbox_upload_links`. `media_play_keys` cascades and `torrent_jobs` sets null, both by declaration.
+- **A recursive walk over the folder tree needs a depth bound.** `MAX_DEPTH` is enforced on create and move, but corrupt or partially replicated data could still form a cycle; every walker in `directoryTree.ts` bails rather than spinning.
+- **A promotion to break point must carry `access_is_password`, not just the key.** Moving an inheriting folder materializes the key it was resolving to; dropping the password flag silently turns a throttled human password into an unthrottled one.
+- **The access-guess counter is keyed on the key scope, never on a link slug.** `/d/:slug/info` publishes every member file's slug, so a per-slug counter hands out one fresh guess budget per member against the same folder password.
+- **Sealing takes the delete gate, not the edit gate.** `POST /files/:id/seal` is irreversible and leaves the file unreadable even to its owner, so it requires `can_delete` *and* ownership — an editor of the containing folder may move and rename, nothing more.
+- **A folder created inside someone else's tree belongs to that tree's owner.** Otherwise an editor owns it, and `POST /directories/:id/collaborators` (owner-only by design) becomes re-delegatable.
+- **Replicating a file must ship its whole ancestor chain**, root first. `parent_directory_id` is a real FK on a peer running `foreign_keys = ON`, and the containing folder's parent may never have been replicated.
+- **Don't ancestor-walk per row in a listing.** `ancestorChain` costs a query per level; `buildPathIndex` reads the table once and resolves any number of rows in memory. The admin panel renders every file in the system.
 
 ---
 
@@ -392,11 +469,15 @@ Non-obvious rules that are easy to re-break. Each one has bitten this codebase a
 - Don't wrap `DropdownMenuTrigger`'s `asChild` button in a `Tooltip` — it breaks click events
 - Don't use `bg-brand-gradient/90` — opacity modifiers don't apply to CSS variable gradients
 - Don't use `text-primary-foreground` on brand gradient backgrounds — use `text-white`
+- Don't offer `client` as a directory-level encryption choice for a *nested* folder — a child always inherits, and the backend rejects it
+- Don't add a "convert this file to end-to-end" backend endpoint — going into or out of `client`/`sealed` is browser-side by construction
+- Don't run `bunx biome` and assume you got the formatter: that resolves to an unrelated package. It is `bunx --bun @biomejs/biome`
 
 ---
 
 ## File-specific notes
 
+- `crypto/effectiveEncryption.ts` — `sourceDirectoryId` is only set when the resolver actually *walked*; `ownerDirectoryId` is the one to compare when you need "which node holds this key", including when a file inherits straight from its own folder.
 - `routes/public.ts` — public file info returns `uploader: {username, has_avatar, user_id} | null` (null when the link sets `hide_uploader`) and `already_saved: bool`. `/preview` and `/thumbnail` both refuse limited-use links so link budget can't be spent by a preview fetch.
 - `routes/files.ts` — `serializeFiles()` batch-loads owner usernames *and* links to avoid N+1; `recoverAccessKey()` reconstructs the server-mode `?ek=` for the owner. Chunked uploads seal their session metadata into an AEAD token (no server-side session table); `uploadLocks` serializes finalize against abort.
 - `routes/remoteUpload.ts` — resolves DNS, rejects private/local addresses, and connects to the *pinned* validated IP to close the rebinding window; re-validates every redirect hop; caps bytes mid-stream and decodes chunked transfer-encoding.

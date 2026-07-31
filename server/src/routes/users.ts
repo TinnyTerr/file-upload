@@ -39,6 +39,11 @@ interface IdRow {
 	id: number;
 }
 
+/** Capability flags a master always holds. Deliberately excludes the
+ * `require_mfa`/`require_passkey` hardening flags: those are restrictions, not
+ * capabilities, and force-setting them here would lock every admin out of
+ * their own deployment. Masters already have a second factor enforced at
+ * login by their role. */
 const MASTER_ALL_TRUE: PermissionFlag[] = [
 	"can_upload",
 	"can_upload_client_encrypted",

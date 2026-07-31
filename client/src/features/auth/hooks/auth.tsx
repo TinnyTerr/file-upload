@@ -14,6 +14,10 @@ interface AuthContextValue {
 	 *  before it can do anything else — GET /account/me returns 403 in this state,
 	 *  so no CurrentUser is available yet. */
 	mustChangeCredentials: boolean;
+	/** Set when the account carries `require_mfa`/`require_passkey` but hasn't
+	 *  enrolled the matching credential — GET /account/me returns 403 in this
+	 *  state too, so the two 403s are told apart by their `detail`. */
+	mfaEnrollmentRequired: "mfa" | "passkey" | null;
 	/** True if the user has a permission. Masters implicitly have every permission. */
 	can: (flag: PermissionFlag) => boolean;
 	isMaster: boolean;
@@ -48,13 +52,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 	const value = React.useMemo<AuthContextValue>(() => {
 		const user = data ?? null;
 		const isMaster = user?.role === "master";
-		const mustChangeCredentials =
-			error instanceof ApiError && error.status === 403;
+		const forbidden = error instanceof ApiError && error.status === 403;
+		const detail =
+			forbidden && typeof error.detail === "string" ? error.detail : "";
+		const mfaEnrollmentRequired =
+			detail === "passkey enrollment required"
+				? ("passkey" as const)
+				: detail === "mfa enrollment required"
+					? ("mfa" as const)
+					: null;
+		const mustChangeCredentials = forbidden && !mfaEnrollmentRequired;
 		return {
 			user,
 			isLoading,
-			isAuthenticated: !!user || mustChangeCredentials,
+			isAuthenticated: !!user || forbidden,
 			mustChangeCredentials,
+			mfaEnrollmentRequired,
 			isMaster,
 			can: (flag: PermissionFlag) => (user ? isMaster || !!user[flag] : false),
 			refresh: refetch,

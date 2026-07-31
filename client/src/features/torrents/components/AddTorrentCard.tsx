@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { FolderPicker } from "@/features/drive/components/FolderPicker";
 import type { AddTorrentInput, TorrentConfig } from "../types";
 
 async function readAsBase64(file: File): Promise<string> {
@@ -30,6 +31,7 @@ export function AddTorrentCard({
 	pending: boolean;
 }) {
 	const [magnet, setMagnet] = useState("");
+	const [directoryId, setDirectoryId] = useState<number | null>(null);
 	const fileInput = useRef<HTMLInputElement>(null);
 	const disabled = !config?.configured || pending;
 
@@ -43,7 +45,7 @@ export function AddTorrentCard({
 			});
 			return;
 		}
-		await onAdd({ magnet: value }).then(
+		await onAdd({ magnet: value, directory_id: directoryId }).then(
 			() => setMagnet(""),
 			() => {},
 		);
@@ -51,7 +53,11 @@ export function AddTorrentCard({
 
 	const submitFile = async (file: File) => {
 		const b64 = await readAsBase64(file);
-		await onAdd({ torrent_file_b64: b64, filename: file.name }).catch(() => {});
+		await onAdd({
+			torrent_file_b64: b64,
+			filename: file.name,
+			directory_id: directoryId,
+		}).catch(() => {});
 		if (fileInput.current) fileInput.current.value = "";
 	};
 
@@ -88,6 +94,28 @@ export function AddTorrentCard({
 						</Button>
 					</div>
 				</form>
+
+				<div className="space-y-1.5">
+					<Label>Destination folder</Label>
+					<FolderPicker
+						rootLabel="My Drive — no folder"
+						// The server refuses to fill an end-to-end folder on someone's
+						// behalf (routes/files.ts::finalizeStoredFile), so offering one
+						// here would only produce a request that fails later.
+						veto={(d) =>
+							d.encryption_mode === "client" || d.encryption_mode === "sealed"
+								? "end-to-end"
+								: null
+						}
+						className="max-h-44"
+						value={directoryId}
+						onChange={setDirectoryId}
+					/>
+					<p className="text-xs text-muted-foreground">
+						A torrent with more than one file still gets a folder of its own,
+						created inside this one.
+					</p>
+				</div>
 
 				<div className="flex items-center gap-2">
 					<input

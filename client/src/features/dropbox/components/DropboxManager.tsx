@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { QRCode } from "@/components/ui/qr-code";
 import { Tooltip } from "@/components/ui/tooltip";
+import { FolderPicker } from "@/features/drive/components/FolderPicker";
 import { formatDateTime, parseDuration, relativeTime } from "@/lib/time";
 import { useDropboxManager } from "../hooks/useDropboxManager";
 import { receiveUrl } from "../services/dropboxService";
@@ -14,6 +15,7 @@ import { receiveUrl } from "../services/dropboxService";
 export function DropboxManager() {
 	const { active, creating, create, cancel } = useDropboxManager();
 	const [expiry, setExpiry] = useState("1h");
+	const [directoryId, setDirectoryId] = useState<number | null>(null);
 
 	if (active) {
 		const url = receiveUrl(active.token);
@@ -83,10 +85,35 @@ export function DropboxManager() {
 				/>
 			</div>
 
+			<div className="space-y-1.5">
+				<Label className="flex items-center gap-1.5">
+					Destination
+					<Tooltip content="Where their file lands. End-to-end folders are greyed out — whoever uploads has no key for them.">
+						<Info className="size-3.5 text-muted-foreground" />
+					</Tooltip>
+				</Label>
+				<FolderPicker
+					rootLabel="My Drive — no folder"
+					// The server refuses to fill an end-to-end folder on someone's
+					// behalf (routes/files.ts::finalizeStoredFile), so offering one
+					// here would only produce a request that fails later.
+					veto={(d) =>
+						d.encryption_mode === "client" || d.encryption_mode === "sealed"
+							? "end-to-end"
+							: null
+					}
+					className="max-h-44"
+					value={directoryId}
+					onChange={setDirectoryId}
+				/>
+			</div>
+
 			<Button
 				className="w-full"
 				loading={creating}
-				onClick={() => create(Math.max(60, parseDuration(expiry) ?? 3600))}
+				onClick={() =>
+					create(Math.max(60, parseDuration(expiry) ?? 3600), directoryId)
+				}
 			>
 				<Inbox /> Create receive link
 			</Button>

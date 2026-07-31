@@ -107,6 +107,12 @@ Form fields:
 | `expires_in_seconds` | integer | no | TTL in seconds from now. |
 | `compress` | boolean | no | Compress the file before storing (default `false`). |
 | `randomize_filename` | boolean | no | Store under a random name (default `false`). |
+| `directory_id` | integer | no | Upload straight into a folder, at any depth. |
+
+**A folder decides the encryption.** When `directory_id` is set, the file takes
+that folder's effective encryption and `encryption_mode` is ignored — as are
+`compress` and the lifecycle fields, which the folder also fixes. Uploading into
+an end-to-end folder therefore only works from a client that holds its key.
 
 ```bash
 curl -X POST "{{BASE_URL}}/api/files/upload" \
@@ -198,6 +204,277 @@ Response (200 OK):
 ```json
 { "status": "deleted" }
 ```
+
+### PATCH /api/files/{file_id} — Rename a file
+
+Changes the display filename. Any path separators are stripped — the name ends
+up in `Content-Disposition` and in ZIP member names.
+
+Body:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `original_filename` | string | yes | New filename, max 512 characters. |
+
+```bash
+curl -X PATCH "{{BASE_URL}}/api/files/1" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"original_filename": "quarterly-report.pdf"}'
+```
+
+```python
+requests.patch(
+    "{{BASE_URL}}/api/files/1",
+    headers={"Authorization": "Bearer <your-api-key>"},
+    json={"original_filename": "quarterly-report.pdf"}
+)
+```
+
+```javascript
+await fetch("{{BASE_URL}}/api/files/1", {
+  method: "PATCH",
+  headers: {
+    "Authorization": "Bearer <your-api-key>",
+    "Content-Type": "application/json"
+  },
+  body: JSON.stringify({ original_filename: "quarterly-report.pdf" })
+});
+```
+
+Returns the updated file object, in the same shape as `GET /api/files/`.
+
+### PATCH /api/files/{file_id}/move — Move a file
+
+Moves the file into a folder, or out to the root.
+
+Body:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `directory_id` | integer or null | yes | Target folder, or `null` for the root. |
+
+A moved file keeps the key its bytes are already under — moving is not
+re-encryption. Use `PATCH /api/files/{file_id}/encryption` afterwards to adopt
+the destination folder's key. Moving a file out to the root requires ownership,
+not merely edit rights on its folder.
+
+```bash
+curl -X PATCH "{{BASE_URL}}/api/files/1/move" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"directory_id": 7}'
+```
+
+```python
+requests.patch(
+    "{{BASE_URL}}/api/files/1/move",
+    headers={"Authorization": "Bearer <your-api-key>"},
+    json={"directory_id": 7}
+)
+```
+
+```javascript
+await fetch("{{BASE_URL}}/api/files/1/move", {
+  method: "PATCH",
+  headers: {
+    "Authorization": "Bearer <your-api-key>",
+    "Content-Type": "application/json"
+  },
+  body: JSON.stringify({ directory_id: 7 })
+});
+```
+
+### GET /api/files/{file_id}/content — Download your own file
+
+The owner's read of their own bytes. Unlike `GET /api/file/{slug}/raw`, this
+consumes no share-link use and needs no link to exist at all.
+
+Returns plaintext for `none` and `server` files (decompressing and decrypting as
+needed), and the raw encrypted container for `client` and `sealed` ones — which
+is exactly what a client holding the key needs in order to decrypt it.
+
+```bash
+curl -L -O -J "{{BASE_URL}}/api/files/1/content" \
+  -H "Authorization: Bearer <your-api-key>"
+```
+
+```python
+with requests.get(
+    "{{BASE_URL}}/api/files/1/content",
+    headers={"Authorization": "Bearer <your-api-key>"},
+    stream=True,
+) as r:
+    r.raise_for_status()
+    with open("out.bin", "wb") as f:
+        for chunk in r.iter_content(chunk_size=8192):
+            f.write(chunk)
+```
+
+```javascript
+const res = await fetch("{{BASE_URL}}/api/files/1/content", {
+  headers: { "Authorization": "Bearer <your-api-key>" }
+});
+const bytes = new Uint8Array(await res.arrayBuffer());
+```
+
+### PATCH /api/files/{file_id}/encryption — Change a file's encryption
+
+Switches a file between `none` and `server`, or makes it follow its folder
+again. This physically rewrites the stored bytes, so it is a slow request for a
+large file.
+
+Body — pass exactly one of:
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `mode` | `"none"` or `"server"` | Give this file its own encryption. `server` mints a fresh key. |
+| `adopt_parent` | boolean | Drop the file's own key and follow its folder's chain again. |
+| `password` | string | Optional, only with `mode: "server"`: use this password as the `?ek=` secret instead of a random token. Minimum 8 characters. |
+
+`client` and `sealed` files are refused with 409 — the server holds no key for
+them, so it cannot rewrite them. See *Converting to and from end-to-end
+encryption* below.
+
+```bash
+curl -X PATCH "{{BASE_URL}}/api/files/1/encryption" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "server"}'
+```
+
+```python
+resp = requests.patch(
+    "{{BASE_URL}}/api/files/1/encryption",
+    headers={"Authorization": "Bearer <your-api-key>"},
+    json={"mode": "server"}
+)
+print(resp.json()["access_key"])
+```
+
+```javascript
+const res = await fetch("{{BASE_URL}}/api/files/1/encryption", {
+  method: "PATCH",
+  headers: {
+    "Authorization": "Bearer <your-api-key>",
+    "Content-Type": "application/json"
+  },
+  body: JSON.stringify({ mode: "server" })
+});
+const { access_key } = await res.json();
+```
+
+Returns the updated file object plus `access_key` — the `?ek=` value to append
+to its download URLs.
+
+### PUT /api/files/{file_id}/access — Change the access secret
+
+Swaps the `?ek=` secret without re-encrypting anything. Send a password to
+choose your own, or an empty body to go back to a random token. Changing the
+secret clears the guess counter on every one of the file's links.
+
+Body:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `password` | string | no | 8–256 characters. Omit to mint a random token instead. |
+
+```bash
+curl -X PUT "{{BASE_URL}}/api/files/1/access" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"password": "correct horse battery"}'
+```
+
+Response (200 OK):
+
+```json
+{ "id": 1, "access_key": "correct horse battery", "password_locked": true }
+```
+
+Only `server`-mode files have an access secret; anything else is refused.
+
+### POST /api/files/{file_id}/seal — Seal & forget
+
+Encrypts an already-uploaded file with a fresh key, returns that key **once**,
+and keeps no copy of it. From this point the server cannot read the file: it
+behaves exactly like a `client`-mode one, and the key must travel in the URL
+*fragment* (`#ek=`), never as a `?ek=` query parameter.
+
+Body:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `password` | string | no | Derive the key from this password instead of a random one, so there is something to remember rather than something to write down. |
+
+```bash
+curl -X POST "{{BASE_URL}}/api/files/1/seal" \
+  -H "Authorization: Bearer <your-api-key>"
+```
+
+```python
+resp = requests.post(
+    "{{BASE_URL}}/api/files/1/seal",
+    headers={"Authorization": "Bearer <your-api-key>"}
+)
+key = resp.json()["key"]   # store this now; it is never shown again
+```
+
+```javascript
+const res = await fetch("{{BASE_URL}}/api/files/1/seal", {
+  method: "POST",
+  headers: { "Authorization": "Bearer <your-api-key>" }
+});
+const { key } = await res.json();  // store this now
+```
+
+Response (200 OK) — the file object, plus:
+
+```json
+{
+  "key": "IY0m5v1oQ...",
+  "key_is_password": false,
+  "seal_salt": null,
+  "seal_kdf": null
+}
+```
+
+With a password, `seal_salt` and `seal_kdf` are published (a salt is not a
+secret) so a client can rederive the key. **The honest caveat:** the key passed
+through this server's memory for the duration of this one request. It is never
+written to disk or to logs, but "an attacker controls the server at the moment
+of sealing" is a threat true end-to-end encryption resists and this does not.
+
+### POST /api/files/{file_id}/e2e-conversion — Commit an end-to-end conversion
+
+Going into or out of end-to-end encryption is a client-side operation: download,
+decrypt or re-encrypt locally, then upload the result as a new file. This
+endpoint commits that swap — it deletes the file that was replaced and records
+the transition in the audit log, so it is visible exactly when previously
+end-to-end content stopped being end-to-end.
+
+`{file_id}` is the **new** file.
+
+Body:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `replaced_file_id` | integer | yes | The old file, deleted on success. |
+
+At least one of the two files must be `client` or `sealed`, otherwise the
+request is refused with 400 — this endpoint is not a general "delete that one
+too". Deleting requires `can_delete` and ownership of the replaced file.
+
+```bash
+curl -X POST "{{BASE_URL}}/api/files/9/e2e-conversion" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"replaced_file_id": 1}'
+```
+
+Expected sequence: upload the new file → confirm it succeeded → call this. Both
+files exist briefly, on purpose; the old one dies only once the replacement is
+durable.
 
 ## Links
 
@@ -425,6 +702,31 @@ await new Promise((resolve, reject) => {
 });
 ```
 
+### GET /api/file/{slug}/preview — Inline preview
+
+Public. Serves the bytes for inline display — images, video, audio, PDFs and
+text — with no `Content-Disposition: attachment`, and **without spending a use**
+of the link.
+
+That budget exemption is why a link with `max_uses` set exposes no preview at
+all: it answers 403 regardless of key. Archived files are refused too, and so
+are `client` and `sealed` ones, which the server has no key for.
+
+Query parameters:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ek` | string | no | Required for server-encrypted files, same secret `/raw` wants, same per-slug throttle when it is a password. |
+
+Encrypted or compressed bytes are reproduced from byte zero, so those responses
+are 200-only with no `Accept-Ranges` — seeking is unavailable. Untransformed
+files support range requests as usual.
+
+```bash
+curl "{{BASE_URL}}/api/file/ab12cd34/preview"
+curl "{{BASE_URL}}/api/file/ab12cd34/preview?ek=<access_key>"
+```
+
 ## Folders
 
 ### GET /api/directories/ — List folders
@@ -465,12 +767,288 @@ Response (200 OK):
       "file_count": 4,
       "total_bytes": 819200,
       "encryption_mode": "none",
+      "parent_directory_id": null,
+      "subdirectory_count": 2,
+      "encryption_overridden": true,
+      "inherited_from_directory_id": null,
+      "gallery_view": false,
       "role": "owner",
       "created_at": "2026-01-10T09:00:00Z"
     }
   ]
 }
 ```
+
+### POST /api/directories — Create a folder
+
+Folders nest. A folder with no `parent_directory_id` sits at the root; anything
+else is a child, at most 10 levels deep.
+
+Body:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `title` | string | no | Defaults to `Untitled folder`. |
+| `parent_directory_id` | integer | no | Containing folder. Omit for a root-level folder. |
+| `encryption_mode` | `"none"` or `"server"` | no | Root-level folders only — a child always inherits its parent's, and passing this on a child is refused. |
+| `password` | string | no | With `encryption_mode: "server"`: use this password as the `?ek=` secret instead of a random token. |
+| `expires_in_seconds` | integer | no | Auto-expiry for the folder and its links. |
+
+```bash
+curl -X POST "{{BASE_URL}}/api/directories" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Invoices", "parent_directory_id": 7}'
+```
+
+```python
+resp = requests.post(
+    "{{BASE_URL}}/api/directories",
+    headers={"Authorization": "Bearer <your-api-key>"},
+    json={"title": "Invoices", "parent_directory_id": 7}
+)
+print(resp.json()["url"])
+```
+
+```javascript
+const res = await fetch("{{BASE_URL}}/api/directories", {
+  method: "POST",
+  headers: {
+    "Authorization": "Bearer <your-api-key>",
+    "Content-Type": "application/json"
+  },
+  body: JSON.stringify({ title: "Invoices", parent_directory_id: 7 })
+});
+const folder = await res.json();
+```
+
+Response (200 OK):
+
+```json
+{
+  "id": 12,
+  "slug": "ab12cd",
+  "url": "{{BASE_URL}}/d/ab12cd",
+  "parent_directory_id": 7,
+  "encryption_mode": "server",
+  "encryption_overridden": false,
+  "inherited_from_directory_id": 7,
+  "password_locked": false,
+  "key_check_blob": null,
+  "access_key": "xJ3n…"
+}
+```
+
+`encryption_overridden: false` means this folder holds no key of its own — it is
+protected by whatever `inherited_from_directory_id` points at. See *Encryption
+inheritance* below.
+
+### GET /api/directories/{directory_id}/children — List one level
+
+Returns the folders and files directly inside one folder, plus the breadcrumb
+trail to it. Use the literal id `root` for the top level. This is deliberately
+one level at a time; there is no recursive dump endpoint.
+
+```bash
+curl "{{BASE_URL}}/api/directories/root/children" \
+  -H "Authorization: Bearer <your-api-key>"
+
+curl "{{BASE_URL}}/api/directories/7/children" \
+  -H "Authorization: Bearer <your-api-key>"
+```
+
+```python
+resp = requests.get(
+    "{{BASE_URL}}/api/directories/7/children",
+    headers={"Authorization": "Bearer <your-api-key>"}
+)
+data = resp.json()
+print([d["title"] for d in data["directories"]])
+print([f["original_filename"] for f in data["files"]])
+```
+
+```javascript
+const res = await fetch("{{BASE_URL}}/api/directories/7/children", {
+  headers: { "Authorization": "Bearer <your-api-key>" }
+});
+const { directory, breadcrumbs, directories, files } = await res.json();
+```
+
+Response (200 OK):
+
+```json
+{
+  "directory": { "id": 7, "title": "Projects", "...": "…" },
+  "breadcrumbs": [{ "id": 3, "title": "Work" }, { "id": 7, "title": "Projects" }],
+  "directories": [{ "id": 12, "title": "Invoices", "...": "…" }],
+  "files": [{ "id": 1, "original_filename": "notes.txt", "...": "…" }]
+}
+```
+
+`directory` and `breadcrumbs` are `null` and `[]` at the root.
+
+### PATCH /api/directories/{directory_id} — Rename, or switch the public view
+
+Body — send either or both:
+
+| Name | Type | Description |
+| --- | --- | --- |
+| `title` | string | New folder name. |
+| `gallery_view` | boolean | Render the folder's public page as a gallery of poster tiles with inline players, rather than a file list. Cosmetic only — it gates nothing. |
+
+```bash
+curl -X PATCH "{{BASE_URL}}/api/directories/7" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Archive 2026", "gallery_view": true}'
+```
+
+The setting is read off the folder a link points at, so it stays put as a
+visitor navigates deeper into the shared subtree.
+
+### PATCH /api/directories/{directory_id}/move — Re-parent a folder
+
+Body:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `parent_directory_id` | integer or null | yes | New parent, or `null` for the root. |
+
+Refused if the target is the folder itself or one of its own descendants, or if
+the move would push any part of the subtree past 10 levels. A moved folder keeps
+the key its bytes are already under and becomes its own break point.
+
+```bash
+curl -X PATCH "{{BASE_URL}}/api/directories/12/move" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"parent_directory_id": null}'
+```
+
+### PATCH /api/directories/{directory_id}/encryption — Change a folder's encryption
+
+Same shape as the file endpoint: `{"mode": "none"|"server"}` to give this folder
+its own key, or `{"adopt_parent": true}` to follow its ancestors again. Optional
+`password` with `mode: "server"`.
+
+Every descendant whose bytes are currently protected by this folder's key is
+re-encrypted in place; a subfolder holding its own key is left alone. That makes
+this a slow request for a large subtree, and it runs synchronously.
+
+```bash
+curl -X PATCH "{{BASE_URL}}/api/directories/7/encryption" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "server", "password": "correct horse battery"}'
+```
+
+Returns the updated folder plus `access_key`.
+
+### PUT /api/directories/{directory_id}/access — Change the access secret
+
+Identical to the file version: swaps the `?ek=` secret with no re-encryption.
+Send `{"password": "…"}` for a chosen one, or an empty body for a fresh random
+token. Only a folder that holds its own `server`-mode key has a secret to
+change; an inheriting one is refused with 409 naming the folder that does.
+
+```bash
+curl -X PUT "{{BASE_URL}}/api/directories/7/access" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+### DELETE /api/directories/{directory_id} — Delete a folder
+
+Deletes the folder, everything inside it, every subfolder beneath it, and all
+their links. Refused if the subtree contains a folder owned by someone else.
+
+```bash
+curl -X DELETE "{{BASE_URL}}/api/directories/12" \
+  -H "Authorization: Bearer <your-api-key>"
+```
+
+### GET /api/d/{slug}/info — Browse a shared folder
+
+Public. Returns one level of a shared folder: its metadata, its subfolders, and
+its files. Metadata is readable without a key, exactly as it always has been —
+`?ek=` gates the *bytes*, on `/raw` and `/zip`.
+
+Query parameters:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `dir` | integer | no | Walk into a descendant of the link's folder. Anything outside that subtree answers 404 — a link must not confirm what exists elsewhere. |
+
+```bash
+curl "{{BASE_URL}}/api/d/xy99zz/info"
+curl "{{BASE_URL}}/api/d/xy99zz/info?dir=12"
+```
+
+Response (200 OK), abridged:
+
+```json
+{
+  "id": 12,
+  "entry_id": 7,
+  "title": "Invoices",
+  "breadcrumbs": [{ "id": 7, "title": "Projects" }, { "id": 12, "title": "Invoices" }],
+  "encryption_mode": "server",
+  "password_locked": false,
+  "key_scope": "dir:7",
+  "gallery_view": false,
+  "directories": [{ "id": 15, "title": "2025", "key_scope": "dir:15", "...": "…" }],
+  "files": [
+    {
+      "slug": "aa11bb",
+      "filename": "march.pdf",
+      "size_bytes": 20480,
+      "content_type": "application/pdf",
+      "encryption_mode": "server",
+      "key_scope": "dir:7",
+      "previewable": true
+    }
+  ],
+  "file_count": 1,
+  "total_bytes": 20480,
+  "uploader": null,
+  "already_saved": false
+}
+```
+
+`key_scope` names *which* secret opens a node (`dir:7`, `file:34`). A shared
+subtree can contain folders that broke away with keys of their own, so "the
+folder's key" is no longer a single thing — hold a map keyed by scope.
+
+`previewable` is the server's own answer to "would `GET /api/file/{slug}/preview`
+serve these bytes?", which depends on storage transforms only it knows about.
+
+### POST /api/d/{slug}/unlock — Check a key without downloading
+
+Public. Proves a key or password for one node under a link, so a client can find
+out whether it holds the right secret before offering to open something.
+
+Body:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ek` | string | yes | The key or password to check. |
+| `dir` | integer | no | Which node under the link, same bounds as `/info`. |
+
+```bash
+curl -X POST "{{BASE_URL}}/api/d/xy99zz/unlock" \
+  -H "Content-Type: application/json" \
+  -d '{"ek": "correct horse battery", "dir": 12}'
+```
+
+Response (200 OK):
+
+```json
+{ "ok": true, "key_scope": "dir:12" }
+```
+
+A wrong secret answers 401. Password-locked nodes are rate-limited per slug and
+answer 429 once the slug is locked out — see *Password locks* below.
 
 ### GET /api/d/{slug}/zip — Download folder as ZIP
 
@@ -483,6 +1061,14 @@ Query parameters:
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `ek` | string | no | Required for server-encrypted folders. |
+| `dir` | integer | no | Zip a descendant of the link's folder instead, on that node's own key. |
+
+The archive recurses, with folder structure preserved, but only as far as the
+presented key reaches: plaintext descendants are included, and a subfolder that
+broke away with a key of its own is skipped — bundling it would hand away the
+whole point of a separate key. End-to-end and sealed members are skipped too,
+since the server cannot decrypt them and shipping ciphertext under a plausible
+filename is worse than shipping nothing.
 
 ```bash
 curl -L -O "{{BASE_URL}}/api/d/xy99zz/zip"
@@ -592,11 +1178,17 @@ Response (200 OK):
   "used_bytes": 204800,
   "quota_bytes": 5368709120,
   "can_upload": true,
+  "can_upload_client_encrypted": true,
   "can_delete": true,
   "can_use_api_keys": true,
   "can_regenerate_links": true,
   "can_delete_links": true,
-  "can_use_dropbox": false
+  "can_create_directories": true,
+  "can_manage_lifecycle": false,
+  "can_use_torrents": false,
+  "can_watch_media": true,
+  "require_mfa": false,
+  "require_passkey": false
 }
 ```
 
@@ -844,7 +1436,7 @@ this server's cluster token and link other nodes live on the dedicated
 
 ## Encryption modes
 
-Files support three encryption modes. Choose based on your security
+Files support four encryption modes. Choose based on your security
 requirements.
 
 ### `none` — No encryption
@@ -875,6 +1467,73 @@ privacy — but the server cannot decrypt even if compelled.
 ```
 {{BASE_URL}}/api/file/<slug>#ek=<client_key>
 ```
+
+### `sealed` — Seal & forget
+
+Server-side encryption whose key the server generated, handed back once, and
+then threw away (`POST /api/files/{file_id}/seal`). Every read path treats it
+exactly like `client`: the server cannot decrypt it, and the key travels in the
+fragment. The difference from true end-to-end is honest and narrow — the key
+existed in server memory for the duration of the sealing request.
+
+```
+{{BASE_URL}}/api/file/<slug>#ek=<sealed_key>
+```
+
+### Encryption inheritance
+
+A folder or file with `encryption_overridden: false` holds no key of its own.
+Its *effective* encryption is whatever the nearest ancestor with
+`encryption_overridden: true` has, and `inherited_from_directory_id` names that
+ancestor. A root-level folder is always its own break point — there is nothing
+above it to inherit from.
+
+That is what makes the following work: encrypt a folder, share its link, and
+everything under it opens with that one key. Give a subfolder its own key with
+`PATCH /api/directories/{id}/encryption` and it breaks away — the parent's link
+still lists it, but the parent's key no longer opens it. Set a subfolder to
+`none` and it is plaintext inside an otherwise encrypted tree.
+
+A file uploaded into a folder takes that folder's effective encryption; the
+`encryption_mode` you pass at upload time only decides anything for a root-level
+upload. A folder that is end-to-end encrypted can only be uploaded into by a
+client that holds its key — the server refuses to file plaintext under a mode
+that promises ciphertext, so dropbox links, remote uploads and torrent imports
+into such a folder are rejected with 409.
+
+Every public endpoint reports a `key_scope` (`dir:7`, `file:34`) naming which
+secret opens that node, because one shared subtree can need several.
+
+### Password locks
+
+The `?ek=` secret of a `server`-mode file or folder is a 144-bit random token by
+default. `PUT /api/files/{id}/access` and `PUT /api/directories/{id}/access` let
+you replace it with a chosen password, and `password_locked: true` on the public
+metadata says so.
+
+Because a human password *is* guessable over the network, every public check of
+a password-locked secret is rate-limited **per link slug** — not per IP, which a
+distributed guesser would sail straight past. After a handful of wrong guesses
+the slug answers 429 for a while, including to the correct password. A missing
+`?ek=` counts as a failed attempt, so the counter cannot be dodged by omitting
+the parameter. Random-token links are deliberately not throttled: 144 bits is
+not a guessing target, and throttling them would let anyone lock a public link
+out of service.
+
+### Converting to and from end-to-end encryption
+
+There is no server-side conversion into `client` mode, because by definition the
+server must never see the key. The sequence is:
+
+1. `GET /api/files/{id}/content` — your own bytes, no share-link use spent.
+2. Decrypt and/or re-encrypt locally.
+3. Upload the result as a new file.
+4. `POST /api/files/{id}/e2e-conversion` on the **new** file, naming the old one
+   as `replaced_file_id`. The old file and its links are deleted and the
+   transition is written to the audit log.
+
+`POST /api/files/{id}/seal` is the one-way server-side variant: it needs no
+re-upload, at the cost of the key existing in server memory once.
 
 ## Errors
 

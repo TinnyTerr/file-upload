@@ -29,6 +29,7 @@ import { type Request, Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
 import { touchBlobAccess } from "../cluster/cacheEviction.ts";
+import { resolveFileEncryption } from "../crypto/effectiveEncryption.ts";
 import {
 	type DirectoryRow,
 	type FileRow,
@@ -167,9 +168,11 @@ function serializeEntry(db: Db, f: FileRow) {
 		// Client-encrypted media can't be played by an external player at all --
 		// only the browser holds the key -- so flag it rather than hand out a
 		// stream URL that yields ciphertext.
-		client_encrypted: f.encryption_mode === "client",
+		client_encrypted: ["client", "sealed"].includes(
+			resolveFileEncryption(db, f).mode,
+		),
 		// See the module docstring: transformed files stream from byte zero only.
-		seekable: isDirectlyStreamable(f),
+		seekable: isDirectlyStreamable(db, f),
 		archived: !!f.archived,
 	};
 }
@@ -401,7 +404,11 @@ export function mediaRouter(state: AppState): Router {
 			if (!f) throw new HttpError(404, "no poster available");
 			// Cover art comes from a thumbnail of the raw bytes, so anything
 			// transformed at rest simply has no poster.
-			if (f.encryption_mode !== "none" || f.compressed || f.archived) {
+			if (
+				resolveFileEncryption(db, f).mode !== "none" ||
+				f.compressed ||
+				f.archived
+			) {
 				throw new HttpError(404, "no poster available");
 			}
 			const fullPath = await localPath(state, f);
@@ -429,7 +436,8 @@ export function mediaRouter(state: AppState): Router {
 			if (!dir) throw new HttpError(404, "not found");
 
 			const entries = playableFiles(db, dir.id).filter(
-				(f) => f.encryption_mode !== "client",
+				(f) =>
+					!["client", "sealed"].includes(resolveFileEncryption(db, f).mode),
 			);
 			if (entries.length === 0) throw new HttpError(404, "nothing to play");
 
@@ -471,7 +479,11 @@ export function mediaRouter(state: AppState): Router {
 			const { file: f, dir } = found;
 			const auth = authorizeStream(state, req, f, dir);
 			if (!auth.ok) throw auth.error;
-			if (f.encryption_mode !== "none" || f.compressed || f.archived) {
+			if (
+				resolveFileEncryption(db, f).mode !== "none" ||
+				f.compressed ||
+				f.archived
+			) {
 				throw new HttpError(404, "no thumbnail available");
 			}
 			const fullPath = await localPath(state, f);
@@ -504,7 +516,7 @@ export function mediaRouter(state: AppState): Router {
 			if (!auth.ok) throw auth.error;
 			if (auth.keyRow) touchPlayKey(db, auth.keyRow);
 
-			if (f.encryption_mode === "client") {
+			if (["client", "sealed"].includes(resolveFileEncryption(db, f).mode)) {
 				throw new HttpError(
 					409,
 					"this title is end-to-end encrypted and can only be played in the browser that holds its key",
@@ -534,7 +546,7 @@ export function mediaRouter(state: AppState): Router {
 			};
 
 			// Untransformed on disk: honour Range so the player can seek.
-			if (isDirectlyStreamable(f)) {
+			if (isDirectlyStreamable(db, f)) {
 				const fileSize = statOrNull(fullPath)?.size ?? f.stored_size_bytes;
 				const rangeHeader = req.headers.range;
 				if (rangeHeader) {
@@ -791,7 +803,10 @@ export function mediaRouter(state: AppState): Router {
 			if (!canWatch(state, dir, user)) {
 				throw new HttpError(403, "not entitled to this title");
 			}
-			if (target && target.encryption_mode === "client") {
+			if (
+				target &&
+				["client", "sealed"].includes(resolveFileEncryption(db, target).mode)
+			) {
 				throw new HttpError(
 					409,
 					"end-to-end encrypted titles cannot be played outside the browser",

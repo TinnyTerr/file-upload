@@ -5,6 +5,7 @@ import type { ApiKeyRow, UserRow } from "../db/rows.ts";
 import {
 	ensurePermissions,
 	hasPermission,
+	missingRequiredCredential,
 	type PermissionFlag,
 } from "../permissions.ts";
 import { bindOrReject, hashKey } from "../security/apiKeys.ts";
@@ -18,9 +19,28 @@ declare module "express-serve-static-core" {
 	}
 }
 
+/** The 403 an account gets when `require_mfa`/`require_passkey` is set but the
+ * matching credential isn't enrolled yet. Same shape as the
+ * must_change_credentials block: everything is refused except the one surface
+ * that lets the account fix itself -- here the enrollment routes under
+ * /api/account/mfa, which authenticate with `requireSession` rather than
+ * `requireActiveUser` and so never reach this gate. */
+export function enrollmentBlock(
+	res: Response,
+	missing: "passkey" | "mfa",
+): void {
+	res.status(403).json({
+		detail:
+			missing === "passkey"
+				? "passkey enrollment required"
+				: "mfa enrollment required",
+	});
+}
+
 /** Mirrors app/deps.py::require_active_user. Resolves the session cookie if
  * requireSession hasn't already, loads the user, and rejects accounts still
- * on their one-time bootstrap credentials. */
+ * on their one-time bootstrap credentials or missing a required second
+ * factor. */
 export function requireActiveUser(state: AppState): RequestHandler {
 	return (req: Request, res: Response, next: NextFunction): void => {
 		if (!req.sessionRow) {
@@ -41,6 +61,11 @@ export function requireActiveUser(state: AppState): RequestHandler {
 		}
 		if (user.must_change_credentials) {
 			res.status(403).json({ detail: "must change credentials" });
+			return;
+		}
+		const missing = missingRequiredCredential(state.db, user);
+		if (missing) {
+			enrollmentBlock(res, missing);
 			return;
 		}
 		req.currentUser = user;
@@ -134,6 +159,11 @@ export function getUploadUser(state: AppState): RequestHandler {
 				res.status(401).json({ detail: "invalid api key owner" });
 				return;
 			}
+			const missing = missingRequiredCredential(db, user);
+			if (missing) {
+				enrollmentBlock(res, missing);
+				return;
+			}
 			const perm = ensurePermissions(db, user.id, {
 				master: user.role === "master",
 			});
@@ -163,6 +193,11 @@ export function getUploadUser(state: AppState): RequestHandler {
 		});
 		if (!user || user.must_change_credentials) {
 			res.status(401).json({ detail: "not authenticated" });
+			return;
+		}
+		const missing = missingRequiredCredential(db, user);
+		if (missing) {
+			enrollmentBlock(res, missing);
 			return;
 		}
 		const perm = ensurePermissions(db, user.id, {
@@ -196,6 +231,11 @@ export function requireReadUser(state: AppState): RequestHandler {
 				res.status(401).json({ detail: "invalid api key owner" });
 				return;
 			}
+			const keyOwnerMissing = missingRequiredCredential(db, user);
+			if (keyOwnerMissing) {
+				enrollmentBlock(res, keyOwnerMissing);
+				return;
+			}
 			req.apiKey = apiKey;
 			req.currentUser = user;
 			next();
@@ -213,6 +253,11 @@ export function requireReadUser(state: AppState): RequestHandler {
 		});
 		if (!user || user.must_change_credentials) {
 			res.status(401).json({ detail: "not authenticated" });
+			return;
+		}
+		const missing = missingRequiredCredential(db, user);
+		if (missing) {
+			enrollmentBlock(res, missing);
 			return;
 		}
 		req.sessionRow = row;

@@ -8,6 +8,7 @@ import { openSecret } from "../crypto/secretEncrypt.ts";
 import type { UserRow } from "../db/rows.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
+import { mfaEnforcedFor, passkeyEnforcedFor } from "../permissions.ts";
 import * as credentials from "../security/credentials.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import {
@@ -94,9 +95,15 @@ export function authRouter(state: AppState): Router {
 			lockout.resetSuccess(db, username);
 
 			const credRows = credentials.listForUser(db, user.id);
-			const mfaEnforced = !!user.mfa_required || user.role === "master";
+			const mfaEnforced = mfaEnforcedFor(db, user);
+			// `require_passkey` narrows which factor is acceptable, so a
+			// TOTP-only account under that flag counts as having no usable
+			// factor at all and is sent to enrollment instead of a challenge.
+			const usableCreds = passkeyEnforcedFor(db, user)
+				? credRows.filter((c) => c.kind === "webauthn")
+				: credRows;
 
-			if (credRows.length > 0 && mfaEnforced) {
+			if (usableCreds.length > 0 && mfaEnforced) {
 				const ticket = state.secondFactorTickets.create(user.id);
 				if (typeof connId === "string" && connId) {
 					state.loginChallenges.transition(connId, {
@@ -112,13 +119,13 @@ export function authRouter(state: AppState): Router {
 				res.json({
 					status: "mfa_required",
 					mfa_ticket: ticket,
-					methods: [...new Set(credRows.map((c) => c.kind))],
+					methods: [...new Set(usableCreds.map((c) => c.kind))],
 				});
 				return;
 			}
 
 			recordAudit(db, { actor: username, action: "login.success", ip });
-			issueSession(req, res, user, ip, mfaEnforced && credRows.length === 0);
+			issueSession(req, res, user, ip, mfaEnforced && usableCreds.length === 0);
 		}),
 	);
 
@@ -141,6 +148,13 @@ export function authRouter(state: AppState): Router {
 			});
 			if (!user) {
 				res.status(401).json({ detail: "invalid or expired ticket" });
+				return;
+			}
+			// A TOTP code can never satisfy `require_passkey`, even if the
+			// account still has an authenticator app enrolled from before the
+			// flag was set.
+			if (passkeyEnforcedFor(db, user)) {
+				res.status(403).json({ detail: "a passkey is required to sign in" });
 				return;
 			}
 			const totpCreds = credentials

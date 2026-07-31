@@ -8,7 +8,12 @@ import { URL } from "node:url";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
-import { nowIso, type RemoteUploadJobRow } from "../db/rows.ts";
+import {
+	type DirectoryRow,
+	nowIso,
+	type RemoteUploadJobRow,
+} from "../db/rows.ts";
+import { getDirectory, isEditor } from "../directoryTree.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
@@ -307,6 +312,23 @@ export function remoteUploadRouter(state: AppState): Router {
 			const body = req.body ?? {};
 			const url = String(body.url ?? "");
 
+			// Optional destination folder. `finalizeStoredFile` derives the
+			// encryption mode from it, so a URL pulled into an encrypted folder is
+			// encrypted on arrival exactly like a browser upload into that folder.
+			let directory: DirectoryRow | null = null;
+			const rawDir = body.directory_id;
+			if (rawDir !== undefined && rawDir !== null && rawDir !== "") {
+				const dirId = Number(rawDir);
+				if (!Number.isInteger(dirId)) {
+					throw new HttpError(400, "invalid directory_id");
+				}
+				directory = getDirectory(db, dirId);
+				if (!directory) throw new HttpError(404, "directory not found");
+				if (!isEditor(db, directory, user)) {
+					throw new HttpError(403, "not your directory");
+				}
+			}
+
 			const perm = ensurePermissions(db, user.id, {
 				master: user.role === "master",
 			});
@@ -347,7 +369,7 @@ export function remoteUploadRouter(state: AppState): Router {
 					req,
 					user,
 					perm,
-					directory: null,
+					directory,
 					workPath: work,
 					relPath,
 					stored: meta.sizeBytes,

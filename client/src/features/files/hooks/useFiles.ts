@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { errorMessage } from "@/config/api";
+import { dirKeys } from "@/features/directories/hooks/queryKeys";
+import { driveKeys } from "@/features/drive/hooks/queryKeys";
 import { filesService } from "../services/filesService";
 import { filesKeys } from "./queryKeys";
 
@@ -16,6 +18,8 @@ export function useDeleteFile() {
 			toast.success("File deleted");
 			qc.invalidateQueries({ queryKey: filesKeys.list });
 			qc.invalidateQueries({ queryKey: filesKeys.usage });
+			qc.invalidateQueries({ queryKey: driveKeys.all });
+			qc.invalidateQueries({ queryKey: dirKeys.list });
 			qc.invalidateQueries({ queryKey: ["admin", "files"] });
 			qc.invalidateQueries({ queryKey: ["admin", "storage"] });
 		},

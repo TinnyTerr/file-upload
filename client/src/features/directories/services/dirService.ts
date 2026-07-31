@@ -15,10 +15,27 @@ export const dirService = {
 
 	create: (body: {
 		title: string;
-		encryption_mode: EncryptionMode;
+		/** Omitted for a nested folder: a child always inherits its parent's
+		 * encryption, and the backend rejects an explicit mode there. */
+		encryption_mode?: EncryptionMode;
+		parent_directory_id?: number | null;
 		expires_in_seconds?: number | null;
 		key_check_blob?: string | null;
+		password?: string | null;
 	}) => api.post<CreateDirectoryResult>("/directories", { json: body }),
+
+	rename: (dirId: number, title: string) =>
+		api.patch<Directory>(`/directories/${dirId}`, { json: { title } }),
+
+	setGalleryView: (dirId: number, galleryView: boolean) =>
+		api.patch<Directory>(`/directories/${dirId}`, {
+			json: { gallery_view: galleryView },
+		}),
+
+	move: (dirId: number, parentDirectoryId: number | null) =>
+		api.patch<Directory>(`/directories/${dirId}/move`, {
+			json: { parent_directory_id: parentDirectoryId },
+		}),
 
 	members: (dirId: number) =>
 		api
