@@ -16,8 +16,12 @@ import { ChangePage } from "@/features/auth/components/ChangePage";
 
 import { LoginPage } from "@/features/auth/components/LoginPage";
 import { useAuth } from "@/features/auth/hooks/auth";
-import { DrivePage } from "@/features/drive/components/DrivePage";
 
+const ExplorerPage = lazy(() =>
+	import("@/features/drive/components/explorer/ExplorerPage").then((m) => ({
+		default: m.ExplorerPage,
+	})),
+);
 const DownloadPage = lazy(() =>
 	import("@/features/download/components/DownloadPage").then((m) => ({
 		default: m.DownloadPage,
@@ -173,7 +177,7 @@ export default function App() {
 							path="/files"
 							element={
 								<Gated feature="files" label="Files">
-									<DrivePage />
+									<ExplorerPage />
 								</Gated>
 							}
 						/>
@@ -181,7 +185,7 @@ export default function App() {
 							path="/files/:dirId"
 							element={
 								<Gated feature="files" label="Files">
-									<DrivePage />
+									<ExplorerPage />
 								</Gated>
 							}
 						/>

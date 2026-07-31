@@ -22,7 +22,7 @@ import { QRCode } from "@/components/ui/qr-code";
 import { Tooltip } from "@/components/ui/tooltip";
 import { asHtml, asMarkdown } from "@/lib/copy";
 import { shareUrl } from "../lib/shareUrl";
-import type { EncryptionMode } from "../types";
+import { type EncryptionMode, isKeyHeldByUser } from "../types";
 
 export interface ShareEntry {
 	filename: string;
@@ -106,7 +106,12 @@ function EntryCard({ entry }: { entry: ShareEntry }) {
 			}),
 		[entry],
 	);
-	const key = entry.mode === "client" ? entry.clientKeyB64 : entry.accessKey;
+	// `sealed` is a user-held key exactly like `client` -- the server has no
+	// `accessKey` for it and never will, so reading one here meant the "Key only"
+	// row never rendered for a sealed file even when a key was supplied.
+	const key = isKeyHeldByUser(entry.mode)
+		? entry.clientKeyB64
+		: entry.accessKey;
 	const hasKey = entry.mode !== "none" && !!key;
 
 	return (
@@ -117,7 +122,7 @@ function EntryCard({ entry }: { entry: ShareEntry }) {
 				</span>
 				<Badge
 					variant={
-						entry.mode === "client"
+						isKeyHeldByUser(entry.mode)
 							? "warning"
 							: entry.mode === "server"
 								? "accent"
@@ -128,7 +133,9 @@ function EntryCard({ entry }: { entry: ShareEntry }) {
 						? "public"
 						: entry.mode === "client"
 							? "end-to-end"
-							: "server-encrypted"}
+							: entry.mode === "sealed"
+								? "sealed"
+								: "server-encrypted"}
 				</Badge>
 			</div>
 

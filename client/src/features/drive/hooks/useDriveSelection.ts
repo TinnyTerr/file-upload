@@ -16,6 +16,16 @@ export interface DriveSelection {
 	selectedItems: DriveItem[];
 	clear: () => void;
 	selectAll: () => void;
+	/** Replace the whole set — used by the marquee, which computes its own hits
+	 * from the DOM, and by the keyboard model. */
+	setSelected: (keys: Set<string>) => void;
+	/** Select exactly one item and make it the anchor for shift-extension. */
+	selectOnly: (item: DriveItem) => void;
+	/** Extend from the anchor to `item`, as shift-click does. */
+	extendTo: (item: DriveItem) => void;
+	/** The item shift-extension measures from. */
+	anchorKey: string | null;
+	setAnchor: (key: string | null) => void;
 }
 
 /**
@@ -92,6 +102,38 @@ export function useDriveSelection(items: DriveItem[]): DriveSelection {
 	const clear = useCallback(() => setSelected(new Set()), []);
 	const selectAll = useCallback(() => setSelected(new Set(keys)), [keys]);
 
+	const selectOnly = useCallback((item: DriveItem) => {
+		const key = itemKey(item);
+		setSelected(new Set([key]));
+		anchor.current = key;
+	}, []);
+
+	const extendTo = useCallback(
+		(item: DriveItem) => {
+			const key = itemKey(item);
+			if (!anchor.current) {
+				setSelected(new Set([key]));
+				anchor.current = key;
+				return;
+			}
+			const from = keys.indexOf(anchor.current);
+			const to = keys.indexOf(key);
+			if (from === -1 || to === -1) {
+				setSelected(new Set([key]));
+				anchor.current = key;
+				return;
+			}
+			const [lo, hi] = from < to ? [from, to] : [to, from];
+			setSelected(new Set(keys.slice(lo, hi + 1)));
+		},
+		[keys],
+	);
+
+	const replace = useCallback((next: Set<string>) => setSelected(next), []);
+	const setAnchor = useCallback((key: string | null) => {
+		anchor.current = key;
+	}, []);
+
 	return {
 		selected,
 		items,
@@ -101,5 +143,10 @@ export function useDriveSelection(items: DriveItem[]): DriveSelection {
 		selectedItems,
 		clear,
 		selectAll,
+		setSelected: replace,
+		selectOnly,
+		extendTo,
+		anchorKey: anchor.current,
+		setAnchor,
 	};
 }

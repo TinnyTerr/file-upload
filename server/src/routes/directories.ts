@@ -41,7 +41,11 @@ import { newSlug } from "../links.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
-import { requireActiveUser, requireMaster } from "../middleware/deps.ts";
+import {
+	requireActiveUser,
+	requireMaster,
+	requirePermission,
+} from "../middleware/deps.ts";
 import { ensurePermissions } from "../permissions.ts";
 import {
 	type AccessCheck,
@@ -954,6 +958,309 @@ export function directoriesRouter(state: AppState): Router {
 			});
 			const updated = getDirectory(db, d.id)!;
 			res.json(serializeDirectories(state, req, [updated], user)[0]!);
+		},
+	);
+
+	/**
+	 * Duplicate one of your own folders, and everything under it, somewhere else.
+	 *
+	 * The recursive half of `POST /files/:id/copy`, and the same primitive
+	 * `POST /d/:slug/save` is built on — minus the "as far as the presented key
+	 * reaches" filter, because an owner is entitled to the whole subtree. No
+	 * bytes are written: every file is a `ref_count` bump on a blob that is
+	 * already there.
+	 */
+	router.post(
+		"/directories/:dirId(\\d+)/copy",
+		requireSession(state),
+		requireCsrf,
+		requirePermission(state, "can_create_directories"),
+		(req, res) => {
+			const user = req.currentUser!;
+			const sourceDir = getDirectory(db, Number(req.params.dirId));
+			if (!sourceDir) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			if (!isEditor(db, sourceDir, user)) {
+				res.status(403).json({ detail: "not your directory" });
+				return;
+			}
+
+			const body = req.body ?? {};
+			const raw = body.parent_directory_id;
+			let target: DirectoryRow | null = null;
+			if (raw !== null && raw !== "" && raw !== undefined) {
+				const targetId = Number(raw);
+				if (!Number.isInteger(targetId)) {
+					res.status(400).json({ detail: "invalid parent_directory_id" });
+					return;
+				}
+				target = getDirectory(db, targetId);
+				if (!target) {
+					res.status(404).json({ detail: "target directory not found" });
+					return;
+				}
+				if (!isEditor(db, target, user)) {
+					res.status(403).json({ detail: "not your directory" });
+					return;
+				}
+				if (isSelfOrDescendant(db, target.id, sourceDir.id)) {
+					res.status(400).json({
+						detail: "cannot copy a folder into itself or its contents",
+					});
+					return;
+				}
+			}
+
+			const targetEff = target ? resolveDirectoryEncryption(db, target) : null;
+			// Same refusal as an upload into an end-to-end folder: the server holds
+			// no key for it, so it cannot re-key the copy into place.
+			if (
+				targetEff &&
+				(targetEff.mode === "client" || targetEff.mode === "sealed")
+			) {
+				res.status(409).json({
+					detail:
+						"this folder is end-to-end encrypted; copying into it isn't supported",
+				});
+				return;
+			}
+
+			// The whole subtree comes along, so its deepest member is what has to fit.
+			const newDepth = target ? depthOf(db, target.id) + 1 : 0;
+			if (newDepth + subtreeHeight(db, sourceDir.id) > MAX_DEPTH) {
+				res
+					.status(400)
+					.json({ detail: `folders can be nested at most ${MAX_DEPTH} deep` });
+				return;
+			}
+
+			interface CopyNode {
+				source: DirectoryRow;
+				eff: EffectiveEncryption;
+				files: FileRow[];
+				children: CopyNode[];
+			}
+			// `cluster/replication.ts` upserts `parent_directory_id` with no
+			// validation, so a walk that trusts the tree can be made to recurse
+			// forever by a bad peer. Every walker in directoryTree.ts guards this.
+			const visited = new Set<number>();
+			const collect = (dir: DirectoryRow): CopyNode => {
+				visited.add(dir.id);
+				return {
+					source: dir,
+					eff: resolveDirectoryEncryption(db, dir),
+					files: db.all<FileRow>(
+						"SELECT * FROM files WHERE directory_id = $id ORDER BY id ASC",
+						{ $id: dir.id },
+					),
+					children: db
+						.all<DirectoryRow>(
+							"SELECT * FROM directories WHERE parent_directory_id = $id ORDER BY title ASC",
+							{ $id: dir.id },
+						)
+						.flatMap((sub) => (visited.has(sub.id) ? [] : [collect(sub)])),
+				};
+			};
+			const tree = collect(sourceDir);
+
+			const totalOf = (n: CopyNode): number =>
+				n.files.reduce((sum, f) => sum + f.size_bytes, 0) +
+				n.children.reduce((sum, c) => sum + totalOf(c), 0);
+			const logicalBytes = totalOf(tree);
+			const perm = ensurePermissions(db, user.id, {
+				master: user.role === "master",
+			});
+			if (!perm.can_upload && user.role !== "master") {
+				res.status(403).json({ detail: "permission denied: can_upload" });
+				return;
+			}
+			if (
+				usedStorageBytesForUser(db, user.id) + logicalBytes >
+				perm.quota_bytes
+			) {
+				res.status(413).json({ detail: "copy would exceed your quota" });
+				return;
+			}
+
+			// " - Copy", as everywhere else, but only when it would otherwise
+			// collide: pasting into a different folder should keep the name.
+			const siblingTitles = new Set(
+				db
+					.all<DirectoryRow>(
+						target
+							? "SELECT * FROM directories WHERE parent_directory_id = $id"
+							: "SELECT * FROM directories WHERE parent_directory_id IS NULL AND owner_id = $owner",
+						target ? { $id: target.id } : { $owner: user.id },
+					)
+					.map((d) => d.title),
+			);
+			let rootTitle = sourceDir.title;
+			for (let n = 0; siblingTitles.has(rootTitle) && n < 100; n += 1) {
+				rootTitle =
+					n === 0
+						? `${sourceDir.title} - Copy`
+						: `${sourceDir.title} - Copy (${n + 1})`;
+			}
+
+			let copiedFiles = 0;
+
+			/** Copies one folder, then everything under it.
+			 *
+			 * The root copy is its own break point — it may land where nothing above
+			 * it holds a key — so it needs the source's *effective* material, not
+			 * columns that are NULL because the source inherits. A descendant whose
+			 * effective material is byte-identical to its new parent's inherits
+			 * instead, so re-keying the copy later reaches the whole tree; one whose
+			 * material differs becomes its own break point, because inheriting would
+			 * relabel bytes it doesn't describe. */
+			const copyNode = (
+				node: CopyNode,
+				parent: DirectoryRow | null,
+				title: string,
+			): DirectoryRow => {
+				const parentEff = parent
+					? resolveDirectoryEncryption(db, parent)
+					: null;
+				const inherits =
+					parentEff !== null &&
+					node.eff.mode === parentEff.mode &&
+					blobsEqual(node.eff.keyBlob, parentEff.keyBlob);
+				const slug = newSlug();
+				db.run(
+					`INSERT INTO directories (
+         owner_id, slug, title, parent_directory_id, encryption_mode, enc_key_blob,
+         enc_access_blob, access_is_password, encryption_overridden, key_check_blob,
+         total_bytes, gallery_view, created_at
+       ) VALUES ($ownerId, $slug, $title, $parentId, $enc, $encKey, $encAccess, $isPassword,
+         $overridden, $keyCheck, $totalBytes, $gallery, $now)`,
+					{
+						// A folder created inside someone else's tree belongs to that
+						// tree's owner -- otherwise an editor owns it, and the
+						// owner-only collaborator endpoint becomes re-delegatable.
+						$ownerId: parent ? parent.owner_id : user.id,
+						$slug: slug,
+						$title: title,
+						$parentId: parent ? parent.id : null,
+						$enc: node.eff.mode,
+						$encKey:
+							inherits || !node.eff.keyBlob
+								? null
+								: Buffer.from(node.eff.keyBlob),
+						$encAccess:
+							inherits || !node.eff.accessBlob
+								? null
+								: Buffer.from(node.eff.accessBlob),
+						$isPassword: !inherits && node.eff.passwordLocked ? 1 : 0,
+						$overridden: inherits ? 0 : 1,
+						$keyCheck: inherits ? null : node.eff.keyCheckBlob,
+						$totalBytes: node.files.reduce((sum, f) => sum + f.size_bytes, 0),
+						$gallery: node.source.gallery_view,
+						$now: nowIso(),
+					},
+				);
+				const copy = db.get<DirectoryRow>(
+					"SELECT * FROM directories WHERE id = last_insert_rowid()",
+				)!;
+				db.run(
+					"INSERT INTO directory_links (directory_id, slug, use_count, active, created_at) VALUES ($dirId, $slug, 0, 1, $now)",
+					{ $dirId: copy.id, $slug: slug, $now: nowIso() },
+				);
+				copyFilesInto(node, copy);
+				for (const child of node.children)
+					copyNode(child, copy, child.source.title);
+				return copy;
+			};
+
+			function copyFilesInto(node: CopyNode, into: DirectoryRow): void {
+				for (const source of node.files) {
+					const fileEff = resolveFileEncryption(db, source);
+					const intoEff = resolveDirectoryEncryption(db, into);
+					const inherits =
+						fileEff.mode === intoEff.mode &&
+						blobsEqual(fileEff.keyBlob, intoEff.keyBlob);
+					if (source.blob_id) {
+						db.run(
+							"UPDATE content_blobs SET ref_count = ref_count + 1 WHERE id = $id",
+							{ $id: source.blob_id },
+						);
+					}
+					db.run(
+						`INSERT INTO files (
+           owner_id, directory_id, blob_id, storage_path, original_filename, source_type,
+           size_bytes, stored_size_bytes, content_type, encryption_mode, enc_key_blob,
+           enc_access_blob, access_is_password, encryption_overridden, seal_salt, compressed,
+           archived, archive_codec, archive_original_stored_size_bytes, archive_saved_bytes,
+           archive_after_idle_days, lifecycle_state, is_permanent, delete_if_idle_days,
+           auto_unarchive_on_download, created_at
+         ) VALUES ($ownerId, $dirId, $blobId, $path, $filename, $sourceType, $size, $storedSize,
+           $ct, $enc, $encKey, $encAccess, $isPassword, $overridden, $sealSalt, $compressed,
+           $archived, $archiveCodec, $archiveOrigStored, $archiveSaved, $archiveAfterIdle,
+           $lifecycle, $isPermanent, $deleteIfIdle, $autoUnarchive, $now)`,
+						{
+							$ownerId: into.owner_id,
+							$dirId: into.id,
+							$blobId: source.blob_id,
+							$path: source.storage_path,
+							$filename: source.original_filename,
+							$sourceType: source.source_type,
+							$size: source.size_bytes,
+							$storedSize: source.stored_size_bytes,
+							$ct: source.content_type,
+							$enc: fileEff.mode,
+							$encKey:
+								inherits || !fileEff.keyBlob
+									? null
+									: Buffer.from(fileEff.keyBlob),
+							$encAccess:
+								inherits || !fileEff.accessBlob
+									? null
+									: Buffer.from(fileEff.accessBlob),
+							$isPassword: !inherits && fileEff.passwordLocked ? 1 : 0,
+							$overridden: inherits ? 0 : 1,
+							$sealSalt: source.seal_salt
+								? Buffer.from(source.seal_salt)
+								: null,
+							$compressed: source.compressed,
+							$archived: source.archived,
+							$archiveCodec: source.archive_codec,
+							$archiveOrigStored: source.archive_original_stored_size_bytes,
+							$archiveSaved: source.archive_saved_bytes,
+							$archiveAfterIdle: source.archive_after_idle_days,
+							$lifecycle: source.lifecycle_state,
+							$isPermanent: source.is_permanent,
+							$deleteIfIdle: source.delete_if_idle_days,
+							$autoUnarchive: source.auto_unarchive_on_download,
+							$now: nowIso(),
+						},
+					);
+					db.run(
+						"INSERT INTO links (file_id, slug, use_count, active, created_at) VALUES (last_insert_rowid(), $slug, 0, 1, $now)",
+						{ $slug: newSlug(), $now: nowIso() },
+					);
+					copiedFiles += 1;
+				}
+			}
+
+			// `directories.total_bytes` counts a folder's *direct* files only --
+			// which is why moving a folder doesn't touch its new parent's total
+			// either. Each copied folder sets its own; the destination's is unchanged.
+			let newDir!: DirectoryRow;
+			db.transaction(() => {
+				newDir = copyNode(tree, target, rootTitle);
+			});
+
+			recordAudit(db, {
+				actor: user.username,
+				action: "directory.copied",
+				target: `directory:${sourceDir.id}->directory:${newDir.id}`,
+				ip: clientIp(state, req),
+			});
+			log.info(
+				`directory copied source_directory_id=${sourceDir.id} copy_directory_id=${newDir.id} owner_id=${user.id} copied_files=${copiedFiles}`,
+			);
+			res.json(serializeDirectories(state, req, [newDir], user)[0]!);
 		},
 	);
 

@@ -72,6 +72,16 @@ export function useDriveMutations() {
 		[runBatch],
 	);
 
+	const copy = useCallback(
+		(items: DriveItem[], destination: number | null) =>
+			runBatch(items, "Copied", (item) =>
+				item.kind === "folder"
+					? dirService.copy(item.id, destination)
+					: filesService.copy(item.id, destination),
+			),
+		[runBatch],
+	);
+
 	const remove = useCallback(
 		(items: DriveItem[]) =>
 			runBatch(items, "Deleted", (item) =>
@@ -101,5 +111,5 @@ export function useDriveMutations() {
 		[invalidate],
 	);
 
-	return { move, remove, rename, busy };
+	return { move, copy, remove, rename, busy };
 }

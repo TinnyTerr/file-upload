@@ -27,7 +27,9 @@ import type { DirectoryRow, FileRow } from "../db/rows.ts";
 import type { Db } from "../db/types.ts";
 import { childDirectories } from "../directoryTree.ts";
 import { attachBlob, hashFile, releaseBlob, unlinkQueued } from "./blobs.ts";
-import { newInternalRelPath, storageRoot } from "./paths.ts";
+import { newInternalRelPath, safeJoin, storageRoot } from "./paths.ts";
+import { ensureBlobAvailable } from "./streaming.ts";
+import { deleteThumbnail } from "./thumbnail.ts";
 import { memberSource } from "./zip.ts";
 
 /** The state a file is being moved *to*. `key` is the raw AES key its bytes get
@@ -158,6 +160,16 @@ export async function rewriteFileEncryption(
 		throw new Error(`${next.mode} mode needs a key to encrypt with`);
 	}
 
+	// `memberSource` reads straight off local disk and throws a bare 500 when the
+	// bytes aren't there. On a `REPLICATION_MODE=cache` node whose blob has been
+	// evicted that is every seal and every encryption change, while the
+	// browser-side conversion path -- which goes through GET /files/:id/content,
+	// and *does* fetch on miss -- keeps working. Pull the blob back first.
+	const localPath = safeJoin(storageRoot(), f.storage_path);
+	if (!existsSync(localPath)) {
+		await ensureBlobAvailable(state, f, localPath);
+	}
+
 	const [plain, isTemp] = await memberSource(db, masterKey, f);
 	const relPath = newInternalRelPath();
 	const basePath = join(storageRoot(), relPath);
@@ -202,6 +214,11 @@ export async function rewriteFileEncryption(
 				$id: f.id,
 			},
 		);
+		// The thumbnail cache is keyed by file id and is not reference-counted, so
+		// nothing else will invalidate it. A plaintext file that just became
+		// `server`/`sealed` would otherwise keep a cached JPEG of its contents
+		// sitting on disk under the old mode's assumptions.
+		deleteThumbnail(f.id);
 		unlinkQueued([stale]);
 	} catch (err) {
 		try {

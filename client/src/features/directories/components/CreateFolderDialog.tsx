@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/select";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useAuth } from "@/features/auth/hooks/auth";
+import { useRevealedKeys } from "@/features/drive/hooks/useRevealedKeys";
 import {
 	type ShareEntry,
 	ShareModal,
@@ -41,18 +42,32 @@ export function CreateFolderDialog({
 	parent = null,
 	trigger,
 	onCreated,
+	open: openProp,
+	onOpenChange,
 }: {
 	parent?: Directory | null;
+	/** Omit together with `open` to get the built-in "New folder" button. */
 	trigger?: React.ReactNode;
 	onCreated?: (dir: { id: number }) => void;
+	/** Controlled mode, for callers that open this from a toolbar or a
+	 * keyboard shortcut and have no trigger element to hang it off. */
+	open?: boolean;
+	onOpenChange?: (open: boolean) => void;
 }) {
 	const { can } = useAuth();
 	const create = useCreateDirectory();
-	const [open, setOpen] = useState(false);
+	const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+	const controlled = openProp !== undefined;
+	const open = controlled ? openProp : uncontrolledOpen;
+	const setOpen = (next: boolean) => {
+		if (!controlled) setUncontrolledOpen(next);
+		onOpenChange?.(next);
+	};
 	const [title, setTitle] = useState("");
 	const [mode, setMode] = useState<EncryptionMode>("none");
 	const [error, setError] = useState<string | null>(null);
 	const [creatingKey, setCreatingKey] = useState(false);
+	const { remember } = useRevealedKeys();
 	const [shareEntry, setShareEntry] = useState<ShareEntry | null>(null);
 	const [shareOpen, setShareOpen] = useState(false);
 
@@ -82,6 +97,12 @@ export function CreateFolderDialog({
 			// link is one click away inside the folder -- only surface the
 			// save-this-now modal when there is actually a key to save.
 			if (!nested) {
+				// The browser just minted this key and the server never saw it, so
+				// hand it to the app-level key map: uploading into this folder later
+				// in the same tab shouldn't have to ask for a key it already has.
+				if (keyMaterial?.clientKeyB64) {
+					remember("folder", created.id, keyMaterial.clientKeyB64);
+				}
 				setShareEntry({
 					filename: finalTitle,
 					mode,
@@ -101,13 +122,15 @@ export function CreateFolderDialog({
 	return (
 		<>
 			<Dialog open={open} onOpenChange={setOpen}>
-				<DialogTrigger asChild>
-					{trigger ?? (
-						<Button size="sm" variant="outline">
-							<FolderPlus /> New folder
-						</Button>
-					)}
-				</DialogTrigger>
+				{!controlled && (
+					<DialogTrigger asChild>
+						{trigger ?? (
+							<Button size="sm" variant="outline">
+								<FolderPlus /> New folder
+							</Button>
+						)}
+					</DialogTrigger>
+				)}
 				<DialogContent className="max-w-sm">
 					<DialogHeader>
 						<DialogTitle>New folder</DialogTitle>

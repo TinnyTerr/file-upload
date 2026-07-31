@@ -26,7 +26,7 @@ import {
 import type { FileObject } from "@/features/files/types";
 import { base64UrlToBytes } from "@/lib/base64url";
 import { useE2EConversion } from "../hooks/useEncryption";
-import type { RevealedKey } from "./SealKeyDialog";
+import { useRevealedKeys } from "../hooks/useRevealedKeys";
 
 /** Strip the key out of a pasted share URL, or take it as-is. */
 function extractKey(value: string): string {
@@ -48,14 +48,17 @@ export function E2EConvertDialog({
 	file,
 	open,
 	onOpenChange,
-	onRevealed,
+	onConverted,
 }: {
 	file: FileObject;
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
-	onRevealed: (revealed: RevealedKey) => void;
+	/** Lets the owning panel close itself before the key is revealed, so the
+	 * reveal is the only thing on screen. */
+	onConverted?: () => void;
 }) {
 	const { convert, progress, busy } = useE2EConversion();
+	const { reveal } = useRevealedKeys();
 	const [keyInput, setKeyInput] = useState("");
 	const [target, setTarget] = useState<"none" | "server">("server");
 	const [error, setError] = useState<string | null>(null);
@@ -88,13 +91,16 @@ export function E2EConvertDialog({
 			if (!result) return;
 			setKeyInput("");
 			onOpenChange(false);
+			onConverted?.();
 			if (result.clientKeyB64) {
-				onRevealed({
+				reveal({
 					subject: `“${file.original_filename}”`,
 					key: result.clientKeyB64,
 					isPassword: false,
 					reason:
 						"it was encrypted in your browser and the key never reached the server.",
+					incomplete: !result.committed,
+					refs: [{ kind: "file", id: result.newFileId }],
 				});
 			}
 		} catch (err) {

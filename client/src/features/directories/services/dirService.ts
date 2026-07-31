@@ -37,6 +37,12 @@ export const dirService = {
 			json: { parent_directory_id: parentDirectoryId },
 		}),
 
+	/** Server-side duplicate of the whole subtree; no bytes are re-uploaded. */
+	copy: (dirId: number, parentDirectoryId: number | null) =>
+		api.post<Directory>(`/directories/${dirId}/copy`, {
+			json: { parent_directory_id: parentDirectoryId },
+		}),
+
 	members: (dirId: number) =>
 		api
 			.get<{ files: DirectoryMember[] }>(`/directories/${dirId}/files`)

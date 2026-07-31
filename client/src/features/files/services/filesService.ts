@@ -48,6 +48,12 @@ export const filesService = {
 			json: { directory_id: directoryId },
 		}),
 
+	/** Server-side duplicate: a `ref_count` bump on the blob, not a re-upload. */
+	copy: (fileId: number, directoryId: number | null) =>
+		api.post<FileObject>(`/files/${fileId}/copy`, {
+			json: { directory_id: directoryId },
+		}),
+
 	saveToMyFiles: (slug: string) =>
 		api.post<{ file_id: number; slug: string }>(`/files/${slug}/save`),
 

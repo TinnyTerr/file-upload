@@ -163,6 +163,10 @@ function prepareUpload(
 		tempDays: number | null;
 		randomizeFilename: boolean;
 		directoryId: number | null;
+		/** The caller encrypted these bytes in the browser and says so. Only the
+		 * two browser/API upload routes may claim it -- same rule and the same
+		 * reasoning as `FinalizeOpts.clientCiphertext`. */
+		clientCiphertext?: boolean;
 	},
 ): PreparedUpload {
 	let { encryptionMode, compress, isPermanent, tempDays, randomizeFilename } =
@@ -182,7 +186,16 @@ function prepareUpload(
 			throw new HttpError(403, "not your directory");
 		// A file placed in a folder takes the folder's *effective* encryption --
 		// which may be defined several levels up (crypto/effectiveEncryption.ts).
-		encryptionMode = resolveDirectoryEncryption(state.db, directory).mode;
+		//
+		// The exception is a caller that did the encrypting itself and says so:
+		// `client` is never inheritable (finalizeStoredFile makes such a file its
+		// own break point), so an explicit client-mode upload keeps its own key
+		// rather than adopting the folder's. Without this, converting a file that
+		// lives in a `none`/`server` folder to end-to-end stored real browser
+		// ciphertext under a label that promised plaintext -- an unreadable file.
+		const dirMode = resolveDirectoryEncryption(state.db, directory).mode;
+		encryptionMode =
+			opts.clientCiphertext && encryptionMode === "client" ? "client" : dirMode;
 		compress = false;
 		isPermanent = true;
 		tempDays = null;
@@ -198,6 +211,9 @@ function prepareUpload(
 	const perm = ensurePermissions(state.db, user.id, {
 		master: user.role === "master",
 	});
+	// Deliberately after the directory resolution above: it tests the mode the
+	// file will actually be stored under, which is the one that matters whether
+	// it came from the request or from the destination folder.
 	if (encryptionMode === "client" && !perm.can_upload_client_encrypted) {
 		throw new HttpError(403, "client-side encryption not permitted");
 	}
@@ -325,7 +341,19 @@ export async function finalizeStoredFile(
 			"this folder is end-to-end encrypted; it can only be uploaded to from a browser holding its key",
 		);
 	}
-	const encryptionMode = dirEff ? dirEff.mode : opts.encryptionMode;
+	// The folder's effective mode decides, *except* when the caller both
+	// encrypted the bytes itself and said so. A client-mode file is always its
+	// own break point (see `overridden` below) and carries no key material at
+	// all, so it can legitimately sit inside a `none` or `server` folder without
+	// that folder's key describing its bytes -- exactly the shape `POST
+	// /files/:id/seal` has been producing all along.
+	const requestedClient =
+		!!opts.clientCiphertext && opts.encryptionMode === "client";
+	const encryptionMode = requestedClient
+		? "client"
+		: dirEff
+			? dirEff.mode
+			: opts.encryptionMode;
 	// A file in a folder follows that folder's chain rather than pinning its own
 	// copy of the key, so re-keying the folder later reaches it. `client` is
 	// never inheritable -- only the browser has that key.
@@ -946,6 +974,10 @@ export function filesRouter(state: AppState): Router {
 						tempDays: intField(fields.temp_days),
 						randomizeFilename: boolField(fields.randomize_filename, false),
 						directoryId: intField(fields.directory_id),
+						// Matches the `clientCiphertext: true` this same route passes
+						// to finalizeStoredFile below: whatever arrived here is what
+						// the uploader produced.
+						clientCiphertext: true,
 					});
 					const hasLifecycleOptions =
 						!prepared.isPermanent ||
@@ -1018,6 +1050,9 @@ export function filesRouter(state: AppState): Router {
 				tempDays: body.temp_days ?? null,
 				randomizeFilename: !!body.randomize_filename,
 				directoryId: body.directory_id ?? null,
+				// As above: the chunked route also finalizes with
+				// `clientCiphertext: true`, so the two halves must agree.
+				clientCiphertext: true,
 			});
 			const hasLifecycleOptions =
 				!prepared.isPermanent ||
@@ -1482,6 +1517,182 @@ export function filesRouter(state: AppState): Router {
 				encryption_mode: resolveFileEncryption(db, saved).mode,
 				access_key: recoverAccessKey(state, saved),
 			});
+		},
+	);
+
+	/**
+	 * Duplicate one of your own files into a folder (or the root).
+	 *
+	 * This is the same primitive `POST /:slug/save` is built on — bump the
+	 * blob's `ref_count`, insert a row carrying the *resolved* encryption, mint
+	 * a link — minus the "you may not own the source" rule that makes save a
+	 * save. No bytes are written and no new disk is consumed, which is why the
+	 * global capacity check `finalizeStoredFile` runs is deliberately absent
+	 * here; only the per-user logical quota applies.
+	 */
+	router.post(
+		"/:fileId(\\d+)/copy",
+		requireSession(state),
+		requireCsrf,
+		requireActiveUser(state),
+		requirePermission(state, "can_upload"),
+		(req, res) => {
+			const user = req.currentUser!;
+			const source = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: req.params.fileId,
+			});
+			if (!source) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			if (!canEditFile(source, user)) {
+				res.status(403).json({ detail: "not your file" });
+				return;
+			}
+
+			const body = req.body ?? {};
+			const rawTarget = body.directory_id;
+			let target: DirectoryRow | null = null;
+			if (rawTarget !== null && rawTarget !== "" && rawTarget !== undefined) {
+				const parsed = Number(rawTarget);
+				if (!Number.isInteger(parsed)) {
+					res.status(400).json({ detail: "invalid directory_id" });
+					return;
+				}
+				target = getDirectory(db, parsed);
+				if (!target) {
+					res.status(404).json({ detail: "target directory not found" });
+					return;
+				}
+				if (!canEditDirectory(state, parsed, user)) {
+					res.status(403).json({ detail: "not your directory" });
+					return;
+				}
+			}
+
+			const targetEff = target ? resolveDirectoryEncryption(db, target) : null;
+			// Same refusal as an upload into an end-to-end folder, for the same
+			// reason: the server holds no key for it, so it cannot decide whether
+			// the copy inherits or becomes a break point without lying about one of
+			// them. Doing this properly is a browser-side operation.
+			if (
+				targetEff &&
+				(targetEff.mode === "client" || targetEff.mode === "sealed")
+			) {
+				res.status(409).json({
+					detail:
+						"this folder is end-to-end encrypted; copying into it isn't supported",
+				});
+				return;
+			}
+
+			const perm = ensurePermissions(db, user.id, {
+				master: user.role === "master",
+			});
+			if (usedBytes(state, user.id) + source.size_bytes > perm.quota_bytes) {
+				res.status(413).json({ detail: "copy would exceed your quota" });
+				return;
+			}
+
+			// The copy carries the source's *resolved* key, because the source's own
+			// columns are NULL whenever it inherits. It can only go on inheriting if
+			// the destination resolves to byte-identical material; otherwise it
+			// becomes its own break point, since inheriting would relabel bytes the
+			// destination's key doesn't describe.
+			const eff = resolveFileEncryption(db, source);
+			const inherits =
+				targetEff !== null &&
+				targetEff.mode === eff.mode &&
+				blobsEqual(targetEff.keyBlob, eff.keyBlob);
+
+			const newLinkSlug = newSlug();
+			let copyId = 0;
+			db.transaction(() => {
+				if (source.blob_id) {
+					db.run(
+						"UPDATE content_blobs SET ref_count = ref_count + 1 WHERE id = $id",
+						{ $id: source.blob_id },
+					);
+				}
+				db.run(
+					`INSERT INTO files (
+         owner_id, directory_id, blob_id, storage_path, original_filename, source_type,
+         size_bytes, stored_size_bytes, content_type, encryption_mode, enc_key_blob,
+         enc_access_blob, access_is_password, encryption_overridden, seal_salt, compressed,
+         archived, archive_codec, archive_original_stored_size_bytes, archive_saved_bytes,
+         archive_after_idle_days, lifecycle_state, is_permanent, delete_if_idle_days,
+         auto_unarchive_on_download, created_at
+       ) VALUES ($ownerId, $dirId, $blobId, $path, $filename, $sourceType, $size, $storedSize,
+         $ct, $enc, $encKey, $encAccess, $isPassword, $overridden, $sealSalt, $compressed,
+         $archived, $archiveCodec, $archiveOrigStored, $archiveSaved, $archiveAfterIdle,
+         $lifecycle, $isPermanent, $deleteIfIdle, $autoUnarchive, $now)`,
+					{
+						$ownerId: user.id,
+						$dirId: target ? target.id : null,
+						$blobId: source.blob_id,
+						$path: source.storage_path,
+						$filename: source.original_filename,
+						$sourceType: source.source_type,
+						$size: source.size_bytes,
+						$storedSize: source.stored_size_bytes,
+						$ct: source.content_type,
+						$enc: eff.mode,
+						$encKey: inherits || !eff.keyBlob ? null : Buffer.from(eff.keyBlob),
+						$encAccess:
+							inherits || !eff.accessBlob ? null : Buffer.from(eff.accessBlob),
+						$isPassword: !inherits && eff.passwordLocked ? 1 : 0,
+						$overridden: inherits ? 0 : 1,
+						// Not a secret, and without it a password-sealed copy is
+						// permanently unopenable even by someone who knows the password.
+						$sealSalt: source.seal_salt ? Buffer.from(source.seal_salt) : null,
+						$compressed: source.compressed,
+						$archived: source.archived,
+						$archiveCodec: source.archive_codec,
+						$archiveOrigStored: source.archive_original_stored_size_bytes,
+						$archiveSaved: source.archive_saved_bytes,
+						$archiveAfterIdle: source.archive_after_idle_days,
+						$lifecycle: source.lifecycle_state,
+						$isPermanent: source.is_permanent,
+						$deleteIfIdle: source.delete_if_idle_days,
+						$autoUnarchive: source.auto_unarchive_on_download,
+						$now: nowIso(),
+					},
+				);
+				copyId = db.get<FileRow>(
+					"SELECT * FROM files WHERE id = last_insert_rowid()",
+				)!.id;
+				if (target) {
+					db.run(
+						"UPDATE directories SET total_bytes = COALESCE(total_bytes, 0) + $inc WHERE id = $id",
+						{ $inc: source.size_bytes ?? 0, $id: target.id },
+					);
+				}
+				db.run(
+					"INSERT INTO links (file_id, slug, use_count, active, created_at) VALUES ($fid, $slug, 0, 1, $now)",
+					{ $fid: copyId, $slug: newLinkSlug, $now: nowIso() },
+				);
+			});
+			const copy = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: copyId,
+			})!;
+
+			recordAudit(db, {
+				actor: user.username,
+				action: "file.copied",
+				target: `file:${source.id}->file:${copy.id}`,
+				ip: clientIp(state, req),
+			});
+			log.info(
+				`file copied source_file_id=${source.id} copy_file_id=${copy.id} owner_id=${user.id} directory_id=${copy.directory_id}`,
+			);
+			// Fire-and-forget, exactly as the upload path does it: a peer round-trip
+			// must not sit in front of the response.
+			void replicateFile(state, copy.id).catch((err) => {
+				log.warning(
+					`cluster replication failed file_id=${copy.id}: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			});
+			res.json(serializeFiles(state, req, [copy])[0]!);
 		},
 	);
 

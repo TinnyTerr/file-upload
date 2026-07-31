@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
-import { errorMessage } from "@/config/api";
+import { ApiError, errorMessage } from "@/config/api";
 import { performUpload } from "@/features/files/lib/uploadCore";
 import type { EncryptionMode, FileObject } from "@/features/files/types";
 import { decryptBlob } from "@/workers/aeadClient";
@@ -20,6 +20,16 @@ export interface ConversionProgress {
 		| "finishing";
 	percent: number;
 	filename: string;
+}
+
+export interface ConversionResult {
+	/** The key that opens the replacement, for a `client` target. */
+	clientKeyB64: string | null;
+	/** The replacement file's id — what the revealed key actually opens. */
+	newFileId: number;
+	/** False when the replaced original could not be purged: the conversion
+	 * succeeded but left a duplicate behind. The key is still valid. */
+	committed: boolean;
 }
 
 /** Mutations for the encryption panel. Each one invalidates the whole drive:
@@ -78,12 +88,35 @@ export function useEncryption() {
 		[run],
 	);
 
+	/** Not routed through `run`: a seal commits to the database *before* the
+	 * response carrying the only copy of the key is written, so a dropped
+	 * connection is not "nothing happened" — it is a file that is now
+	 * permanently unreadable. A generic "couldn't seal" toast would tell the
+	 * user the opposite of the truth, so a transport failure gets its own copy. */
 	const seal = useCallback(
-		(fileId: number, password?: string) =>
-			run("Couldn't seal the file", () =>
-				encryptionService.seal(fileId, password),
-			),
-		[run],
+		async (fileId: number, password?: string) => {
+			setBusy(true);
+			try {
+				return await encryptionService.seal(fileId, password);
+			} catch (err) {
+				if (err instanceof ApiError) {
+					toast.error("Couldn't seal the file", {
+						description: errorMessage(err),
+					});
+				} else {
+					toast.error("The seal may have completed", {
+						description:
+							"The connection dropped before the key arrived. Reload and check this file's encryption before retrying — if it now says “sealed”, the key was lost in transit and the file cannot be recovered.",
+						duration: 30_000,
+					});
+				}
+				return null;
+			} finally {
+				setBusy(false);
+				invalidate();
+			}
+		},
+		[invalidate],
 	);
 
 	return { setEncryption, setAccessSecret, seal, busy };
@@ -112,7 +145,10 @@ export function useE2EConversion() {
 			currentKey?: Uint8Array | null;
 			/** Reuse one key across a batch instead of minting one per file. */
 			presetKey?: Uint8Array;
-		}): Promise<{ clientKeyB64: string | null } | null> => {
+			/** Null only when nothing was uploaded — i.e. there is no key to save
+			 * and nothing was left behind. Every other outcome returns a result so
+			 * the caller can surface the key. */
+		}): Promise<ConversionResult | null> => {
 			const { file, target, currentKey, presetKey } = args;
 			const name = file.original_filename;
 			setBusy(true);
@@ -153,9 +189,9 @@ export function useE2EConversion() {
 				setProgress({ phase: "finishing", percent: 100, filename: name });
 				// The new file already exists and, for a client-mode target, only
 				// `outcome.clientKeyB64` can ever open it. If the commit fails the
-				// conversion is incomplete — but losing the key here would strand
-				// that file permanently, so it is surfaced either way and the commit
-				// failure is reported as a leftover to clean up by hand.
+				// conversion is incomplete — but withholding the key here would
+				// strand that file permanently, so it is surfaced either way and
+				// `committed: false` tells the caller to say so out loud.
 				try {
 					await encryptionService.commitConversion(
 						outcome.result.file_id,
@@ -165,7 +201,11 @@ export function useE2EConversion() {
 					toast.error("The replaced file could not be removed", {
 						description: `${errorMessage(err)} — the converted copy is safe; delete “${name}” manually.`,
 					});
-					return { clientKeyB64: outcome.clientKeyB64 };
+					return {
+						clientKeyB64: outcome.clientKeyB64,
+						newFileId: outcome.result.file_id,
+						committed: false,
+					};
 				}
 				toast.success("Converted", {
 					description:
@@ -173,7 +213,11 @@ export function useE2EConversion() {
 							? "Save the new key — the server has no copy of it."
 							: `“${name}” is now ${target === "none" ? "unencrypted" : "server-encrypted"}.`,
 				});
-				return { clientKeyB64: outcome.clientKeyB64 };
+				return {
+					clientKeyB64: outcome.clientKeyB64,
+					newFileId: outcome.result.file_id,
+					committed: true,
+				};
 			} catch (err) {
 				toast.error("Conversion failed", { description: errorMessage(err) });
 				return null;

@@ -285,6 +285,60 @@ await fetch("{{BASE_URL}}/api/files/1/move", {
 });
 ```
 
+### POST /api/files/{file_id}/copy — Duplicate a file
+
+Makes a second file pointing at the same stored bytes, in the folder you name.
+Nothing is uploaded and no extra disk is used — storage is content-addressed, so
+a copy is a reference count going up by one. Your logical quota is still charged
+for it, exactly as `GET /api/files/` reports sizes before de-duplication.
+
+Requires `can_upload`, plus edit rights on the source file and on the
+destination folder.
+
+Body:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `directory_id` | integer or null | no | Target folder; omit or `null` for the root. |
+
+The copy carries the *resolved* encryption of the source. If the destination
+resolves to the same key, the copy inherits from it; otherwise the copy becomes
+its own break point holding a materialised key, because inheriting would label
+the bytes with a key that doesn't describe them. A fresh share link is minted.
+
+Copying **into** a `client` or `sealed` folder is refused with `409` — the
+server holds no key for such a folder, so it cannot decide the copy's
+inheritance without lying about it. Copying a `client` or `sealed` file *out* of
+one is fine: the bytes and the key you hold are unchanged.
+
+Returns the new file, in the same shape as `GET /api/files/`.
+
+```bash
+curl -X POST "{{BASE_URL}}/api/files/1/copy" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"directory_id": 7}'
+```
+
+```python
+requests.post(
+    "{{BASE_URL}}/api/files/1/copy",
+    headers={"Authorization": "Bearer <your-api-key>"},
+    json={"directory_id": 7}
+)
+```
+
+```javascript
+await fetch("{{BASE_URL}}/api/files/1/copy", {
+  method: "POST",
+  headers: {
+    "Authorization": "Bearer <your-api-key>",
+    "Content-Type": "application/json"
+  },
+  body: JSON.stringify({ directory_id: 7 })
+});
+```
+
 ### GET /api/files/{file_id}/content — Download your own file
 
 The owner's read of their own bytes. Unlike `GET /api/file/{slug}/raw`, this
@@ -920,6 +974,42 @@ the key its bytes are already under and becomes its own break point.
 
 ```bash
 curl -X PATCH "{{BASE_URL}}/api/directories/12/move" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"parent_directory_id": null}'
+```
+
+### POST /api/directories/{directory_id}/copy — Duplicate a folder
+
+The recursive form of `POST /api/files/{file_id}/copy`: the folder, every folder
+under it, and every file in all of them. No bytes are written — each file is a
+reference count going up by one — but your logical quota is charged for the
+whole subtree.
+
+Requires `can_create_directories` **and** `can_upload`, plus edit rights on the
+source folder and on the destination.
+
+Body:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `parent_directory_id` | integer or null | no | New parent; omit or `null` for the root. |
+
+Refused if the destination is the folder itself or one of its own descendants
+(`400`), if the copy would push any part of the subtree past 10 levels (`400`),
+or if the destination is `client`/`sealed` (`409`, same reason as the file
+endpoint). If a folder of the same name is already there, the copy is named
+`<title> - Copy`.
+
+Encryption follows the same rule at every level: a node whose resolved key
+matches its new parent's inherits, and one whose key differs becomes its own
+break point. Each copied folder gets a fresh default share link, and each copied
+file a fresh file link.
+
+Returns the new folder, in the same shape as `GET /api/directories/`.
+
+```bash
+curl -X POST "{{BASE_URL}}/api/directories/12/copy" \
   -H "Authorization: Bearer <your-api-key>" \
   -H "Content-Type: application/json" \
   -d '{"parent_directory_id": null}'

@@ -25,15 +25,16 @@ import {
 	SheetDescription,
 	SheetTitle,
 } from "@/components/ui/sheet";
+import { useAuth } from "@/features/auth/hooks/auth";
 import { EncryptionBadge } from "@/features/files/lib/fileMeta";
 import type { EncryptionMode } from "@/features/files/types";
 import { bytesToBase64Url, randomKey } from "@/lib/base64url";
 import { useDriveChildren } from "../hooks/useDrive";
 import { useE2EConversion, useEncryption } from "../hooks/useEncryption";
+import { type KeyRef, useRevealedKeys } from "../hooks/useRevealedKeys";
 import { type DriveItem, itemName } from "../lib/items";
 import { drivePath } from "../types";
 import { E2EConvertDialog } from "./E2EConvertDialog";
-import { type RevealedKey, SealKeyDialog } from "./SealKeyDialog";
 
 const MIN_PASSWORD = 8;
 
@@ -67,20 +68,26 @@ export function EncryptionPanel({
 }) {
 	const encryption = useEncryption();
 	const conversion = useE2EConversion();
+	const { reveal } = useRevealedKeys();
+	const { user, can } = useAuth();
 	const [nextMode, setNextMode] = useState<"none" | "server" | "inherit">(
 		"server",
 	);
 	const [modePassword, setModePassword] = useState("");
 	const [accessPassword, setAccessPassword] = useState("");
 	const [sealPassword, setSealPassword] = useState("");
-	const [revealed, setRevealed] = useState<RevealedKey | null>(null);
 	const [convertOpen, setConvertOpen] = useState(false);
 	const [batch, setBatch] = useState<{ done: number; total: number } | null>(
 		null,
 	);
 
-	// Only used when the panel is open on a folder, for the batch convert.
-	const children = useDriveChildren(item?.kind === "folder" ? item.id : "root");
+	// Only used when the panel is open on a folder, for the batch convert --
+	// `enabled` matters, or opening the panel on a *file* fetches the whole root
+	// listing for nothing.
+	const children = useDriveChildren(
+		item?.kind === "folder" ? item.id : "root",
+		item?.kind === "folder",
+	);
 
 	if (!item) return null;
 
@@ -104,6 +111,20 @@ export function EncryptionPanel({
 	const serverManaged = mode === "none" || mode === "server";
 	const canAdopt = parentId !== null && overridden;
 
+	// The seal route takes the *delete* gate, not the edit gate, plus ownership
+	// (server/src/routes/files.ts). Rendering the section without checking meant
+	// a collaborator got a 403 toast and no dialog — which is what "the popup
+	// never comes up" looks like from the outside.
+	const isOwner =
+		!isFolder &&
+		(user?.role === "master" || (!!user && item.file.owner_id === user.id));
+	const canSeal = !isFolder && can("can_delete") && isOwner;
+	// A password shorter than the minimum is not "no password": the server would
+	// mint a random key instead, and the user would walk away believing they
+	// sealed the file with something they can remember.
+	const sealPasswordOk =
+		sealPassword.length === 0 || sealPassword.length >= MIN_PASSWORD;
+
 	const applyMode = async () => {
 		if (nextMode === "inherit") {
 			await encryption.setEncryption(item, { adopt_parent: true });
@@ -124,19 +145,25 @@ export function EncryptionPanel({
 	};
 
 	const doSeal = async () => {
-		if (isFolder) return;
+		if (isFolder || !sealPasswordOk) return;
 		const usePassword = sealPassword.length >= MIN_PASSWORD;
+		const filename = item.file.original_filename;
+		const fileId = item.id;
 		const result = await encryption.seal(
-			item.id,
+			fileId,
 			usePassword ? sealPassword : undefined,
 		);
 		setSealPassword("");
 		if (!result) return;
-		setRevealed({
-			subject: `“${item.file.original_filename}”`,
+		// Close first: the reveal must be the only thing on screen, and the sheet
+		// is about to re-render against a row this mutation just changed.
+		onOpenChange(false);
+		reveal({
+			subject: `“${filename}”`,
 			key: result.key,
 			isPassword: result.key_is_password,
 			reason: "the server encrypted it once and then discarded the key.",
+			refs: [{ kind: "file", id: fileId }],
 		});
 	};
 
@@ -148,8 +175,11 @@ export function EncryptionPanel({
 		);
 		if (!targets.length) return;
 		const key = randomKey();
+		const folderTitle = item.dir.title;
 		setBatch({ done: 0, total: targets.length });
 		let converted = 0;
+		let leftovers = 0;
+		const refs: KeyRef[] = [];
 		for (let i = 0; i < targets.length; i++) {
 			setBatch({ done: i, total: targets.length });
 			const result = await conversion.convert({
@@ -157,19 +187,31 @@ export function EncryptionPanel({
 				target: "client",
 				presetKey: key,
 			});
-			if (result) converted += 1;
+			// A null result means nothing was uploaded, so this key opens nothing
+			// new. A non-null one with `committed: false` means the ciphertext is
+			// on the server under this key and the original is still there too.
+			if (!result) continue;
+			converted += 1;
+			refs.push({ kind: "file", id: result.newFileId });
+			if (!result.committed) leftovers += 1;
 		}
 		setBatch(null);
-		// `convert` reports its own failures and returns null. Revealing a key
-		// that opens nothing — and making the user type it back to dismiss the
-		// dialog — would be a lie about what just happened.
+		// Revealing a key that opens nothing — and making the user type it back to
+		// dismiss the dialog — would be a lie about what just happened.
 		if (!converted) return;
-		setRevealed({
-			subject: `${converted} file${converted === 1 ? "" : "s"} in “${item.dir.title}”`,
+		onOpenChange(false);
+		reveal({
+			subject:
+				`${converted} file${converted === 1 ? "" : "s"} in “${folderTitle}”` +
+				(leftovers
+					? ` (${leftovers} original${leftovers === 1 ? "" : "s"} still to delete)`
+					: ""),
 			key: bytesToBase64Url(key),
 			isPassword: false,
 			reason:
 				"they were re-encrypted in your browser and the key never reached the server.",
+			incomplete: leftovers > 0,
+			refs,
 		});
 	};
 
@@ -352,20 +394,40 @@ export function EncryptionPanel({
 								title="Seal & Forget"
 								hint="Encrypts this file with a key returned to you once and stored nowhere. Honest difference from true end-to-end: the key passes through this server's memory for that one operation. It never touches disk or logs, but end-to-end also resists an attacker who controls the server at that exact moment, and this doesn't."
 							>
-								<Input
-									type="password"
-									placeholder={`Optional password (min ${MIN_PASSWORD}) — otherwise a random key`}
-									value={sealPassword}
-									onChange={(e) => setSealPassword(e.target.value)}
-								/>
-								<Button
-									variant="outline"
-									className="w-full"
-									loading={busy}
-									onClick={doSeal}
-								>
-									<ShieldCheck /> Seal this file
-								</Button>
+								{canSeal ? (
+									<>
+										<Input
+											type="password"
+											placeholder={`Optional password (min ${MIN_PASSWORD}) — otherwise a random key`}
+											value={sealPassword}
+											onChange={(e) => setSealPassword(e.target.value)}
+										/>
+										{!sealPasswordOk && (
+											<p className="text-xs text-destructive">
+												Use at least {MIN_PASSWORD} characters, or leave this
+												empty for a random key. A shorter password is ignored.
+											</p>
+										)}
+										<Button
+											variant="outline"
+											className="w-full"
+											loading={busy}
+											disabled={!sealPasswordOk}
+											onClick={doSeal}
+										>
+											<ShieldCheck /> Seal this file
+										</Button>
+									</>
+								) : (
+									<p className="flex items-start gap-2 rounded-md border border-border bg-secondary/20 px-3 py-2 text-xs text-muted-foreground">
+										<Info className="mt-0.5 size-3.5 shrink-0" />
+										<span>
+											{isOwner
+												? "Sealing is irreversible and leaves the file unreadable even to you, so it needs the delete permission — which this account doesn't have."
+												: "Only the file's owner can seal it. Being an editor of the folder isn't enough."}
+										</span>
+									</p>
+								)}
 							</Section>
 						)}
 
@@ -439,10 +501,9 @@ export function EncryptionPanel({
 					file={item.file}
 					open={convertOpen}
 					onOpenChange={setConvertOpen}
-					onRevealed={setRevealed}
+					onConverted={() => onOpenChange(false)}
 				/>
 			)}
-			<SealKeyDialog revealed={revealed} onClose={() => setRevealed(null)} />
 		</>
 	);
 }

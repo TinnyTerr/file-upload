@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "@/features/auth/hooks/auth";
+import { RevealedKeyProvider } from "@/features/drive/hooks/useRevealedKeys";
 import { UploadProvider } from "@/features/files/hooks/useUpload";
 import { DialogProvider } from "@/providers/DialogProvider";
 import { QueryProvider } from "@/providers/QueryProvider";
@@ -31,10 +32,15 @@ createRoot(document.getElementById("root")!).render(
 				<TooltipProvider delayDuration={200}>
 					<DialogProvider>
 						<UploadProvider>
-							<BrowserRouter>
-								<App />
-							</BrowserRouter>
-							<ToastProvider />
+							{/* Above the router on purpose: a revealed key must survive the
+							    refetch, the navigation and the reload that the mutation
+							    producing it can trigger. */}
+							<RevealedKeyProvider>
+								<BrowserRouter>
+									<App />
+								</BrowserRouter>
+								<ToastProvider />
+							</RevealedKeyProvider>
 						</UploadProvider>
 					</DialogProvider>
 				</TooltipProvider>

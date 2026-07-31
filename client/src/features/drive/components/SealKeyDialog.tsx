@@ -1,4 +1,4 @@
-import { AlertTriangle, KeyRound } from "lucide-react";
+import { AlertTriangle, Download, KeyRound } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -12,16 +12,8 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-
-export interface RevealedKey {
-	/** What the key opens — a filename, or "5 files in Photos". */
-	subject: string;
-	key: string;
-	/** Derived from a password the user chose, rather than random. */
-	isPassword: boolean;
-	/** Why there is no second copy. Differs between a seal and an E2E convert. */
-	reason: string;
-}
+import { saveBlob } from "@/lib/download";
+import type { RevealedKey } from "../hooks/useRevealedKeys";
 
 /**
  * The key a seal produced, shown exactly once.
@@ -33,6 +25,9 @@ export interface RevealedKey {
  *
  * A password-derived seal skips the retype (the user chose the password and
  * already knows it) but keeps the same warning.
+ *
+ * Rendered once, at the app root, by `RevealedKeyProvider` — never by the
+ * component that produced the key, which the same mutation may be unmounting.
  */
 export function SealKeyDialog({
 	revealed,
@@ -80,6 +75,17 @@ export function SealKeyDialog({
 					</span>
 				</div>
 
+				{revealed.incomplete && (
+					<div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+						<AlertTriangle className="mt-0.5 size-4 shrink-0" />
+						<span>
+							The converted copy is safe and this key opens it, but removing the
+							original failed. Delete the leftover copy by hand once you've
+							saved this.
+						</span>
+					</div>
+				)}
+
 				{revealed.isPassword ? (
 					<p className="text-sm text-muted-foreground">
 						The key was derived from the password you chose. Keep it somewhere
@@ -92,6 +98,25 @@ export function SealKeyDialog({
 								{revealed.key}
 							</code>
 							<CopyButton value={revealed.key} className="shrink-0" />
+							{/* The retype gate is the only way out of this dialog, so a
+							    browser that blocks clipboard writes would otherwise trap the
+							    user here with a key they can't save. */}
+							<Button
+								variant="ghost"
+								size="icon"
+								className="size-7 shrink-0"
+								aria-label="Download the key as a text file"
+								onClick={() =>
+									saveBlob(
+										new Blob([`${revealed.subject}\n\n${revealed.key}\n`], {
+											type: "text/plain",
+										}),
+										"fileupload-key.txt",
+									)
+								}
+							>
+								<Download className="size-4" />
+							</Button>
 						</div>
 						<div className="space-y-1.5">
 							<Label htmlFor="seal-confirm">Type it back to confirm</Label>
