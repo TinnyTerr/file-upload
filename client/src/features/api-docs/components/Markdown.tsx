@@ -1,16 +1,34 @@
 /**
  * Minimal CommonMark-subset renderer for the API reference.
  *
- * The docs live in `docs/api.md` and are fetched from `GET /api/docs.md`, so
- * the only markdown this ever sees is written by us and checked into the repo.
- * That lets it stay a ~200-line parser over React elements (no
+ * The docs live in `docs/api.md` and are bundled into the page at build time,
+ * so the only markdown this ever sees is written by us and checked into the
+ * repo. That lets it stay a ~300-line parser over React elements (no
  * dangerouslySetInnerHTML, no markdown dependency) covering exactly the
  * constructs that file uses: ATX headings, paragraphs, fenced code, GFM pipe
  * tables, dash lists, and inline code / bold / links.
+ *
+ * The document is ~1600 lines / ~3500 elements, which makes this one of the
+ * few places in the app where render cost is worth engineering around:
+ * parsing is memoized on the source string, code blocks use a plain copy
+ * button rather than the Radix-backed CopyButton (a hundred tooltip roots on
+ * one page is what made this page janky), and every heavyweight block is
+ * marked `content-visibility: auto` so offscreen ones cost no layout.
  */
 
+import { Check, Copy } from "lucide-react";
 import type React from "react";
-import { CopyButton } from "@/components/ui/copy-button";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { copyToClipboard } from "@/lib/copy";
+
+/** Skips layout/paint for blocks scrolled out of view. `auto` on the
+ * intrinsic size lets the real height take over once a block is rendered, so
+ * scroll position doesn't jump around as they come into view. */
+const DEFERRED: React.CSSProperties = {
+	contentVisibility: "auto",
+	containIntrinsicSize: "auto 120px",
+};
 
 // ─── inline ─────────────────────────────────────────────────────────────────
 
@@ -97,6 +115,36 @@ const HEADING_CLASSES: Record<number, string> = {
 	4: "text-sm font-semibold text-foreground",
 };
 
+/** The copy affordance for a fenced code block. Deliberately *not*
+ * `CopyButton`: that wraps every instance in a Radix tooltip root, and this
+ * document has over a hundred code blocks. A `title` attribute says the same
+ * thing for free. */
+function CodeCopyButton({ value }: { value: string }) {
+	const [copied, setCopied] = useState(false);
+	const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+	useEffect(() => () => clearTimeout(timer.current), []);
+
+	const onCopy = async () => {
+		if (!(await copyToClipboard(value))) return;
+		setCopied(true);
+		clearTimeout(timer.current);
+		timer.current = setTimeout(() => setCopied(false), 1400);
+	};
+
+	return (
+		<Button
+			variant="ghost"
+			size="icon"
+			onClick={onCopy}
+			title={copied ? "Copied!" : "Copy"}
+			aria-label="Copy code"
+		>
+			{copied ? <Check className="text-success" /> : <Copy />}
+		</Button>
+	);
+}
+
 export interface MarkdownHeading {
 	level: number;
 	text: string;
@@ -119,8 +167,8 @@ export function extractHeadings(markdown: string): MarkdownHeading[] {
 	return out;
 }
 
-export function Markdown({ children }: { children: string }) {
-	const lines = children.split("\n");
+function parseBlocks(markdown: string): React.ReactNode[] {
+	const lines = markdown.split("\n");
 	const blocks: React.ReactNode[] = [];
 	let i = 0;
 	let key = 0;
@@ -145,12 +193,12 @@ export function Markdown({ children }: { children: string }) {
 			i++; // closing fence
 			const code = body.join("\n");
 			blocks.push(
-				<div key={`b${key++}`} className="relative">
+				<div key={`b${key++}`} className="relative" style={DEFERRED}>
 					<pre className="overflow-x-auto rounded-lg border border-border bg-background/50 p-3 pr-12 font-mono text-xs leading-relaxed whitespace-pre">
 						{code}
 					</pre>
 					<div className="absolute right-2 top-2">
-						<CopyButton value={code} />
+						<CodeCopyButton value={code} />
 					</div>
 				</div>,
 			);
@@ -193,6 +241,7 @@ export function Markdown({ children }: { children: string }) {
 				<div
 					key={`b${key++}`}
 					className="overflow-x-auto rounded-lg border border-border"
+					style={DEFERRED}
 				>
 					<table className="w-full text-xs">
 						<thead>
@@ -254,8 +303,12 @@ export function Markdown({ children }: { children: string }) {
 			continue;
 		}
 
-		// paragraph — consume until a blank line or the start of another block
-		const para: string[] = [];
+		// paragraph — consume until a blank line or the start of another block.
+		// The first line is taken unconditionally: a line the table branch
+		// declined (a stray `|` with no divider under it) satisfies the loop's
+		// exit condition immediately, and without this the outer while would
+		// spin on it forever.
+		const para: string[] = [lines[i++].trim()];
 		while (
 			i < lines.length &&
 			lines[i].trim() !== "" &&
@@ -275,5 +328,17 @@ export function Markdown({ children }: { children: string }) {
 		);
 	}
 
-	return <div className="space-y-4 text-muted-foreground">{blocks}</div>;
+	return blocks;
 }
+
+/** Parsing this document builds ~3500 elements, so it is memoized on the
+ * source string and the component is memoized on its props -- an unrelated
+ * re-render of the page must not re-parse the whole reference. */
+export const Markdown = memo(function Markdown({
+	children,
+}: {
+	children: string;
+}) {
+	const blocks = useMemo(() => parseBlocks(children), [children]);
+	return <div className="space-y-4 text-muted-foreground">{blocks}</div>;
+});

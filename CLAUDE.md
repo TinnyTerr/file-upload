@@ -179,7 +179,8 @@ client/src/
     cluster/               # Cluster dashboard (nodes, token, halts)
     admin/                 # Admin panel (users, files, keys, audit, storage, logs, torrents)
     media/                 # Media library: poster grid, player, publish + play-key UI
-    api-docs/              # API reference page — renders docs/api.md fetched from /api/docs.md
+    api-docs/              # API reference page — renders docs/api.md, imported into the
+                           #   bundle at build time (`@docs/api.md?raw`), not fetched
   components/
     layout/                # Sidebar, settings modal (sessions tab), top bar
     ui/                    # Shared Radix-based design system components
@@ -194,7 +195,9 @@ client/src/
 
 docs/
   api.md                   # THE public API reference — single source; served raw at
-                           #   GET /api/docs.md and rendered by the /api-docs page
+                           #   GET /api/docs.md (for LLMs/tooling) and compiled into the
+                           #   /api-docs page bundle. Editing it needs a client rebuild
+                           #   for the page; the endpoint re-reads it on mtime change.
 public/                    # Built client output, served by Express
 data/                      # Runtime state: app.env, app.db, storage/, thumbnails/ (gitignored)
 ```
@@ -465,6 +468,7 @@ Non-obvious rules that are easy to re-break. Each one has bitten this codebase a
 - Don't gate Real-Debrid on `instantAvailability` — uncached torrents are supposed to go through it too
 - Don't `await` a Real-Debrid transfer inside the `torrent_poll` tick — it runs detached (`startDebridFetch`)
 - Don't write API reference content into `ApiDocsPage.tsx` — it renders `docs/api.md`; edit the markdown
+- Don't put `CopyButton` (or any Radix-backed control) inside the `Markdown` renderer — `docs/api.md` has 100+ code blocks, and that many tooltip roots is what made the page jank
 - Don't soft-delete API keys — hard delete them so they leave the admin panel immediately
 - Don't wrap `DropdownMenuTrigger`'s `asChild` button in a `Tooltip` — it breaks click events
 - Don't use `bg-brand-gradient/90` — opacity modifiers don't apply to CSS variable gradients

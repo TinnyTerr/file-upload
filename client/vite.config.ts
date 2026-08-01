@@ -10,6 +10,11 @@ export default defineConfig({
 	resolve: {
 		alias: {
 			"@": fileURLToPath(new URL("./src", import.meta.url)),
+			// The API reference is authored in the repo's docs/ directory and
+			// imported (as `@docs/api.md?raw`) straight into the bundle, so the
+			// /api-docs page renders without a runtime fetch. TypeScript resolves
+			// that specifier through vite/client's `*?raw` module declaration.
+			"@docs": fileURLToPath(new URL("../docs", import.meta.url)),
 		},
 	},
 	server: {

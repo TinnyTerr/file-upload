@@ -1,40 +1,25 @@
-import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, BookText, FileDown } from "lucide-react";
+import { BookText, FileDown } from "lucide-react";
 import { useMemo } from "react";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { CopyButton } from "@/components/ui/copy-button";
-import { Skeleton } from "@/components/ui/skeleton";
-import { api, apiPath, errorMessage } from "@/config/api";
+import { apiPath } from "@/config/api";
+import { apiDocsBody } from "../apiDocs";
 import { extractHeadings, Markdown } from "./Markdown";
 
-/** The docs are authored once in `docs/api.md` and served (with this server's
- * own origin substituted into every example) from GET /api/docs.md. This page
- * renders that exact document, so there is no second copy to keep in sync --
- * and the same URL is what an LLM or any other tool is pointed at. */
+/** The docs are authored once in `docs/api.md`, bundled into this page at
+ * build time (see ../apiDocs.ts) and served raw from GET /api/docs.md. There
+ * is one document either way -- this page just doesn't need the request, and
+ * the same URL is what an LLM or any other tool is pointed at. */
 const DOCS_URL = apiPath("/docs.md");
 
 export function ApiDocsPage() {
-	const {
-		data: markdown,
-		isPending,
-		error,
-	} = useQuery({
-		queryKey: ["api-docs"],
-		queryFn: () => api.get<string>("/docs.md"),
-		staleTime: 5 * 60 * 1000,
-	});
-
-	// The document opens with an h1 that duplicates the page header, so it is
-	// dropped from the rendered body and the nav is built from the h2s.
-	const body = useMemo(
-		() => (markdown ?? "").replace(/^#\s+.*\n/, ""),
-		[markdown],
-	);
+	// The document opens with an h1 that duplicates the page header, so the
+	// rendered body drops it and the nav is built from the h2s.
 	const sections = useMemo(
-		() => extractHeadings(body).filter((h) => h.level === 2),
-		[body],
+		() => extractHeadings(apiDocsBody).filter((h) => h.level === 2),
+		[],
 	);
 
 	return (
@@ -96,31 +81,11 @@ export function ApiDocsPage() {
 				</nav>
 			)}
 
-			{isPending && (
-				<div className="space-y-3">
-					<Skeleton className="h-6 w-48" />
-					<Skeleton className="h-24 w-full" />
-					<Skeleton className="h-6 w-40" />
-					<Skeleton className="h-40 w-full" />
-				</div>
-			)}
-
-			{error && (
-				<Card className="border-destructive/30 bg-destructive/5">
-					<CardContent className="flex items-start gap-2 pt-4 text-sm text-muted-foreground">
-						<AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
-						<span>Couldn't load the API reference: {errorMessage(error)}</span>
-					</CardContent>
-				</Card>
-			)}
-
-			{markdown && (
-				<Card>
-					<CardContent className="pt-4">
-						<Markdown>{body}</Markdown>
-					</CardContent>
-				</Card>
-			)}
+			<Card>
+				<CardContent className="pt-4">
+					<Markdown>{apiDocsBody}</Markdown>
+				</CardContent>
+			</Card>
 		</div>
 	);
 }
