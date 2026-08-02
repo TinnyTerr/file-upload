@@ -185,6 +185,50 @@ export interface ApiKeyRow {
 	last_used_at: string | null;
 }
 
+export interface OauthClientRow {
+	id: number;
+	client_id: string;
+	/** NULL for public clients, which must use PKCE instead. */
+	client_secret_hash: string | null;
+	name: string;
+	owner_id: number;
+	/** Newline-separated; matched exactly, never by prefix. */
+	redirect_uris: string;
+	/** Space-separated ceiling on what this app may be granted. */
+	scopes: string;
+	active: number;
+	created_at: string;
+}
+
+export interface OauthAuthCodeRow {
+	id: number;
+	code_hash: string;
+	client_id: string;
+	user_id: number;
+	redirect_uri: string;
+	scope: string;
+	code_challenge: string | null;
+	code_challenge_method: string | null;
+	grant_id: string;
+	expires_at: string;
+	consumed_at: string | null;
+	created_at: string;
+}
+
+export interface OauthTokenRow {
+	id: number;
+	token_hash: string;
+	kind: "access" | "refresh";
+	client_id: string;
+	user_id: number;
+	scope: string;
+	grant_id: string;
+	expires_at: string;
+	revoked_at: string | null;
+	created_at: string;
+	last_used_at: string | null;
+}
+
 export interface DropboxLinkRow {
 	id: number;
 	owner_id: number;

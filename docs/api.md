@@ -897,24 +897,47 @@ Response (200 OK):
 protected by whatever `inherited_from_directory_id` points at. See *Encryption
 inheritance* below.
 
-### GET /api/directories/{directory_id}/children — List one level
+### GET /api/directories — Browse and search
 
-Returns the folders and files directly inside one folder, plus the breadcrumb
-trail to it. Use the literal id `root` for the top level. This is deliberately
-one level at a time; there is no recursive dump endpoint.
+One endpoint reads the tree. Which read you get is chosen entirely by search
+parameters: browsing a level, walking a subtree, listing every folder you can
+reach, and searching are the same request with different arguments.
+
+| Name | Type | Default | Description |
+| --- | --- | --- | --- |
+| `parent` | integer or `root` | `root` | Which folder to look in. Ignored when `scope=all`. |
+| `scope` | `level` · `subtree` · `all` | `level` | `level` = the direct children of `parent`. `subtree` = everything beneath it, recursively. `all` = every folder you can reach, ignoring `parent`. |
+| `q` | string | — | Case-insensitive substring match over folder titles and file names, applied within `scope`. |
+| `type` | `all` · `directories` · `files` | `all` | Restrict the result to one kind. |
+| `limit` | integer | `500` | Page size, capped at 500. Applied after filtering. |
+| `offset` | integer | `0` | Page offset. |
+
+`scope=level` with no `q` is the plain browse call, and is still one level at a
+time — there is no recursive dump of the whole tree at the default scope.
 
 ```bash
-curl "{{BASE_URL}}/api/directories/root/children" \
+# the top level
+curl "{{BASE_URL}}/api/directories" \
   -H "Authorization: Bearer <your-api-key>"
 
-curl "{{BASE_URL}}/api/directories/7/children" \
+# inside folder 7
+curl "{{BASE_URL}}/api/directories?parent=7" \
+  -H "Authorization: Bearer <your-api-key>"
+
+# every folder you can reach, flat
+curl "{{BASE_URL}}/api/directories?scope=all&type=directories" \
+  -H "Authorization: Bearer <your-api-key>"
+
+# search for "invoice" anywhere under folder 7
+curl "{{BASE_URL}}/api/directories?parent=7&scope=subtree&q=invoice" \
   -H "Authorization: Bearer <your-api-key>"
 ```
 
 ```python
 resp = requests.get(
-    "{{BASE_URL}}/api/directories/7/children",
-    headers={"Authorization": "Bearer <your-api-key>"}
+    "{{BASE_URL}}/api/directories",
+    headers={"Authorization": "Bearer <your-api-key>"},
+    params={"parent": 7, "scope": "subtree", "q": "invoice"}
 )
 data = resp.json()
 print([d["title"] for d in data["directories"]])
@@ -922,10 +945,11 @@ print([f["original_filename"] for f in data["files"]])
 ```
 
 ```javascript
-const res = await fetch("{{BASE_URL}}/api/directories/7/children", {
+const params = new URLSearchParams({ parent: "7", scope: "subtree", q: "invoice" });
+const res = await fetch(`{{BASE_URL}}/api/directories?${params}`, {
   headers: { "Authorization": "Bearer <your-api-key>" }
 });
-const { directory, breadcrumbs, directories, files } = await res.json();
+const { directories, files, total } = await res.json();
 ```
 
 Response (200 OK):
@@ -934,12 +958,24 @@ Response (200 OK):
 {
   "directory": { "id": 7, "title": "Projects", "...": "…" },
   "breadcrumbs": [{ "id": 3, "title": "Work" }, { "id": 7, "title": "Projects" }],
-  "directories": [{ "id": 12, "title": "Invoices", "...": "…" }],
-  "files": [{ "id": 1, "original_filename": "notes.txt", "...": "…" }]
+  "directories": [{ "id": 12, "title": "Invoices", "path": ["Work", "Projects"], "...": "…" }],
+  "files": [{ "id": 1, "original_filename": "invoice.pdf", "path": ["Work", "Projects"], "...": "…" }],
+  "scope": "subtree",
+  "query": "invoice",
+  "total": { "directories": 1, "files": 1 },
+  "limit": 500,
+  "offset": 0
 }
 ```
 
-`directory` and `breadcrumbs` are `null` and `[]` at the root.
+`directory` and `breadcrumbs` are `null` and `[]` at the root and whenever
+`scope=all`. `total` counts the matches *before* paging, so a client can tell
+that more remain. Each row carries `path` — the folder chain it was found at —
+whenever the response is a search or a wider-than-one-level scope; a plain level
+browse omits it, since every row is by definition in the folder you asked for.
+
+A session cookie works here, as does an OAuth access token carrying the
+`directories:read` scope.
 
 ### PATCH /api/directories/{directory_id} — Rename, or switch the public view
 

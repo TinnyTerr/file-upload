@@ -45,6 +45,7 @@ import {
 	requireActiveUser,
 	requireMaster,
 	requirePermission,
+	requireScopeOrSession,
 } from "../middleware/deps.ts";
 import { ensurePermissions } from "../permissions.ts";
 import {
@@ -694,13 +695,39 @@ export function directoriesRouter(state: AppState): Router {
 		},
 	);
 
-	router.get("/directories/", requireActiveUser(state), (req, res) => {
-		const user = req.currentUser!;
+	// ── the browse/search endpoint ─────────────────────────────────────────
+	//
+	// One endpoint answers every read of the tree; which read you get is chosen
+	// entirely by search parameters. It replaces the three that used to do this
+	// (`GET /directories/`, `/directories/root/children`,
+	// `/directories/:id/children`), whose only real differences were the scope
+	// they walked and whether they returned files.
+	//
+	//   parent = root | <id>   where to look; defaults to root
+	//   scope  = level | subtree | all
+	//              level   (default) direct children of `parent`
+	//              subtree everything beneath `parent`, recursively
+	//              all     every folder the caller can reach; ignores `parent`
+	//   q      = <term>        case-insensitive substring over folder titles and
+	//                          file names, applied within `scope`
+	//   type   = all | directories | files
+	//   limit / offset         paging, applied after filtering
+	//
+	// `scope=level` with no `q` is the Drive explorer's per-level fetch and is
+	// still never a recursive dump. `subtree` and `all` are bounded by the same
+	// MAX_DEPTH walkers as everything else in directoryTree.ts.
+
+	const MAX_LIMIT = 500;
+
+	/** Every folder the user can reach: the ones they own, plus every folder at
+	 * or beneath a collaborator grant. Reads the table once and walks in memory
+	 * -- a query per row is what `buildPathIndex` exists to avoid. */
+	function reachableDirectories(user: UserRow): DirectoryRow[] {
 		const owned = db.all<DirectoryRow>(
 			"SELECT * FROM directories WHERE owner_id = $id",
 			{ $id: user.id },
 		);
-		const collaborated = db.all<DirectoryRow>(
+		const granted = db.all<DirectoryRow>(
 			`SELECT d.* FROM directories d
        JOIN directory_collaborators dc ON dc.directory_id = d.id
        WHERE dc.user_id = $id`,
@@ -708,78 +735,220 @@ export function directoriesRouter(state: AppState): Router {
 		);
 		const byId = new Map<number, DirectoryRow>();
 		for (const d of owned) byId.set(d.id, d);
-		for (const d of collaborated) if (!byId.has(d.id)) byId.set(d.id, d);
-		const dirs = [...byId.values()].sort((a, b) =>
-			a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0,
-		);
-		res.json({ directories: serializeDirectories(state, req, dirs, user) });
-	});
-
-	/** One level of the tree: the folders and files directly inside `dirId`,
-	 * plus the breadcrumb chain to get there. `root` is the literal id for
-	 * "no containing folder". This is what the Drive explorer paginates
-	 * through as the user navigates -- never a recursive dump. */
-	function respondWithChildren(
-		req: Request,
-		res: Response,
-		dir: DirectoryRow | null,
-	): void {
-		const user = req.currentUser!;
-		if (dir && !isEditor(db, dir, user)) {
-			res.status(403).json({ detail: "not your directory" });
-			return;
+		// A grant covers the whole subtree under it, so the grant row alone is not
+		// the reachable set -- pull each one's descendants in too.
+		for (const d of granted) {
+			if (byId.has(d.id)) continue;
+			byId.set(d.id, d);
+			for (const child of subtree(db, d.id)) byId.set(child.id, child);
 		}
-		const subdirs = dir
-			? db.all<DirectoryRow>(
-					"SELECT * FROM directories WHERE parent_directory_id = $id ORDER BY title ASC",
-					{ $id: dir.id },
-				)
-			: db.all<DirectoryRow>(
-					`SELECT * FROM directories WHERE parent_directory_id IS NULL
-             AND (owner_id = $id OR id IN (
-               SELECT directory_id FROM directory_collaborators WHERE user_id = $id))
-           ORDER BY title ASC`,
-					{ $id: user.id },
-				);
-		const files = dir
-			? db.all<FileRow>(
-					"SELECT * FROM files WHERE directory_id = $id ORDER BY created_at DESC",
-					{ $id: dir.id },
-				)
-			: db.all<FileRow>(
-					"SELECT * FROM files WHERE directory_id IS NULL AND owner_id = $id ORDER BY created_at DESC",
-					{ $id: user.id },
-				);
-		const breadcrumbs = dir
-			? [...ancestorChain(db, dir.id)]
-					.reverse()
-					.concat([dir])
-					.map((a) => ({ id: a.id, title: a.title }))
-			: [];
-		res.json({
-			directory: dir ? serializeDirectories(state, req, [dir], user)[0]! : null,
-			breadcrumbs,
-			directories: serializeDirectories(state, req, subdirs, user),
-			files: serializeFiles(state, req, files),
-		});
+		return [...byId.values()];
 	}
 
-	router.get(
-		"/directories/root/children",
-		requireActiveUser(state),
-		(req, res) => respondWithChildren(req, res, null),
-	);
+	/** Every file directly inside any of `dirs`, in one query. The Db contract
+	 * takes named parameters only (db/types.ts), so the IN list is built as
+	 * $d0,$d1,... rather than positional placeholders. Chunked because SQLite
+	 * caps a statement at SQLITE_MAX_VARIABLE_NUMBER bindings. */
+	function filesUnder(dirs: DirectoryRow[]): FileRow[] {
+		const ids = dirs.map((d) => d.id);
+		const out: FileRow[] = [];
+		for (let i = 0; i < ids.length; i += 400) {
+			const chunk = ids.slice(i, i + 400);
+			const params: Record<string, number> = {};
+			const names = chunk.map((id, j) => {
+				params[`$d${j}`] = id;
+				return `$d${j}`;
+			});
+			out.push(
+				...db.all<FileRow>(
+					`SELECT * FROM files WHERE directory_id IN (${names.join(",")})`,
+					params,
+				),
+			);
+		}
+		return out;
+	}
 
+	function parseParent(raw: unknown): number | null {
+		const value = typeof raw === "string" ? raw.trim() : "";
+		if (!value || value === "root") return null;
+		const n = Number(value);
+		if (!Number.isInteger(n) || n <= 0) {
+			throw new HttpError(400, "parent must be a directory id or 'root'");
+		}
+		return n;
+	}
+
+	function parseIntParam(raw: unknown, fallback: number, max: number): number {
+		const value = typeof raw === "string" ? raw.trim() : "";
+		if (!value) return fallback;
+		const n = Number(value);
+		if (!Number.isInteger(n) || n < 0) {
+			throw new HttpError(
+				400,
+				"limit and offset must be non-negative integers",
+			);
+		}
+		return Math.min(n, max);
+	}
+
+	// Session cookie, or an OAuth token carrying directories:read.
 	router.get(
-		"/directories/:dirId(\\d+)/children",
-		requireActiveUser(state),
+		"/directories",
+		requireScopeOrSession(state, "directories:read"),
 		(req, res) => {
-			const d = getDirectory(db, Number(req.params.dirId));
-			if (!d) {
-				res.status(404).json({ detail: "not found" });
+			const user = req.currentUser!;
+
+			const scope = String(req.query.scope ?? "level");
+			if (scope !== "level" && scope !== "subtree" && scope !== "all") {
+				res
+					.status(400)
+					.json({ detail: "scope must be one of: level, subtree, all" });
 				return;
 			}
-			respondWithChildren(req, res, d);
+			const type = String(req.query.type ?? "all");
+			if (type !== "all" && type !== "directories" && type !== "files") {
+				res
+					.status(400)
+					.json({ detail: "type must be one of: all, directories, files" });
+				return;
+			}
+			const q = String(req.query.q ?? "")
+				.trim()
+				.toLowerCase();
+			const limit = parseIntParam(req.query.limit, MAX_LIMIT, MAX_LIMIT);
+			const offset = parseIntParam(
+				req.query.offset,
+				0,
+				Number.MAX_SAFE_INTEGER,
+			);
+
+			// `all` is caller-wide by definition, so it never resolves a parent --
+			// passing one alongside it is a contradiction rather than a refinement.
+			const parentId = scope === "all" ? null : parseParent(req.query.parent);
+			let parent: DirectoryRow | null = null;
+			if (parentId !== null) {
+				parent = getDirectory(db, parentId);
+				if (!parent) {
+					res.status(404).json({ detail: "not found" });
+					return;
+				}
+				if (!isEditor(db, parent, user)) {
+					res.status(403).json({ detail: "not your directory" });
+					return;
+				}
+			}
+
+			// ── collect, before filtering ──
+			let dirs: DirectoryRow[];
+			let files: FileRow[];
+			// `type` is applied here rather than after collecting, so asking for
+			// only folders doesn't read every file first and throw them away. The
+			// folder picker (scope=all&type=directories) is the hot path for this.
+			const wantFiles = type !== "directories";
+
+			if (scope === "all" || (scope === "subtree" && !parent)) {
+				// A root-bounded subtree is everything the caller can reach, which is
+				// exactly what `all` collects -- the two coincide here.
+				dirs = reachableDirectories(user);
+				files = wantFiles
+					? filesUnder(dirs).concat(
+							db.all<FileRow>(
+								"SELECT * FROM files WHERE directory_id IS NULL AND owner_id = $id",
+								{ $id: user.id },
+							),
+						)
+					: [];
+			} else if (scope === "subtree") {
+				// subtree() is "at or below", so it hands back the bounding folder
+				// itself -- drop it, or the folder you asked about turns up as one of
+				// its own descendants (and its files get counted twice below).
+				dirs = subtree(db, parent!.id).filter((d) => d.id !== parent!.id);
+				// The bounding folder's own files do belong to its subtree, though.
+				files = wantFiles ? filesUnder([parent!, ...dirs]) : [];
+			} else {
+				dirs = parent
+					? db.all<DirectoryRow>(
+							"SELECT * FROM directories WHERE parent_directory_id = $id ORDER BY title ASC",
+							{ $id: parent.id },
+						)
+					: db.all<DirectoryRow>(
+							`SELECT * FROM directories WHERE parent_directory_id IS NULL
+                 AND (owner_id = $id OR id IN (
+                   SELECT directory_id FROM directory_collaborators WHERE user_id = $id))
+               ORDER BY title ASC`,
+							{ $id: user.id },
+						);
+				files = !wantFiles
+					? []
+					: parent
+						? db.all<FileRow>(
+								"SELECT * FROM files WHERE directory_id = $id ORDER BY created_at DESC",
+								{ $id: parent.id },
+							)
+						: db.all<FileRow>(
+								"SELECT * FROM files WHERE directory_id IS NULL AND owner_id = $id ORDER BY created_at DESC",
+								{ $id: user.id },
+							);
+			}
+
+			// ── filter ──
+			if (q) {
+				dirs = dirs.filter((d) => d.title.toLowerCase().includes(q));
+				files = files.filter((f) =>
+					f.original_filename.toLowerCase().includes(q),
+				);
+			}
+			// Folders can only be dropped after collection: a subtree's file set is
+			// derived from them.
+			if (type === "files") dirs = [];
+
+			// A level listing keeps its SQL ordering (folders A-Z, files newest
+			// first); anything wider is a result set, so name order reads better.
+			if (scope !== "level") {
+				dirs.sort((a, b) => a.title.localeCompare(b.title));
+				files.sort((a, b) =>
+					a.original_filename.localeCompare(b.original_filename),
+				);
+			}
+
+			const total = { directories: dirs.length, files: files.length };
+			const page = <T>(rows: T[]) => rows.slice(offset, offset + limit);
+
+			// Search results land out of context, so each one carries the folder
+			// path it lives at. buildPathIndex reads the table once -- never
+			// ancestor-walk per row in a listing.
+			const withPaths = scope !== "level" || Boolean(q);
+			const pathOf = withPaths ? buildPathIndex(db) : null;
+
+			const pagedDirs = page(dirs);
+			const pagedFiles = page(files);
+
+			res.json({
+				directory: parent
+					? serializeDirectories(state, req, [parent], user)[0]!
+					: null,
+				breadcrumbs: parent
+					? [...ancestorChain(db, parent.id)]
+							.reverse()
+							.concat([parent])
+							.map((a) => ({ id: a.id, title: a.title }))
+					: [],
+				directories: serializeDirectories(state, req, pagedDirs, user).map(
+					(d, i) =>
+						pathOf
+							? { ...d, path: pathOf(pagedDirs[i]!.parent_directory_id) }
+							: d,
+				),
+				files: serializeFiles(state, req, pagedFiles).map((f, i) =>
+					pathOf ? { ...f, path: pathOf(pagedFiles[i]!.directory_id) } : f,
+				),
+				scope,
+				query: q || null,
+				total,
+				limit,
+				offset,
+			});
 		},
 	);
 

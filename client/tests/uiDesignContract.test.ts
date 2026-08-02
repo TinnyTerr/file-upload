@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
-const read = (path: string) => readFileSync(path, "utf8");
+// Resolved against this file, not the cwd: a bare `bun test` from the repo root
+// globs both workspaces and runs these with the wrong working directory.
+const read = (path: string) =>
+	readFileSync(resolve(import.meta.dir, "..", path), "utf8");
 
 describe("UI design contracts", () => {
 	test("brand tagline uses the requested product slogan", () => {
@@ -11,17 +15,32 @@ describe("UI design contracts", () => {
 		);
 	});
 
-	// The Files page became the Drive explorer; the panel that used to hold four
-	// upload tabs now holds the two that aren't "pick files from this machine".
-	test("upload tabs fit narrow mobile viewports", () => {
-		const source = read("src/features/drive/components/DriveSidePanel.tsx");
-		const page = read("src/features/drive/components/DrivePage.tsx");
+	// The Files page became the Drive explorer, and the side panel that used to
+	// hold a row of upload tabs is gone: the whole explorer is the drop target,
+	// so the toolbar only covers what a drag can't express. The tabs became the
+	// "Upload ▾" split button, which costs no horizontal room on a phone.
+	test("upload methods live in a menu rather than a row of tabs", () => {
+		const menu = read("src/features/drive/components/explorer/UploadMenu.tsx");
 
-		expect(source).toContain('aria-label="Upload method"');
-		expect(source).toContain("!grid");
-		expect(source).toContain("grid-cols-2");
-		expect(page).toContain("lg:grid-cols-[minmax(0,1fr)_320px]");
-		expect(page).toContain("order-2 min-w-0");
+		expect(menu).toContain('aria-label="More upload options"');
+		expect(menu).toContain("DropdownMenuItem");
+		// Files, folders and remote-URL uploads are all reachable from it.
+		expect(menu).toContain("webkitdirectory");
+		expect(menu).toContain("onRemote");
+	});
+
+	// On a narrow viewport the two side panes drop away and the file list keeps
+	// the full width; `min-w-0` on every pane is what lets them shrink instead
+	// of forcing the page to scroll sideways.
+	test("explorer side panes collapse away on small viewports", () => {
+		const shell = read(
+			"src/features/drive/components/explorer/ExplorerShell.tsx",
+		);
+
+		expect(shell).toContain("hidden min-w-0 md:block");
+		expect(shell).toContain("hidden min-w-0 lg:block");
+		expect(shell).toContain('id="main"');
+		expect(shell).toContain("min-w-0");
 	});
 
 	test("disabled primary buttons do not look like active gradient calls to action", () => {

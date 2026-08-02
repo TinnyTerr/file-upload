@@ -1028,10 +1028,31 @@ interface SessionInfo {
 	id: string;
 	ip_address: string | null;
 	user_agent: string | null;
+	/** Cloudflare CF-IPCountry recorded at login, when the server sits behind
+	 * Cloudflare: an ISO 3166-1 alpha-2 code, or `XX` / `T1`. */
+	country_code: string | null;
 	created_at: string;
 	last_seen_at: string;
 	expires_at: string;
 	is_current: boolean;
+}
+
+/** Cloudflare's two non-ISO codes carry meaning a country name doesn't, so they
+ * are spelled out rather than shown as a flag or a bogus country. */
+function regionLabel(code: string | null): string | null {
+	if (!code) return null;
+	if (code === "XX") return "Unknown region";
+	if (code === "T1") return "Tor network";
+	// Intl gives the country's name in the viewer's own language; an
+	// unrecognised code falls back to itself.
+	try {
+		const name = new Intl.DisplayNames([navigator.language], {
+			type: "region",
+		}).of(code);
+		return name ?? code;
+	} catch {
+		return code;
+	}
 }
 
 const SESSIONS_KEY = ["auth", "sessions"];
@@ -1153,8 +1174,11 @@ function SessionsTab() {
 									)}
 								</p>
 								<p className="text-xs text-muted-foreground">
-									{s.ip_address || "unknown IP"} · last active{" "}
-									{new Date(s.last_seen_at).toLocaleString()}
+									{s.ip_address || "unknown IP"}
+									{regionLabel(s.country_code) && (
+										<> · {regionLabel(s.country_code)}</>
+									)}{" "}
+									· last active {new Date(s.last_seen_at).toLocaleString()}
 								</p>
 							</div>
 							{!s.is_current && (

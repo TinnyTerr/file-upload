@@ -1,4 +1,4 @@
-import { api } from "@/config/api";
+import { api, apiPath } from "@/config/api";
 
 export interface DropboxLink {
 	id: number;
@@ -80,7 +80,9 @@ function singleDropboxUpload(
 		fd.append("file", file, originalFilename);
 		fd.append("original_filename", originalFilename);
 		const xhr = new XMLHttpRequest();
-		xhr.open("POST", `/dropbox/${token}/upload`);
+		// apiPath, not a bare path: every backend route lives under /api/*, and a
+		// POST outside that namespace misses the SPA fallback (GET-only) and 404s.
+		xhr.open("POST", apiPath(`/dropbox/${encodeURIComponent(token)}/upload`));
 		xhr.upload.onprogress = (e) => {
 			if (!e.lengthComputable || !onProgress) return;
 			const sent = Math.round((e.loaded / e.total) * 100);

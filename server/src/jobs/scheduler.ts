@@ -6,6 +6,7 @@ import { heartbeatJob } from "../cluster/membership.ts";
 import { getLogger } from "../logging.ts";
 import { prunePlayKeys } from "../media/playKeys.ts";
 import { sweepStaleParts } from "../routes/files.ts";
+import { pruneOauth } from "../security/oauth.ts";
 import { resetInterruptedImports, torrentPollJob } from "../torrents/poller.ts";
 import {
 	archiveIdleJob,
@@ -59,6 +60,14 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 			id: "media_playkey_prune",
 			intervalMs: HOUR_MS,
 			run: () => prunePlayKeys(db),
+		},
+		// Only deletes rows already past expires_at, so a revoked-but-unexpired
+		// refresh token survives as its own reuse-detection record -- see
+		// security/oauth.ts::pruneOauth.
+		{
+			id: "oauth_prune",
+			intervalMs: HOUR_MS,
+			run: () => pruneOauth(db),
 		},
 		{
 			id: "cluster_heartbeat",

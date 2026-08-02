@@ -87,9 +87,10 @@ function chunk<T>(list: T[], size: number): T[][] {
  * from the old listing — files could previously only be dropped onto a folder
  * tile, so "put these in the folder I'm looking at" had no gesture at all.
  *
- * Rows are virtualized in every view. There is no pagination anywhere in this
- * API — `GET /directories/:id/children` returns a whole level — so a folder
- * with a few thousand files is an ordinary case, not a pathological one.
+ * Rows are virtualized in every view. Browsing does not paginate — a plain
+ * `GET /directories?parent=<id>` returns the whole level — so a folder with a
+ * few thousand files is an ordinary case, not a pathological one. (The `limit`
+ * / `offset` parameters exist for the wide `scope=all` searches, not here.)
  */
 export function FileList() {
 	const {

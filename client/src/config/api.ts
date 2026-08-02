@@ -129,6 +129,9 @@ export function errorMessage(err: unknown): string {
 		if (typeof err.detail === "string") return err.detail;
 		if (err.detail && typeof err.detail === "object") {
 			const d = err.detail as Record<string, unknown>;
+			// OAuth endpoints answer {error, error_description} (RFC 6749) rather
+			// than the app-wide {detail}; the description is the readable half.
+			if (typeof d.error_description === "string") return d.error_description;
 			if (typeof d.error === "string") return d.error;
 			return JSON.stringify(d);
 		}

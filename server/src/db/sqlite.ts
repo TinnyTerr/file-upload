@@ -71,6 +71,8 @@ export function createSqliteDb(path: string): Db {
 		"webauthn_user_handle",
 		"webauthn_user_handle TEXT",
 	);
+	// Cloudflare CF-IPCountry, recorded at login. See middleware/auth.ts.
+	ensureColumn(sqlite, "sessions", "country_code", "country_code TEXT");
 	ensureColumn(sqlite, "credentials", "updated_at", "updated_at TEXT");
 	ensureColumn(sqlite, "credentials", "transports", "transports TEXT");
 	ensureColumn(
@@ -236,8 +238,12 @@ export function createSqliteDb(path: string): Db {
 			sqlite.query(sql).run(params as any);
 		},
 		get<T = Row>(sql: string, params: SqlParams = {}) {
+			// bun:sqlite returns null for a miss, but the Db contract says
+			// `T | undefined` -- normalize, or a caller testing `=== undefined`
+			// silently never matches a genuine miss.
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			return sqlite.query(sql).get(params as any) as T | undefined;
+			const row = sqlite.query(sql).get(params as any) as T | null;
+			return row ?? undefined;
 		},
 		all<T = Row>(sql: string, params: SqlParams = {}) {
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any

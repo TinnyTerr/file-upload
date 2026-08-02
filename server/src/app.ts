@@ -29,6 +29,7 @@ import { adminFilesRouter, filesRouter, linksRouter } from "./routes/files.ts";
 import { adminKeysRouter, keysRouter } from "./routes/keys.ts";
 import { mediaRouter } from "./routes/media.ts";
 import { mfaRouter } from "./routes/mfa.ts";
+import { oauthPublicRouter, oauthRouter } from "./routes/oauth.ts";
 import { publicRouter } from "./routes/public.ts";
 import { remoteUploadRouter } from "./routes/remoteUpload.ts";
 import { adminTorrentsRouter, torrentsRouter } from "./routes/torrents.ts";
@@ -63,6 +64,11 @@ export function createApp(state: AppState): Express {
 	app.use("/api/auth", authRouter(state));
 	app.use("/api/account", accountRouter(state));
 	app.use("/api/account/mfa", mfaRouter(state));
+	// Session-authenticated OAuth management first, then the client-facing
+	// machine surface (/token, /revoke, /userinfo, /metadata) -- the two mount at
+	// the same prefix and their paths don't overlap.
+	app.use("/api/oauth", oauthRouter(state));
+	app.use("/api/oauth", oauthPublicRouter(state));
 	app.use("/api/keys", keysRouter(state));
 	app.use("/api/admin/keys", adminKeysRouter(state));
 	app.use("/api/users", usersRouter(state));

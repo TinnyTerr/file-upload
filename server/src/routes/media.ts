@@ -51,7 +51,7 @@ import {
 } from "../media/playKeys.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
-import { requireActiveUser } from "../middleware/deps.ts";
+import { optionalOauthViewer, requireActiveUser } from "../middleware/deps.ts";
 import { ensurePermissions } from "../permissions.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
@@ -94,6 +94,11 @@ interface BlobMediaRow {
  * Browsing the public library must work logged-out, so this returns null rather
  * than answering 401 -- the per-collection visibility check does the gating. */
 function optionalViewer(state: AppState, req: Request): UserRow | null {
+	// An OAuth token carrying media:read identifies a viewer just as a session
+	// cookie does; canWatch() below still re-checks can_watch_media, so the
+	// token can never widen what its user may see.
+	const oauthViewer = optionalOauthViewer(state, req, "media:read");
+	if (oauthViewer) return oauthViewer;
 	const cookie = req.cookies?.[COOKIE_NAME] as string | undefined;
 	if (!cookie) return null;
 	const row = state.sessionManager.resolve(state.db, cookie);

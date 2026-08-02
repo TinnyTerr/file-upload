@@ -8,9 +8,14 @@ import type {
 } from "../types";
 
 export const dirService = {
+	/** Every folder the user can reach, flat. `scope=all` on the one browse
+	 * endpoint; `type=directories` so the server doesn't also collect files
+	 * nobody here is going to render. */
 	list: () =>
 		api
-			.get<{ directories: Directory[] }>("/directories/")
+			.get<{ directories: Directory[] }>("/directories", {
+				query: { scope: "all", type: "directories" },
+			})
 			.then((r) => r.directories),
 
 	create: (body: {

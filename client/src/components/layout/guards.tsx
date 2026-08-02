@@ -1,5 +1,11 @@
-import { Navigate, Outlet, useLocation } from "react-router-dom";
+import {
+	Navigate,
+	Outlet,
+	useLocation,
+	useSearchParams,
+} from "react-router-dom";
 import { useAuth } from "@/features/auth/hooks/auth";
+import { safeInternalPath } from "@/lib/redirect";
 import { FullPageSpinner } from "./FullPageSpinner";
 
 export const MFA_SETUP_PATH = "/account/mfa-setup";
@@ -57,13 +63,19 @@ export function RequirePermission({
 	return <Outlet />;
 }
 
-/** Sends already-authenticated users away from public-only pages (e.g. login). */
+/** Sends already-authenticated users away from public-only pages (e.g. login).
+ * Honours `?next=<path>` so a flow interrupted by the login screen -- the OAuth
+ * consent page is the one that needs it -- resumes where it left off. */
 export function RedirectIfAuthed({ children }: { children: React.ReactNode }) {
 	const { user, isLoading, mustChangeCredentials, mfaEnrollmentRequired } =
 		useAuth();
+	const [params] = useSearchParams();
 	if (isLoading) return <FullPageSpinner />;
 	if (mfaEnrollmentRequired) return <Navigate to={MFA_SETUP_PATH} replace />;
 	if (mustChangeCredentials) return <Navigate to="/account/change" replace />;
-	if (user) return <Navigate to="/files" replace />;
+	if (user)
+		return (
+			<Navigate to={safeInternalPath(params.get("next")) ?? "/files"} replace />
+		);
 	return <>{children}</>;
 }

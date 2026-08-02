@@ -60,6 +60,19 @@ bun run dev             # Vite on :5173 (proxies API calls) + Express on :8000
 bun run typecheck
 ```
 
+**Test both workspaces:**
+```bash
+bun run test
+```
+
+`client/tests/` are pure unit tests plus a few source-text design contracts;
+`server/tests/` drive the **real** Express app over an in-memory SQLite database
+via `server/tests/harness.ts` (`makeHarness` / `makeUser` / `makeDirectory` /
+`makeFile`), so a failure means the route is wrong rather than a stub being
+wrong. Both scripts pass `./tests` explicitly — a bare `bun test` from either
+workspace globs the whole monorepo and runs the *other* workspace's tests with
+the wrong cwd.
+
 Config lives in `./data/app.env`, auto-generated on first run (mode `0600`). Environment variables:
 
 | Variable | Purpose |
@@ -69,7 +82,7 @@ Config lives in `./data/app.env`, auto-generated on first run (mode `0600`). Env
 | `MASTER_KEY_B64` | base64 AES-256 key for server-side encryption and sealed tokens |
 | `DATABASE_URL` | Default `sqlite:///./data/app.db` |
 | `ALLOWED_HOSTS` | Comma-separated hostnames. Gates the WebAuthn relying-party ID and the HTTPS-redirect proxy-header trust. **Empty = unconfigured**, which logs a startup warning — set it in production. |
-| `TRUST_PROXY` | `true` (generic reverse proxy) or `cloudflare` (prefer `CF-Connecting-IP`). Required behind a TLS-terminating proxy, or every request 308-redirects to https forever. |
+| `TRUST_PROXY` | `true` (generic reverse proxy) or `cloudflare` (prefer `CF-Connecting-IP`, and derive each session's region from `CF-IPCountry`). Required behind a TLS-terminating proxy, or every request 308-redirects to https forever. |
 | `NODE_ID` / `NODE_NAME` / `NODE_URL` | This node's cluster identity and the base URL it advertises to peers |
 | `NODE_ROLE` | Bootstrap role on *first ever* boot only; afterwards the persisted elected role in `cluster_self_state` always wins |
 | `MASTER_URL` / `MASTER_TOKEN` | Coordinates a non-master node auto-joins at startup |
@@ -210,6 +223,7 @@ Every data endpoint lives under `/api/*` so it can never collide with an SPA cli
 |---|---|
 | `/api/auth` | `auth.ts` — login, MFA verify, logout, session list/revoke |
 | `/api/account`, `/api/account/mfa` | `account.ts`, `mfa.ts` |
+| `/api/oauth` | `oauth.ts` — `oauthRouter` (session-authenticated app management + consent) **and** `oauthPublicRouter` (`/token`, `/revoke`, `/userinfo`, `/metadata`), mounted at the same prefix |
 | `/api/files`, `/api/links`, `/api/admin/files` | `files.ts` (+ `remoteUpload.ts` on `/api/files`) |
 | `/api/keys`, `/api/admin/keys` | `keys.ts` |
 | `/api/users`, `/api/audit`, `/api/admin` | `users.ts`, `audit.ts`, `admin.ts` |
@@ -250,6 +264,38 @@ Failed logins feed `security/lockout.ts`, which counts per-username *and* per-IP
 - Timestamps are ISO8601 UTC strings (`nowIso()`), not a dedicated column type. Comparisons are lexicographic string comparisons, which is why the format must stay fixed-width UTC.
 - `PRAGMA foreign_keys = ON` and WAL journaling are both enabled in `db/sqlite.ts`.
 - Columns dropped from a `db/rows.ts` interface are silently ignored — they remain in the DB.
+- `db.get()` returns `undefined` on a miss. `bun:sqlite` itself returns `null`; the adapter normalizes it, so `=== undefined` is safe — but prefer `if (!row)` anyway.
+
+### OAuth 2.0 authorization server
+
+Third-party apps act *as* a fileupload user. `security/oauth.ts` holds the
+primitives, `routes/oauth.ts` the endpoints, `middleware/deps.ts` the guards
+(`requireOauthScope`, `requireScopeOrSession`, `optionalOauthViewer`).
+Authorization-code flow with PKCE (S256 only); the consent page is the SPA route
+`/oauth/authorize`.
+
+- **A scope is never the last word on what a token may do.** Each scope in
+  `SCOPES` names a permission flag, re-checked against the user's *live*
+  permissions on every request — so revoking `can_upload` immediately neuters
+  every outstanding token carrying `files:write`, with no token hunt.
+- **Bearer values are routed by prefix**: `fuo_` = OAuth access token, `fur_` =
+  refresh token, no prefix = API key. That is what lets one `Authorization`
+  header serve two credential tables without probing both.
+- **Codes and tokens are stored hashed.** A database read must not yield usable
+  credentials.
+- **A replayed authorization code or a reused refresh token revokes the whole
+  grant**, not just the request — the safe reading of a replay is that the
+  credential leaked.
+- **`redirect_uri` is matched by exact string**, never by prefix or origin.
+- **`pruneOauth` only deletes rows already past `expires_at`.** A revoked but
+  unexpired row *is* the reuse-detection record; dropping it early would
+  downgrade a replayed refresh token to a bare unknown-token error.
+- **OAuth state is node-local**, like sessions and play keys: `oauth_clients`,
+  `oauth_auth_codes` and `oauth_tokens` are deliberately absent from
+  `REPLICATED_TABLES`. Registering an app on one node does not make it usable
+  against a peer.
+- Adding a scope means wiring it into the routes it is supposed to unlock, or an
+  app gets granted something that silently does nothing.
 
 ### File storage
 
@@ -269,9 +315,34 @@ levels deep (`server/src/directoryTree.ts`, which also owns `ancestorChain`,
 folder applies to everything beneath it, because the permission check walks the
 ancestor chain rather than looking at one row.
 
-`GET /directories/{id}/children` (and `/directories/root/children`) returns one
-level at a time — the Drive explorer paginates through the tree with it. There
-is deliberately no recursive dump endpoint.
+**One endpoint reads the tree: `GET /directories`.** Which read you get is
+chosen by search parameters, never by path — browsing a level, walking a
+subtree, listing everything reachable and searching are the same request with
+different arguments:
+
+| Param | Values | Meaning |
+|---|---|---|
+| `parent` | `root` (default) or an id | Where to look. Ignored when `scope=all`. |
+| `scope` | `level` (default) · `subtree` · `all` | One level · everything beneath `parent` · every folder the caller can reach. |
+| `q` | string | Case-insensitive substring over folder titles and file names, within `scope`. |
+| `type` | `all` (default) · `directories` · `files` | Restrict the kind returned. |
+| `limit` / `offset` | ints, limit caps at 500 | Paging, applied after filtering. |
+
+The default (`scope=level`, no `q`) is the Drive explorer's per-level fetch and
+is still **not** a recursive dump. Notes that are easy to re-break:
+
+- `subtree()` in `directoryTree.ts` is *"at or below"* — it includes the folder
+  you passed. The endpoint drops it, or a folder turns up among its own
+  descendants and its files get counted twice.
+- `type` is applied **while collecting, not after**. `scope=all&type=directories`
+  is the folder picker's call; collecting every file first and discarding them
+  would read the whole `files` table on every picker open.
+- Folders can only be dropped *after* collection, because a subtree's file set
+  is derived from them.
+- Search results carry a `path` (the folder chain they were found at) built with
+  `buildPathIndex` — one table read, never an ancestor walk per row.
+- `serializeDirectories` runs a `COUNT(*)` per row, so it is only ever called on
+  the **paged** slice.
 
 ### Encryption modes
 
@@ -410,8 +481,12 @@ decrypt rather than a join (mpv issues a Range request per seek), with
 
 ### Session management
 
-- The `sessions` row holds: `id` (the signed cookie's sid), `user_id`, `csrf_token`, `created_at`, `last_seen_at`, `expires_at`, `ip_address`, `user_agent`. 24-hour TTL.
+- The `sessions` row holds: `id` (the signed cookie's sid), `user_id`, `csrf_token`, `created_at`, `last_seen_at`, `expires_at`, `ip_address`, `user_agent`, `country_code`. 24-hour TTL.
 - `last_seen_at` updates at most once a minute per session, so an active client doesn't cause a write per request.
+- `country_code` is Cloudflare's `CF-IPCountry`, read by `middleware/auth.ts::clientCountry`: ISO 3166-1 alpha-2, plus Cloudflare's two specials — `XX` (no country data for this client) and `T1` (client came out of the Tor network). It is recorded **once, at login**, so it describes where the session was started rather than drifting as the user moves.
+  - **Trusted on exactly the same terms as `clientIp`**: `TRUST_PROXY=cloudflare`, or `TRUST_PROXY=true` *plus* a `CF-Ray` header proving the request really passed through Cloudflare. Any client can send `CF-IPCountry`, so reading it ungated would let a visitor pick their own country.
+  - Nothing trustworthy to report ⇒ the column stays NULL. It is never filled with a guess.
+  - `T1` is **not** an ISO code — never render it as a flag or look it up in a country table. The client's `regionLabel` spells both specials out in words.
 - Settings → Sessions tab: list active sessions, revoke one (password required), sign out everywhere.
 - `GET /api/auth/sessions`, `DELETE /api/auth/sessions/:id`, `DELETE /api/auth/sessions`.
 
@@ -433,7 +508,9 @@ Non-obvious rules that are easy to re-break. Each one has bitten this codebase a
 
 - **Wrap every `async` route handler in `asyncHandler`** (`middleware/asyncHandler.ts`). This is Express **4**, which does not await handlers — a rejected promise becomes an unhandled rejection and the request hangs forever with no response ever sent, rather than producing a 500.
 - **`express.json()` runs with an explicit 8 MB limit**, not the 100 KB default, because `POST /api/torrents` accepts base64 `.torrent` payloads up to 2 MiB (base64 inflates 4/3). Keep the limit above `MAX_TORRENT_FILE_BYTES * 4/3`.
-- **Deleting a user requires clearing every table that FKs to `users`** — `PRAGMA foreign_keys = ON` means a missed one throws instead of cascading. Currently: `permissions`, `sessions`, `credentials`, `files`, `directories`, `directory_collaborators` (both `user_id` and `invited_by_id`), `api_keys`, `dropbox_upload_links`, `remote_upload_jobs`, `torrent_jobs`, `media_play_keys`, and `cluster_nodes.created_by_id`.
+- **Deleting a user requires clearing every table that FKs to `users`** — `PRAGMA foreign_keys = ON` means a missed one throws instead of cascading. Currently: `permissions`, `sessions`, `credentials`, `files`, `directories`, `directory_collaborators` (both `user_id` and `invited_by_id`), `api_keys`, `dropbox_upload_links`, `remote_upload_jobs`, `torrent_jobs`, `media_play_keys`, the three `oauth_*` tables (via
+`routes/oauth.ts::purgeOauthForUser`, which clears both the apps they *own* and
+the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - **`/account/reset` must not delete the user's `permissions` row** — that would silently reset an admin-assigned quota to the default. Reset purges *content*; only true account deletion purges identity.
 - **Decrypt/decompress order depends on the producer.** `archived && !compressed` is `ZSTD(ENC(x))` (decompress, then decrypt); every other compressed+encrypted combination is `ENC(ZSTD(x))` (decrypt, then decompress). `routes/public.ts` and `storage/zip.ts` both branch on this — keep them in sync.
 - **`TRUST_PROXY` must be set behind a TLS-terminating proxy.** Otherwise `req.protocol` stays `http` in prod and `httpsRedirect` 308s in an infinite loop.

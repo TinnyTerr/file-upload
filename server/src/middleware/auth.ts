@@ -34,3 +34,35 @@ export function clientIp(state: AppState, req: Request): string {
 	}
 	return req.socket.remoteAddress || "";
 }
+
+/** Cloudflare's own marker for "no country data for this client". */
+export const COUNTRY_UNKNOWN = "XX";
+/** Cloudflare's own marker for a client arriving over the Tor network. It is
+ * not an ISO country, so it must never be rendered as a flag or looked up in a
+ * country table -- it means "exit node, origin unknowable". */
+export const COUNTRY_TOR = "T1";
+
+/**
+ * The visitor's region, from Cloudflare's `CF-IPCountry` header.
+ *
+ * Two-character ISO 3166-1 alpha-2, plus Cloudflare's two specials: `XX` for a
+ * client it has no country data for, and `T1` for one coming out of Tor.
+ *
+ * Only trusted on the same terms as `clientIp`: `TRUST_PROXY=cloudflare`, or
+ * `TRUST_PROXY=true` with a `CF-Ray` present to show the request really did
+ * pass through Cloudflare. Any client can *send* this header, so reading it
+ * without that gate would let a visitor pick their own country. Returns null
+ * when there is nothing trustworthy to report -- the column stays NULL rather
+ * than being filled with a guess.
+ */
+export function clientCountry(state: AppState, req: Request): string | null {
+	const mode = state.settings.trustProxyMode;
+	if (mode === "off") return null;
+	if (mode !== "cloudflare" && !req.header("cf-ray")) return null;
+	const raw = (req.header("cf-ipcountry") ?? "").trim().toUpperCase();
+	// A letter followed by a letter or digit: covers every ISO alpha-2 code and
+	// both of Cloudflare's specials (XX is letters, T1 is not). Anything else is
+	// a malformed header and is treated as absent.
+	if (!/^[A-Z][A-Z0-9]$/.test(raw)) return null;
+	return raw;
+}

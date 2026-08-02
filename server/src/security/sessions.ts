@@ -14,6 +14,9 @@ export interface SessionRow {
 	expires_at: string;
 	ip_address: string | null;
 	user_agent: string | null;
+	/** Cloudflare CF-IPCountry at login: ISO 3166-1 alpha-2, or Cloudflare's
+	 * `XX` (no data) / `T1` (Tor). NULL when not behind Cloudflare. */
+	country_code: string | null;
 }
 
 function tokenUrlsafe(bytes: number): string {
@@ -56,7 +59,11 @@ export class SessionManager {
 	create(
 		db: Db,
 		userId: number,
-		opts: { ip?: string | null; userAgent?: string | null } = {},
+		opts: {
+			ip?: string | null;
+			userAgent?: string | null;
+			countryCode?: string | null;
+		} = {},
 	): { cookieValue: string; csrfToken: string } {
 		const sid = tokenUrlsafe(32);
 		const csrfToken = tokenUrlsafe(32);
@@ -65,8 +72,8 @@ export class SessionManager {
 			Date.now() + SESSION_TTL_SECONDS * 1000,
 		).toISOString();
 		db.run(
-			`INSERT INTO sessions (id, user_id, csrf_token, created_at, last_seen_at, expires_at, ip_address, user_agent)
-       VALUES ($id, $userId, $csrfToken, $createdAt, $lastSeenAt, $expiresAt, $ip, $ua)`,
+			`INSERT INTO sessions (id, user_id, csrf_token, created_at, last_seen_at, expires_at, ip_address, user_agent, country_code)
+       VALUES ($id, $userId, $csrfToken, $createdAt, $lastSeenAt, $expiresAt, $ip, $ua, $country)`,
 			{
 				$id: sid,
 				$userId: userId,
@@ -76,6 +83,7 @@ export class SessionManager {
 				$expiresAt: expiresAt,
 				$ip: opts.ip ?? null,
 				$ua: opts.userAgent ?? null,
+				$country: opts.countryCode ?? null,
 			},
 		);
 		return { cookieValue: sign(this.secretKey, sid), csrfToken };

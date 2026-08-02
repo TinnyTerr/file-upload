@@ -29,6 +29,7 @@ import {
 import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
 import { deleteThumbnail } from "../storage/thumbnail.ts";
 import { revokeUserPlayKeys } from "./media.ts";
+import { purgeOauthForUser } from "./oauth.ts";
 
 const log = getLogger("app.routes.users");
 
@@ -485,6 +486,7 @@ export function usersRouter(state: AppState): Router {
 				db.run("DELETE FROM media_play_keys WHERE user_id = $id", {
 					$id: userId,
 				});
+				purgeOauthForUser(state, userId);
 				db.run(
 					"UPDATE cluster_nodes SET created_by_id = NULL WHERE created_by_id = $id",
 					{ $id: userId },

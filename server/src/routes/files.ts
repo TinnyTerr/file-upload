@@ -52,6 +52,7 @@ import {
 	requireActiveUser,
 	requireMaster,
 	requirePermission,
+	requireScopeOrSession,
 } from "../middleware/deps.ts";
 import { ensurePermissions } from "../permissions.ts";
 import {
@@ -767,7 +768,7 @@ export function sweepStaleParts(): void {
 	});
 }
 
-/** Exported for reuse by the directory-children endpoint in directories.ts, so
+/** Exported for reuse by the directory browse endpoint in directories.ts, so
  * the Drive explorer sees exactly the same file shape whichever level it asks
  * for. (The dependency only runs directories.ts -> files.ts; files.ts takes its
  * tree helpers from directoryTree.ts precisely so the two never import each
@@ -1696,7 +1697,8 @@ export function filesRouter(state: AppState): Router {
 		},
 	);
 
-	router.get("/", requireActiveUser(state), (req, res) => {
+	// Session cookie, or an OAuth token carrying files:read.
+	router.get("/", requireScopeOrSession(state, "files:read"), (req, res) => {
 		const user = req.currentUser!;
 		const files = db.all<FileRow>(
 			"SELECT * FROM files WHERE directory_id IS NULL AND owner_id = $id ORDER BY created_at DESC",

@@ -7,7 +7,7 @@ import { getMasterKey } from "../config.ts";
 import { openSecret } from "../crypto/secretEncrypt.ts";
 import type { UserRow } from "../db/rows.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
-import { clientIp, requireSession } from "../middleware/auth.ts";
+import { clientCountry, clientIp, requireSession } from "../middleware/auth.ts";
 import { mfaEnforcedFor, passkeyEnforcedFor } from "../permissions.ts";
 import * as credentials from "../security/credentials.ts";
 import { requireCsrf } from "../security/csrf.ts";
@@ -41,6 +41,9 @@ export function authRouter(state: AppState): Router {
 		const { cookieValue, csrfToken } = sessionManager.create(db, user.id, {
 			ip,
 			userAgent: req.header("user-agent") ?? null,
+			// Recorded once, at login: it describes where the session was started
+			// from, so it must not drift as the user moves around.
+			countryCode: clientCountry(state, req),
 		});
 		res.cookie(COOKIE_NAME, cookieValue, sessionManager.cookieParams());
 		res.json({
@@ -347,6 +350,7 @@ export function authRouter(state: AppState): Router {
 				id: s.id,
 				ip_address: s.ip_address,
 				user_agent: s.user_agent,
+				country_code: s.country_code,
 				created_at: s.created_at,
 				last_seen_at: s.last_seen_at,
 				expires_at: s.expires_at,

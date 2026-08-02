@@ -4,6 +4,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { MFA_SETUP_PATH } from "@/components/layout/guards";
 import { ApiError, errorMessage } from "@/config/api";
+import { safeInternalPath } from "@/lib/redirect";
 import {
 	authService,
 	isMfaRequired,
@@ -72,11 +73,18 @@ export function useLogin(connId: string | null) {
 
 	async function land(res: SessionResponse) {
 		await refresh();
+		// `?next=` beats the router's own `state.from`: it survives a full page
+		// load, which is how the OAuth consent page arrives here (the third-party
+		// app navigated the browser, so there is no router state to carry). Both
+		// still lose to the two forced-interstitial destinations.
+		const next = safeInternalPath(
+			new URLSearchParams(location.search).get("next"),
+		);
 		const dest = res.must_change_credentials
 			? "/account/change"
 			: res.force_mfa_enrollment
 				? MFA_SETUP_PATH
-				: ((location.state as LocationState)?.from ?? "/files");
+				: (next ?? (location.state as LocationState)?.from ?? "/files");
 		toast.success("Welcome back");
 		navigate(dest, { replace: true });
 	}

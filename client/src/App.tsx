@@ -77,6 +77,11 @@ const MfaSetupPage = lazy(() =>
 		default: m.MfaSetupPage,
 	})),
 );
+const AuthorizePage = lazy(() =>
+	import("@/features/oauth/components/AuthorizePage").then((m) => ({
+		default: m.AuthorizePage,
+	})),
+);
 const ClusterPage = lazy(() =>
 	import("@/features/cluster/components/ClusterPage").then((m) => ({
 		default: m.ClusterPage,
@@ -152,6 +157,12 @@ export default function App() {
 						</PublicShell>
 					}
 				/>
+
+				{/* OAuth consent. Deliberately outside AppShell: it is a decision
+				    screen for a third-party app, not a page of this app, and it
+				    handles its own signed-out case (bouncing through /login?next=
+				    so the request's query string survives the round trip). */}
+				<Route path="/oauth/authorize" element={<AuthorizePage />} />
 
 				{/* The media library: its own layout, because public collections have
 				    to render for signed-out visitors while signed-in users still get

@@ -53,7 +53,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_seen_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   ip_address TEXT,
-  user_agent TEXT
+  user_agent TEXT,
+  -- Cloudflare CF-IPCountry: ISO 3166-1 alpha-2, or Cloudflare's specials
+  -- XX (no country data) / T1 (Tor). NULL when not behind Cloudflare.
+  country_code TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_sessions_user_id ON sessions(user_id);
 
@@ -434,3 +437,61 @@ CREATE TABLE IF NOT EXISTS cluster_events (
 );
 CREATE INDEX IF NOT EXISTS ix_cluster_events_ts ON cluster_events(ts);
 CREATE INDEX IF NOT EXISTS ix_cluster_events_origin_node_id ON cluster_events(origin_node_id);
+
+-- OAuth 2.0 authorization-server tables (security/oauth.ts, routes/oauth.ts).
+-- Deliberately absent from cluster/replication.ts's REPLICATED_TABLES: like
+-- sessions and media_play_keys, an issued token is a node-local credential and
+-- a registered app is node-local config. Registering an app on one node does
+-- not make it usable against a peer.
+CREATE TABLE IF NOT EXISTS oauth_clients (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  client_id TEXT NOT NULL UNIQUE,
+  -- NULL = public client; those MUST use PKCE (there is no secret to prove with).
+  client_secret_hash TEXT,
+  name TEXT NOT NULL,
+  owner_id INTEGER NOT NULL REFERENCES users(id),
+  -- Newline-separated, compared by exact string match -- never by prefix.
+  redirect_uris TEXT NOT NULL,
+  -- Space-separated ceiling: the most this app may ever be granted.
+  scopes TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_oauth_clients_client_id ON oauth_clients(client_id);
+CREATE INDEX IF NOT EXISTS ix_oauth_clients_owner_id ON oauth_clients(owner_id);
+
+CREATE TABLE IF NOT EXISTS oauth_auth_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code_hash TEXT NOT NULL UNIQUE,
+  client_id TEXT NOT NULL,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  redirect_uri TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  code_challenge TEXT,
+  code_challenge_method TEXT,
+  -- Ties the code to the tokens minted from it, so replaying a consumed code
+  -- can revoke the whole grant rather than just failing.
+  grant_id TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_oauth_auth_codes_code_hash ON oauth_auth_codes(code_hash);
+CREATE INDEX IF NOT EXISTS ix_oauth_auth_codes_expires_at ON oauth_auth_codes(expires_at);
+
+CREATE TABLE IF NOT EXISTS oauth_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_hash TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  scope TEXT NOT NULL,
+  grant_id TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_oauth_tokens_token_hash ON oauth_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS ix_oauth_tokens_grant_id ON oauth_tokens(grant_id);
+CREATE INDEX IF NOT EXISTS ix_oauth_tokens_user_id ON oauth_tokens(user_id);
