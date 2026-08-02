@@ -87,6 +87,11 @@ CREATE TABLE IF NOT EXISTS directories (
   owner_id INTEGER NOT NULL REFERENCES users(id),
   slug TEXT NOT NULL UNIQUE,
   title TEXT NOT NULL DEFAULT 'Untitled folder',
+  -- Mega.nz-style nesting: NULL is the root. A folder's effective encryption
+  -- (see encryption_mode below) is independent of nesting -- it is only ever
+  -- set by directory creation-under-an-encrypted-parent or the cascade in
+  -- POST /directories/:id/encrypt, never implicitly by moving.
+  parent_directory_id INTEGER REFERENCES directories(id),
   encryption_mode TEXT NOT NULL DEFAULT 'none',
   enc_key_blob BLOB,
   enc_access_blob BLOB,
@@ -113,6 +118,7 @@ CREATE TABLE IF NOT EXISTS directories (
 );
 CREATE INDEX IF NOT EXISTS ix_directories_slug ON directories(slug);
 CREATE INDEX IF NOT EXISTS ix_directories_is_library ON directories(is_library);
+CREATE INDEX IF NOT EXISTS ix_directories_parent ON directories(parent_directory_id);
 CREATE INDEX IF NOT EXISTS ix_directories_owner_id ON directories(owner_id);
 
 CREATE TABLE IF NOT EXISTS files (

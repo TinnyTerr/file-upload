@@ -1,17 +1,27 @@
-import { Download, Eye, FolderArchive, FolderX, Save } from "lucide-react";
+import {
+	Download,
+	Eye,
+	FolderArchive,
+	FolderClosed,
+	FolderX,
+	Lock,
+	Save,
+} from "lucide-react";
 import { useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ListRow } from "@/components/ui/list-row";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip } from "@/components/ui/tooltip";
 import { UserAvatar } from "@/components/ui/user-avatar";
 import { useAuth } from "@/features/auth/hooks/auth";
 import { EncryptionBanner } from "@/features/download/components/EncryptionBanner";
 import { isPreviewableType } from "@/features/download/components/FilePreview";
-import { iconForType } from "@/features/files/lib/fileMeta";
+import { EncryptionBadge, iconForType } from "@/features/files/lib/fileMeta";
 import { formatBytes } from "@/lib/bytes";
 import { readClientKeyFromHash, readServerKeyFromQuery } from "@/lib/download";
 import {
@@ -144,6 +154,44 @@ export function FolderPage() {
 					</div>
 				</CardContent>
 			</Card>
+
+			{info.folders.length > 0 && (
+				<Card>
+					<CardContent className="space-y-2 p-5">
+						<h2 className="text-sm font-semibold">Folders</h2>
+						<div className="space-y-1.5">
+							{info.folders.map((f) => (
+								<ListRow
+									key={f.slug}
+									leading={
+										<FolderClosed className="size-4 shrink-0 text-muted-foreground" />
+									}
+									trailing={
+										<Button variant="ghost" size="sm" asChild>
+											<Link to={`/d/${f.slug}`}>Open</Link>
+										</Button>
+									}
+								>
+									<Link
+										to={`/d/${f.slug}`}
+										className="flex items-center gap-2 truncate text-sm hover:underline"
+									>
+										<span className="truncate">{f.title}</span>
+										<EncryptionBadge mode={f.encryption_mode} />
+										{f.locked && (
+											<Tooltip content="Encrypted with a different key than this folder -- you'll need its own key or #ek=/?ek= to open it.">
+												<Badge variant="secondary" className="gap-1">
+													<Lock className="size-3" /> needs its own key
+												</Badge>
+											</Tooltip>
+										)}
+									</Link>
+								</ListRow>
+							))}
+						</div>
+					</CardContent>
+				</Card>
+			)}
 
 			<Card>
 				<CardContent className="space-y-2 p-5">

@@ -38,6 +38,11 @@ export const filesService = {
 
 	delete: (fileId: number) => api.delete(`/files/${fileId}`),
 
+	update: (
+		fileId: number,
+		body: { original_filename?: string; directory_id?: number | null },
+	) => api.patch<FileObject>(`/files/${fileId}`, { json: body }),
+
 	saveToMyFiles: (slug: string) =>
 		api.post<{ file_id: number; slug: string }>(`/files/${slug}/save`),
 

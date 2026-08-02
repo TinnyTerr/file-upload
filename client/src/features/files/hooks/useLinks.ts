@@ -9,6 +9,7 @@ export function useLinks() {
 	const invalidate = () => {
 		qc.invalidateQueries({ queryKey: filesKeys.list });
 		qc.invalidateQueries({ queryKey: ["admin", "files"] });
+		qc.invalidateQueries({ queryKey: ["directories", "browse"] });
 	};
 
 	const mint = useMutation({

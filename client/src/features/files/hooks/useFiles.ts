@@ -18,9 +18,28 @@ export function useDeleteFile() {
 			qc.invalidateQueries({ queryKey: filesKeys.usage });
 			qc.invalidateQueries({ queryKey: ["admin", "files"] });
 			qc.invalidateQueries({ queryKey: ["admin", "storage"] });
+			qc.invalidateQueries({ queryKey: ["directories", "browse"] });
 		},
 		onError: (err) =>
 			toast.error("Couldn't delete file", { description: errorMessage(err) }),
+	});
+}
+
+export function useUpdateFile() {
+	const qc = useQueryClient();
+	return useMutation({
+		mutationFn: (vars: {
+			fileId: number;
+			original_filename?: string;
+			directory_id?: number | null;
+		}) => filesService.update(vars.fileId, vars),
+		onSuccess: () => {
+			qc.invalidateQueries({ queryKey: filesKeys.list });
+			qc.invalidateQueries({ queryKey: ["directories", "browse"] });
+			qc.invalidateQueries({ queryKey: ["directories", "list"] });
+		},
+		onError: (err) =>
+			toast.error("Couldn't update file", { description: errorMessage(err) }),
 	});
 }
 

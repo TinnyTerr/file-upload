@@ -9,6 +9,23 @@ export function useDirectories() {
 	return useQuery({ queryKey: dirKeys.list, queryFn: dirService.list });
 }
 
+export function useBrowse(parentId: number | null) {
+	return useQuery({
+		queryKey: dirKeys.browse(parentId),
+		queryFn: () => dirService.browse(parentId),
+	});
+}
+
+/** Every folder-tree mutation invalidates every open browse() level, not just
+ * the current one -- a rename/move/encrypt/delete can change what a
+ * completely different breadcrumb level should show (e.g. moving a folder
+ * changes both its old and new parent's listing). React Query's prefix
+ * matching means this one call covers all of them. */
+function invalidateBrowseTree(qc: ReturnType<typeof useQueryClient>) {
+	qc.invalidateQueries({ queryKey: ["directories", "browse"] });
+	qc.invalidateQueries({ queryKey: dirKeys.list });
+}
+
 export function useCreateDirectory() {
 	const qc = useQueryClient();
 	return useMutation({
@@ -16,18 +33,39 @@ export function useCreateDirectory() {
 			dirService.create(body),
 		onSuccess: () => {
 			toast.success("Folder created");
-			qc.invalidateQueries({ queryKey: dirKeys.list });
+			invalidateBrowseTree(qc);
 		},
 		onError: (err) =>
 			toast.error("Couldn't create folder", { description: errorMessage(err) }),
 	});
 }
 
-export function useDirMembers(dirId: number, enabled: boolean) {
-	return useQuery({
-		queryKey: dirKeys.members(dirId),
-		queryFn: () => dirService.members(dirId),
-		enabled,
+export function useUpdateDirectory() {
+	const qc = useQueryClient();
+	return useMutation({
+		mutationFn: (vars: {
+			dirId: number;
+			title?: string;
+			parent_directory_id?: number | null;
+		}) => dirService.update(vars.dirId, vars),
+		onSuccess: () => {
+			invalidateBrowseTree(qc);
+		},
+		onError: (err) =>
+			toast.error("Couldn't update folder", { description: errorMessage(err) }),
+	});
+}
+
+export function useEncryptDirectory() {
+	const qc = useQueryClient();
+	return useMutation({
+		mutationFn: (dirId: number) => dirService.encrypt(dirId),
+		onSuccess: () => {
+			toast.success("Folder encrypted");
+			invalidateBrowseTree(qc);
+		},
+		onError: (err) =>
+			toast.error("Couldn't encrypt folder", { description: errorMessage(err) }),
 	});
 }
 
@@ -37,25 +75,11 @@ export function useDeleteDirectory() {
 		mutationFn: (dirId: number) => dirService.remove(dirId),
 		onSuccess: () => {
 			toast.success("Folder deleted");
-			qc.invalidateQueries({ queryKey: dirKeys.list });
+			invalidateBrowseTree(qc);
 			qc.invalidateQueries({ queryKey: filesKeys.usage });
 		},
 		onError: (err) =>
 			toast.error("Couldn't delete folder", { description: errorMessage(err) }),
-	});
-}
-
-export function useRemoveMember(dirId: number) {
-	const qc = useQueryClient();
-	return useMutation({
-		mutationFn: (fileId: number) => dirService.removeMember(dirId, fileId),
-		onSuccess: () => {
-			toast.success("Removed from folder");
-			qc.invalidateQueries({ queryKey: dirKeys.members(dirId) });
-			qc.invalidateQueries({ queryKey: dirKeys.list });
-		},
-		onError: (err) =>
-			toast.error("Couldn't remove file", { description: errorMessage(err) }),
 	});
 }
 

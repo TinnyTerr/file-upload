@@ -31,7 +31,14 @@ import { useCreateDirectory } from "../hooks/useDirectories";
 import { createFolderKeyMaterial } from "../lib/folderKey";
 
 /** Create an empty folder (no upload required). */
-export function CreateFolderDialog({ trigger }: { trigger?: React.ReactNode }) {
+export function CreateFolderDialog({
+	trigger,
+	parentId = null,
+}: {
+	trigger?: React.ReactNode;
+	/** Folder to nest the new folder under; null creates at the root. */
+	parentId?: number | null;
+}) {
 	const { can } = useAuth();
 	const create = useCreateDirectory();
 	const [open, setOpen] = useState(false);
@@ -53,6 +60,7 @@ export function CreateFolderDialog({ trigger }: { trigger?: React.ReactNode }) {
 				title: finalTitle,
 				encryption_mode: mode,
 				key_check_blob: keyMaterial?.keyCheckBlob ?? null,
+				parent_directory_id: parentId,
 			});
 			setOpen(false);
 			setTitle("");

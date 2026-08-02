@@ -85,6 +85,7 @@ const TABLE_COLUMNS: Record<ReplicatedTable, string[]> = {
 		"owner_id",
 		"slug",
 		"title",
+		"parent_directory_id",
 		"encryption_mode",
 		"enc_key_blob",
 		"enc_access_blob",

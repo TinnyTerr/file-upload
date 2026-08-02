@@ -7,7 +7,7 @@ import { performUpload } from "@/features/files/lib/uploadCore";
 import type { EncryptionMode } from "@/features/files/types";
 import { dirKeys } from "./queryKeys";
 
-export function useAddFiles(dirId: number, mode: EncryptionMode) {
+export function useAddFiles(dirId: number | null, mode: EncryptionMode) {
 	const qc = useQueryClient();
 	const [busy, setBusy] = useState(false);
 
@@ -27,8 +27,9 @@ export function useAddFiles(dirId: number, mode: EncryptionMode) {
 				toast.success(
 					`Added ${files.length} file${files.length === 1 ? "" : "s"}`,
 				);
-				qc.invalidateQueries({ queryKey: dirKeys.members(dirId) });
 				qc.invalidateQueries({ queryKey: dirKeys.list });
+				qc.invalidateQueries({ queryKey: ["directories", "browse"] });
+				qc.invalidateQueries({ queryKey: filesKeys.list });
 				qc.invalidateQueries({ queryKey: filesKeys.usage });
 			} catch (err) {
 				toast.error("Couldn't add files", { description: errorMessage(err) });

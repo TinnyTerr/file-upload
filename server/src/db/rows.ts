@@ -109,6 +109,7 @@ export interface DirectoryRow {
 	owner_id: number;
 	slug: string;
 	title: string;
+	parent_directory_id: number | null;
 	encryption_mode: string;
 	enc_key_blob: Uint8Array | null;
 	enc_access_blob: Uint8Array | null;

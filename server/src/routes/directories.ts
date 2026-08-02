@@ -1,11 +1,21 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { closeSync, fstatSync, openSync, readSync, unlinkSync } from "node:fs";
+import {
+	closeSync,
+	fstatSync,
+	mkdirSync,
+	openSync,
+	readSync,
+	renameSync,
+	unlinkSync,
+} from "node:fs";
+import { join } from "node:path";
 import { ZipArchive } from "archiver";
 import type { Request, Response } from "express";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
 import { getMasterKey } from "../config.ts";
+import { encryptFile } from "../crypto/aead.ts";
 import { openBox, seal } from "../crypto/secretbox.ts";
 import {
 	type DirectoryLinkRow,
@@ -15,7 +25,7 @@ import {
 	nowIso,
 	type UserRow,
 } from "../db/rows.ts";
-import type { Db } from "../db/types.ts";
+import type { Db, SqlParams } from "../db/types.ts";
 import { HttpError } from "../httpError.ts";
 import { newSlug } from "../links.ts";
 import { getLogger } from "../logging.ts";
@@ -23,12 +33,13 @@ import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
 import { requireActiveUser, requireMaster } from "../middleware/deps.ts";
 import { ensurePermissions } from "../permissions.ts";
+import { serializeFiles } from "./files.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
 import { renderSpa } from "../spa.ts";
 import { usedStorageBytesForUser } from "../storage/accounting.ts";
-import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
-import { safeJoin, storageRoot } from "../storage/paths.ts";
+import { attachBlob, hashFile, releaseBlob, unlinkQueued } from "../storage/blobs.ts";
+import { newInternalRelPath, safeJoin, storageRoot } from "../storage/paths.ts";
 import { deleteThumbnail } from "../storage/thumbnail.ts";
 import { memberSource, safeArcname } from "../storage/zip.ts";
 
@@ -109,6 +120,207 @@ function directoryRole(db: Db, d: DirectoryRow, user: UserRow): string | null {
 	return collab ? collab.role : null;
 }
 
+export function getDirectory(db: Db, id: number | string): DirectoryRow | null {
+	return (
+		db.get<DirectoryRow>("SELECT * FROM directories WHERE id = $id", {
+			$id: id,
+		}) ?? null
+	);
+}
+
+/** Editor access on a folder is inherited down the tree from any ancestor --
+ * sharing a folder shares everything nested inside it, mirroring how a
+ * public folder link already exposes its whole (currently flat) subtree.
+ * Ownership/collaborator-management/deletion/encryption stay non-inherited
+ * (isEditor / explicit owner checks) since those are per-folder, not
+ * per-tree, decisions. */
+export function canAccessTree(db: Db, d: DirectoryRow, user: UserRow): boolean {
+	if (isEditor(db, d, user)) return true;
+	if (d.parent_directory_id === null) return false;
+	const parent = getDirectory(db, d.parent_directory_id);
+	return parent ? canAccessTree(db, parent, user) : false;
+}
+
+/** All descendant directory ids (not including `rootId` itself), BFS over
+ * parent_directory_id. Used by delete (recursive removal) and the move
+ * cycle-guard (a folder can never become its own descendant). */
+export function descendantIds(db: Db, rootId: number): number[] {
+	const out: number[] = [];
+	let frontier = [rootId];
+	while (frontier.length) {
+		const children = db.all<{ id: number }>(
+			`SELECT id FROM directories WHERE parent_directory_id IN (${frontier.map((_, i) => `$p${i}`).join(",")})`,
+			Object.fromEntries(frontier.map((id, i) => [`$p${i}`, id])),
+		);
+		if (!children.length) break;
+		const ids = children.map((c) => c.id);
+		out.push(...ids);
+		frontier = ids;
+	}
+	return out;
+}
+
+export function blobsEqual(a: Uint8Array | null, b: Uint8Array | null): boolean {
+	if (!a || !b || a.length !== b.length) return false;
+	return Buffer.from(a).equals(Buffer.from(b));
+}
+
+/** Whether `child` needs its own key to open, relative to the folder context
+ * (`parent`, or null for the top-level browse root) it's currently listed
+ * under. `child` is "none" -> never locked. Otherwise: a different
+ * encryption_mode entirely (including parent being unencrypted) is always
+ * locked; "server" mode compares the server-recoverable access-key blobs
+ * directly since the cascade copies those bytes verbatim down an encrypted
+ * subtree; "client" mode has no server-held key to compare so anything
+ * short of an exact key_check_blob match (never produced by anything today,
+ * since cascade only implements "server") reports locked. This is what
+ * turns a folder that already had its own independent encryption into
+ * visible-but-locked "nested encryption" once an ancestor gets encrypted
+ * around it. */
+export function isEncLocked(
+	child: Pick<
+		DirectoryRow,
+		"encryption_mode" | "enc_access_blob" | "key_check_blob"
+	>,
+	parent: Pick<
+		DirectoryRow,
+		"encryption_mode" | "enc_access_blob" | "key_check_blob"
+	> | null,
+): boolean {
+	if (child.encryption_mode === "none") return false;
+	if (!parent || child.encryption_mode !== parent.encryption_mode) return true;
+	if (child.encryption_mode === "server") {
+		return !blobsEqual(child.enc_access_blob, parent.enc_access_blob);
+	}
+	return (
+		!child.key_check_blob ||
+		!parent.key_check_blob ||
+		child.key_check_blob !== parent.key_check_blob
+	);
+}
+
+/** Re-encrypts one file's bytes in place with a folder key, whatever
+ * transform its bytes are currently under (plain, zstd-only, or already
+ * server-encrypted under a *different* key -- callers only ever invoke this
+ * for encryption_mode = 'none' rows, but memberSource handles any layout).
+ * Content-addressed dedup means the physical bytes are never touched in
+ * place: a fresh blob is attached under the new (encrypted) transform key
+ * and the file's old blob ref is released, exactly like a normal upload. */
+async function encryptFileInPlace(
+	state: AppState,
+	f: FileRow,
+	dirKey: Buffer,
+	encKeyBlob: Buffer,
+	encAccessBlob: Buffer,
+): Promise<void> {
+	const { db } = state;
+	const masterKey = getMasterKey(state.settings);
+	const [plainPath, isTemp] = await memberSource(masterKey, f);
+	try {
+		const plainHashes = await hashFile(plainPath);
+		const relPath = newInternalRelPath();
+		const finalPath = safeJoin(storageRoot(), relPath);
+		mkdirSync(join(finalPath, ".."), { recursive: true });
+		const workPath = `${finalPath}.fupl.work`;
+		await encryptFile(dirKey, plainPath, workPath);
+		renameSync(workPath, finalPath);
+		const storedHashes = await hashFile(finalPath);
+		const blob = attachBlob(db, {
+			finalPath,
+			relPath,
+			logicalSize: f.size_bytes,
+			contentType: f.content_type,
+			hashes: plainHashes,
+			storedHashes,
+			transformKey: "server:compressed=0",
+		});
+		const unlinkAfter = releaseBlob(db, f);
+		db.run(
+			`UPDATE files SET blob_id = $blobId, storage_path = $path, stored_size_bytes = $stored,
+       encryption_mode = 'server', enc_key_blob = $encKey, enc_access_blob = $encAccess,
+       compressed = 0, archived = 0, archive_codec = NULL,
+       archive_original_stored_size_bytes = 0, archive_saved_bytes = 0
+       WHERE id = $id`,
+			{
+				$blobId: blob.id,
+				$path: blob.storage_path,
+				$stored: blob.stored_size_bytes,
+				$encKey: encKeyBlob,
+				$encAccess: encAccessBlob,
+				$id: f.id,
+			},
+		);
+		unlinkQueued([unlinkAfter]);
+	} finally {
+		if (isTemp) {
+			try {
+				unlinkSync(plainPath);
+			} catch {
+				// best-effort; memberSource's own temp files are single-use scratch
+			}
+		}
+	}
+}
+
+/** The recursive half of cascade-encrypting a folder: walks every file and
+ * subfolder directly inside `dirId` that is still `encryption_mode = 'none'`
+ * and brings it under the same key. A subfolder that already carries its own
+ * independent encryption is left completely alone -- including its own
+ * descendants -- which is exactly what turns it into "nested encryption":
+ * still visible in this now-encrypted parent's listing, but requiring its
+ * own distinct key to open. */
+async function cascadeInto(
+	state: AppState,
+	dirId: number,
+	dirKey: Buffer,
+	encKeyBlob: Buffer,
+	encAccessBlob: Buffer,
+): Promise<void> {
+	const { db } = state;
+	const files = db.all<FileRow>(
+		"SELECT * FROM files WHERE directory_id = $id AND encryption_mode = 'none'",
+		{ $id: dirId },
+	);
+	for (const f of files) {
+		await encryptFileInPlace(state, f, dirKey, encKeyBlob, encAccessBlob);
+	}
+	const subdirs = db.all<DirectoryRow>(
+		"SELECT * FROM directories WHERE parent_directory_id = $id AND encryption_mode = 'none'",
+		{ $id: dirId },
+	);
+	for (const sub of subdirs) {
+		db.run(
+			"UPDATE directories SET encryption_mode = 'server', enc_key_blob = $k, enc_access_blob = $a WHERE id = $id",
+			{ $k: encKeyBlob, $a: encAccessBlob, $id: sub.id },
+		);
+		await cascadeInto(state, sub.id, dirKey, encKeyBlob, encAccessBlob);
+	}
+}
+
+/** Turns encryption on for a currently-unencrypted folder and cascades it to
+ * everything currently below it (see cascadeInto). Always "server" mode --
+ * transparent and server-managed, the same primitive files.ts already uses
+ * for per-file server-side encryption, just applied at the folder root and
+ * pushed downward. Returns the freshly minted access key. */
+export async function cascadeEncryptDirectory(
+	state: AppState,
+	dir: DirectoryRow,
+): Promise<string> {
+	const { db } = state;
+	const masterKey = getMasterKey(state.settings);
+	const dirKey = randomBytes(32);
+	const accessKey = randomBytes(18).toString("base64url");
+	const encKeyBlob = seal(masterKey, dirKey);
+	const encAccessBlob = seal(masterKey, Buffer.from(accessKey));
+	db.run(
+		`UPDATE directories SET encryption_mode = 'server', enc_key_blob = $k,
+     enc_access_blob = $a, key_check_blob = NULL WHERE id = $id`,
+		{ $k: encKeyBlob, $a: encAccessBlob, $id: dir.id },
+	);
+	await cascadeInto(state, dir.id, dirKey, encKeyBlob, encAccessBlob);
+	return accessKey;
+}
+
 /** Mirrors app/routes/directories.py::_resolve, but -- unlike the Python
  * reference, which only checks DirectoryLink.active and ignores its own
  * max_uses/expires_at fields even though the model defines them -- this also
@@ -177,6 +389,7 @@ function serializeDirectories(
 			owner_id: d.owner_id,
 			slug: d.slug,
 			title: d.title,
+			parent_directory_id: d.parent_directory_id,
 			url: dirUrl(req, d.slug),
 			encryption_mode: d.encryption_mode,
 			key_check_blob: d.key_check_blob,
@@ -242,6 +455,31 @@ function publicFiles(
 	for (const f of members) {
 		const link = latestByFile.get(f.id);
 		if (link) out.push({ file: f, link });
+	}
+	return out;
+}
+
+/** Immediate subfolders paired with their own most-recent active
+ * directory_link, for nested public browsing -- clicking a subfolder in a
+ * share view is just a normal navigation to /d/{child-slug}, which resolves
+ * (and gates encryption) exactly like any other folder link, including one
+ * that's independently ("nested") encrypted under a different key than its
+ * parent. A subfolder with no active link is unreachable and omitted. */
+function publicSubdirectories(
+	db: Db,
+	dirId: number,
+): Array<{ dir: DirectoryRow; link: DirectoryLinkRow }> {
+	const subdirs = db.all<DirectoryRow>(
+		"SELECT * FROM directories WHERE parent_directory_id = $id ORDER BY title COLLATE NOCASE ASC",
+		{ $id: dirId },
+	);
+	const out: Array<{ dir: DirectoryRow; link: DirectoryLinkRow }> = [];
+	for (const sub of subdirs) {
+		const link = db.get<DirectoryLinkRow>(
+			"SELECT * FROM directory_links WHERE directory_id = $id AND active = 1 ORDER BY created_at DESC LIMIT 1",
+			{ $id: sub.id },
+		);
+		if (link) out.push({ dir: sub, link });
 	}
 	return out;
 }
@@ -401,7 +639,7 @@ export function directoriesRouter(state: AppState): Router {
 		(req, res) => {
 			const user = req.currentUser!;
 			const body = req.body ?? {};
-			const encryptionMode = body.encryption_mode || "none";
+			let encryptionMode = body.encryption_mode || "none";
 			if (!["none", "server", "client"].includes(encryptionMode)) {
 				res.status(400).json({ detail: "invalid encryption_mode" });
 				return;
@@ -413,7 +651,28 @@ export function directoriesRouter(state: AppState): Router {
 				res.status(403).json({ detail: "directory creation not permitted" });
 				return;
 			}
-			if (encryptionMode === "client") {
+
+			let parent: DirectoryRow | null = null;
+			if (body.parent_directory_id !== undefined && body.parent_directory_id !== null) {
+				parent = getDirectory(db, body.parent_directory_id);
+				if (!parent) {
+					res.status(404).json({ detail: "parent folder not found" });
+					return;
+				}
+				if (!canAccessTree(db, parent, user)) {
+					res.status(403).json({ detail: "not your directory" });
+					return;
+				}
+			}
+
+			// A subfolder created inside an encrypted parent always inherits that
+			// parent's current key -- same forced-inheritance rule files.ts already
+			// applies to uploads landing in an encrypted directory, extended one
+			// level so "encrypt a folder" keeps cascading to everything placed
+			// under it afterwards, not just what already existed at cascade time.
+			if (parent && parent.encryption_mode !== "none") {
+				encryptionMode = parent.encryption_mode;
+			} else if (encryptionMode === "client") {
 				if (!perm.can_upload_client_encrypted) {
 					res
 						.status(403)
@@ -437,30 +696,40 @@ export function directoriesRouter(state: AppState): Router {
 
 			let encKeyBlob: Buffer | null = null;
 			let encAccessBlob: Buffer | null = null;
+			let keyCheckBlob: string | null = null;
 			let accessKey: string | null = null;
-			if (encryptionMode === "server") {
+			if (parent && parent.encryption_mode !== "none") {
+				encKeyBlob = parent.enc_key_blob ? Buffer.from(parent.enc_key_blob) : null;
+				encAccessBlob = parent.enc_access_blob
+					? Buffer.from(parent.enc_access_blob)
+					: null;
+				keyCheckBlob = parent.key_check_blob;
+				accessKey = recoverDirAccessKey(state, parent);
+			} else if (encryptionMode === "server") {
 				const masterKey = getMasterKey(state.settings);
 				const dirKey = randomBytes(32);
 				accessKey = randomBytes(18).toString("base64url");
 				encKeyBlob = seal(masterKey, dirKey);
 				encAccessBlob = seal(masterKey, Buffer.from(accessKey));
+			} else if (encryptionMode === "client") {
+				keyCheckBlob = body.key_check_blob ?? null;
 			}
 
 			const slug = newSlug();
 			db.run(
 				`INSERT INTO directories (
-         owner_id, slug, title, encryption_mode, enc_key_blob, enc_access_blob,
-         key_check_blob, expires_at, created_at
-       ) VALUES ($ownerId, $slug, $title, $enc, $encKey, $encAccess, $keyCheck, $expiresAt, $now)`,
+         owner_id, slug, title, parent_directory_id, encryption_mode, enc_key_blob,
+         enc_access_blob, key_check_blob, expires_at, created_at
+       ) VALUES ($ownerId, $slug, $title, $parentId, $enc, $encKey, $encAccess, $keyCheck, $expiresAt, $now)`,
 				{
 					$ownerId: user.id,
 					$slug: slug,
 					$title: title,
+					$parentId: parent ? parent.id : null,
 					$enc: encryptionMode,
 					$encKey: encKeyBlob,
 					$encAccess: encAccessBlob,
-					$keyCheck:
-						encryptionMode === "client" ? (body.key_check_blob ?? null) : null,
+					$keyCheck: keyCheckBlob,
 					$expiresAt: expires.value,
 					$now: nowIso(),
 				},
@@ -515,6 +784,220 @@ export function directoriesRouter(state: AppState): Router {
 		);
 		res.json({ directories: serializeDirectories(state, req, dirs, user) });
 	});
+
+	/** Mega.nz-style nested browsing: one call returns the folders and files
+	 * that live directly inside `parent_id` (root when omitted), plus a
+	 * breadcrumb trail back to the root and a `locked` flag per subfolder (see
+	 * isEncLocked) so the client can render a lock badge without a second
+	 * round trip. Files never carry a `locked` flag of their own here because
+	 * they're always forced onto their *immediate* directory's key at upload
+	 * time (prepareUpload in files.ts) -- the only way one drifts out of sync
+	 * is a move, which is metadata-only and deliberately never re-keys. */
+	router.get("/directories/browse", requireActiveUser(state), (req, res) => {
+		const user = req.currentUser!;
+		const raw = req.query.parent_id;
+		let folder: DirectoryRow | null = null;
+		if (raw !== undefined && raw !== "" && raw !== "null") {
+			const parentId = Number(raw);
+			if (!Number.isInteger(parentId) || parentId <= 0) {
+				res.status(400).json({ detail: "invalid parent_id" });
+				return;
+			}
+			folder = getDirectory(db, parentId);
+			if (!folder) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			if (!canAccessTree(db, folder, user)) {
+				res.status(403).json({ detail: "not your directory" });
+				return;
+			}
+		}
+
+		const breadcrumb: Array<{ id: number; title: string }> = [];
+		for (let cursor = folder; cursor; ) {
+			breadcrumb.unshift({ id: cursor.id, title: cursor.title });
+			cursor = cursor.parent_directory_id
+				? getDirectory(db, cursor.parent_directory_id)
+				: null;
+		}
+
+		const subdirs = folder
+			? db.all<DirectoryRow>(
+					"SELECT * FROM directories WHERE parent_directory_id = $id ORDER BY title COLLATE NOCASE ASC",
+					{ $id: folder.id },
+				)
+			: (() => {
+					const owned = db.all<DirectoryRow>(
+						"SELECT * FROM directories WHERE parent_directory_id IS NULL AND owner_id = $id",
+						{ $id: user.id },
+					);
+					const collaborated = db.all<DirectoryRow>(
+						`SELECT d.* FROM directories d
+             JOIN directory_collaborators dc ON dc.directory_id = d.id
+             WHERE d.parent_directory_id IS NULL AND dc.user_id = $id`,
+						{ $id: user.id },
+					);
+					const byId = new Map<number, DirectoryRow>();
+					for (const d of owned) byId.set(d.id, d);
+					for (const d of collaborated) if (!byId.has(d.id)) byId.set(d.id, d);
+					return [...byId.values()].sort((a, b) =>
+						a.title.localeCompare(b.title),
+					);
+				})();
+
+		const files = db.all<FileRow>(
+			folder
+				? "SELECT * FROM files WHERE directory_id = $id ORDER BY original_filename COLLATE NOCASE ASC"
+				: "SELECT * FROM files WHERE directory_id IS NULL AND owner_id = $id ORDER BY original_filename COLLATE NOCASE ASC",
+			{ $id: folder ? folder.id : user.id },
+		);
+
+		res.json({
+			folder: folder
+				? { ...serializeDirectories(state, req, [folder], user)[0] }
+				: null,
+			breadcrumb,
+			folders: serializeDirectories(state, req, subdirs, user).map(
+				(sd, i) => ({
+					...sd,
+					locked: isEncLocked(subdirs[i]!, folder),
+				}),
+			),
+			files: serializeFiles(state, req, files).map((sf, i) => ({
+				...sf,
+				directory_id: files[i]!.directory_id,
+				locked:
+					files[i]!.encryption_mode === "server" && folder
+						? !blobsEqual(files[i]!.enc_access_blob, folder.enc_access_blob)
+						: files[i]!.encryption_mode !== "none" && !folder,
+			})),
+		});
+	});
+
+	router.patch(
+		"/directories/:dirId(\\d+)",
+		requireSession(state),
+		requireCsrf,
+		requireActiveUser(state),
+		(req, res) => {
+			const user = req.currentUser!;
+			const d = getDirectory(db, req.params.dirId!);
+			if (!d) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			if (!canAccessTree(db, d, user)) {
+				res.status(403).json({ detail: "not your directory" });
+				return;
+			}
+			const body = req.body ?? {};
+			const updates: string[] = [];
+			const params: SqlParams = { $id: d.id };
+
+			if (body.title !== undefined) {
+				const title = String(body.title).trim().slice(0, 512);
+				if (!title) {
+					res.status(400).json({ detail: "title cannot be empty" });
+					return;
+				}
+				updates.push("title = $title");
+				params.$title = title;
+			}
+
+			if (body.parent_directory_id !== undefined) {
+				const newParentId: number | null =
+					body.parent_directory_id === null ? null : Number(body.parent_directory_id);
+				if (newParentId !== null) {
+					if (!Number.isInteger(newParentId)) {
+						res.status(400).json({ detail: "invalid parent_directory_id" });
+						return;
+					}
+					if (newParentId === d.id) {
+						res.status(400).json({ detail: "a folder cannot contain itself" });
+						return;
+					}
+					const newParent = getDirectory(db, newParentId);
+					if (!newParent) {
+						res.status(404).json({ detail: "destination folder not found" });
+						return;
+					}
+					if (!canAccessTree(db, newParent, user)) {
+						res.status(403).json({ detail: "not your destination folder" });
+						return;
+					}
+					if (descendantIds(db, d.id).includes(newParentId)) {
+						res
+							.status(400)
+							.json({ detail: "cannot move a folder into its own subfolder" });
+						return;
+					}
+				}
+				updates.push("parent_directory_id = $parentId");
+				params.$parentId = newParentId;
+			}
+
+			if (updates.length === 0) {
+				res.status(400).json({ detail: "nothing to update" });
+				return;
+			}
+			db.run(
+				`UPDATE directories SET ${updates.join(", ")} WHERE id = $id`,
+				params,
+			);
+			recordAudit(db, {
+				actor: user.username,
+				action: "directory.updated",
+				target: `directory:${d.id}`,
+				ip: clientIp(state, req),
+			});
+			const updated = getDirectory(db, d.id)!;
+			res.json(serializeDirectories(state, req, [updated], user)[0]);
+		},
+	);
+
+	/** Owner/master only -- see cascadeEncryptDirectory. Rejects a folder that
+	 * is already encrypted rather than re-keying it; re-encrypting under a new
+	 * key is a distinct, harder operation (every already-encrypted descendant
+	 * would need re-keying too, not just the plaintext ones) that's out of
+	 * scope for a one-shot "turn encryption on" action. */
+	router.post(
+		"/directories/:dirId(\\d+)/encrypt",
+		requireSession(state),
+		requireCsrf,
+		requireActiveUser(state),
+		asyncHandler(async (req, res) => {
+			const user = req.currentUser!;
+			const d = getDirectory(db, req.params.dirId!);
+			if (!d) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			if (user.role !== "master" && d.owner_id !== user.id) {
+				res.status(403).json({ detail: "not your directory" });
+				return;
+			}
+			if (d.encryption_mode !== "none") {
+				res.status(409).json({ detail: "folder is already encrypted" });
+				return;
+			}
+			const accessKey = await cascadeEncryptDirectory(state, d);
+			recordAudit(db, {
+				actor: user.username,
+				action: "directory.encrypted",
+				target: `directory:${d.id}`,
+				ip: clientIp(state, req),
+			});
+			log.info(`directory cascade-encrypted directory_id=${d.id} owner_id=${user.id}`);
+			const updated = getDirectory(db, d.id)!;
+			res.json({
+				id: updated.id,
+				encryption_mode: updated.encryption_mode,
+				access_key: accessKey,
+				url: dirUrl(req, updated.slug),
+			});
+		}),
+	);
 
 	router.get(
 		"/directories/:dirId(\\d+)/files",
@@ -745,28 +1228,36 @@ export function directoriesRouter(state: AppState): Router {
 				return;
 			}
 
-			const members = db.all<FileRow>(
-				"SELECT * FROM files WHERE directory_id = $id",
-				{ $id: d.id },
-			);
+			// Deepest-first so a subfolder's own files/links/collaborators are
+			// gone before its row (and its parent's) is removed.
+			const treeIds = [...descendantIds(db, d.id).reverse(), d.id];
 			const unlinkAfterCommit: Array<string | null> = [];
-			for (const f of members) {
-				db.run("DELETE FROM links WHERE file_id = $id", { $id: f.id });
-				unlinkAfterCommit.push(releaseBlob(db, f));
-				db.run("DELETE FROM files WHERE id = $id", { $id: f.id });
-				deleteThumbnail(f.id);
+			let filesRemoved = 0;
+			for (const dirId of treeIds) {
+				const members = db.all<FileRow>(
+					"SELECT * FROM files WHERE directory_id = $id",
+					{ $id: dirId },
+				);
+				for (const f of members) {
+					db.run("DELETE FROM links WHERE file_id = $id", { $id: f.id });
+					unlinkAfterCommit.push(releaseBlob(db, f));
+					db.run("DELETE FROM files WHERE id = $id", { $id: f.id });
+					deleteThumbnail(f.id);
+				}
+				filesRemoved += members.length;
+				db.run(
+					"DELETE FROM dropbox_upload_links WHERE target_directory_id = $id",
+					{ $id: dirId },
+				);
+				db.run(
+					"DELETE FROM directory_collaborators WHERE directory_id = $id",
+					{ $id: dirId },
+				);
+				db.run("DELETE FROM directory_links WHERE directory_id = $id", {
+					$id: dirId,
+				});
+				db.run("DELETE FROM directories WHERE id = $id", { $id: dirId });
 			}
-			db.run(
-				"DELETE FROM dropbox_upload_links WHERE target_directory_id = $id",
-				{ $id: d.id },
-			);
-			db.run("DELETE FROM directory_collaborators WHERE directory_id = $id", {
-				$id: d.id,
-			});
-			db.run("DELETE FROM directory_links WHERE directory_id = $id", {
-				$id: d.id,
-			});
-			db.run("DELETE FROM directories WHERE id = $id", { $id: d.id });
 			recordAudit(db, {
 				actor: user.username,
 				action: "directory.deleted",
@@ -774,7 +1265,7 @@ export function directoriesRouter(state: AppState): Router {
 				ip: clientIp(state, req),
 			});
 			unlinkQueued(unlinkAfterCommit);
-			res.json({ status: "deleted", files_removed: members.length });
+			res.json({ status: "deleted", files_removed: filesRemoved });
 		},
 	);
 
@@ -1017,6 +1508,7 @@ export function publicDirectoriesRouter(state: AppState): Router {
 		}
 		const { directory: d, link } = resolved;
 		const pairs = publicFiles(db, d.id);
+		const subdirs = publicSubdirectories(db, d.id);
 
 		let uploader: {
 			username: string;
@@ -1061,6 +1553,12 @@ export function publicDirectoriesRouter(state: AppState): Router {
 				filename: file.original_filename,
 				size_bytes: file.size_bytes,
 				content_type: file.content_type,
+			})),
+			folders: subdirs.map(({ dir: sub, link: sublink }) => ({
+				slug: sublink.slug,
+				title: sub.title,
+				encryption_mode: sub.encryption_mode,
+				locked: isEncLocked(sub, d),
 			})),
 		});
 	});

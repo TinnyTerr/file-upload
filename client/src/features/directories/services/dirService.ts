@@ -1,10 +1,10 @@
 import { api } from "@/config/api";
 import type { EncryptionMode } from "@/features/files/types";
 import type {
+	BrowseResult,
 	CreateDirectoryResult,
 	Directory,
 	DirectoryLink,
-	DirectoryMember,
 } from "../types";
 
 export const dirService = {
@@ -13,20 +13,31 @@ export const dirService = {
 			.get<{ directories: Directory[] }>("/directories/")
 			.then((r) => r.directories),
 
+	browse: (parentId: number | null) =>
+		api.get<BrowseResult>("/directories/browse", {
+			query: { parent_id: parentId ?? undefined },
+		}),
+
 	create: (body: {
 		title: string;
 		encryption_mode: EncryptionMode;
 		expires_in_seconds?: number | null;
 		key_check_blob?: string | null;
+		parent_directory_id?: number | null;
 	}) => api.post<CreateDirectoryResult>("/directories", { json: body }),
 
-	members: (dirId: number) =>
-		api
-			.get<{ files: DirectoryMember[] }>(`/directories/${dirId}/files`)
-			.then((r) => r.files),
+	update: (
+		dirId: number,
+		body: { title?: string; parent_directory_id?: number | null },
+	) => api.patch<Directory>(`/directories/${dirId}`, { json: body }),
 
-	removeMember: (dirId: number, fileId: number) =>
-		api.delete(`/directories/${dirId}/files/${fileId}`),
+	encrypt: (dirId: number) =>
+		api.post<{
+			id: number;
+			encryption_mode: EncryptionMode;
+			access_key: string | null;
+			url: string;
+		}>(`/directories/${dirId}/encrypt`),
 
 	addCollaborator: (dirId: number, username: string) =>
 		api.post(`/directories/${dirId}/collaborators`, { json: { username } }),

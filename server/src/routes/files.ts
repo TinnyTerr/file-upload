@@ -29,6 +29,7 @@ import {
 	type PermissionRow,
 	type UserRow,
 } from "../db/rows.ts";
+import type { SqlParams } from "../db/types.ts";
 import { HttpError } from "../httpError.ts";
 import { consumeUse, newSlug, resolveActiveLink } from "../links.ts";
 import { getLogger } from "../logging.ts";
@@ -80,6 +81,7 @@ interface SumRow {
 interface DirRow {
 	id: number;
 	owner_id: number;
+	parent_directory_id: number | null;
 	encryption_mode: string;
 	enc_key_blob: Uint8Array | null;
 	enc_access_blob: Uint8Array | null;
@@ -101,22 +103,36 @@ export function usedBytes(state: AppState, userId: number): number {
 	);
 }
 
-/** Exported for reuse by dropbox.ts. */
+function isDirectEditor(state: AppState, dir: DirRow, user: UserRow): boolean {
+	if (user.role === "master" || dir.owner_id === user.id) return true;
+	return !!state.db.get<CollabRow>(
+		"SELECT id FROM directory_collaborators WHERE directory_id = $dir AND user_id = $user AND role = 'editor'",
+		{ $dir: dir.id, $user: user.id },
+	);
+}
+
+/** Exported for reuse by dropbox.ts. Editor access inherits down the folder
+ * tree from any ancestor -- mirrors canAccessTree in routes/directories.ts,
+ * so a collaborator added on a top-level folder can also upload into (and,
+ * via the new move endpoints, rename/relocate within) its subfolders without
+ * being re-added on each one individually. */
 export function canEditDirectory(
 	state: AppState,
 	directoryId: number,
 	user: UserRow,
 ): boolean {
 	const { db } = state;
-	const dir = db.get<DirRow>("SELECT * FROM directories WHERE id = $id", {
+	let dir = db.get<DirRow>("SELECT * FROM directories WHERE id = $id", {
 		$id: directoryId,
 	});
-	if (!dir) return false;
-	if (user.role === "master" || dir.owner_id === user.id) return true;
-	return !!db.get<CollabRow>(
-		"SELECT id FROM directory_collaborators WHERE directory_id = $dir AND user_id = $user AND role = 'editor'",
-		{ $dir: directoryId, $user: user.id },
-	);
+	while (dir) {
+		if (isDirectEditor(state, dir, user)) return true;
+		if (dir.parent_directory_id === null) return false;
+		dir = db.get<DirRow>("SELECT * FROM directories WHERE id = $id", {
+			$id: dir.parent_directory_id,
+		});
+	}
+	return false;
 }
 
 function fileUrl(req: Request, slug: string): string {
@@ -695,7 +711,11 @@ export function sweepStaleParts(): void {
 	});
 }
 
-function serializeFiles(
+/** Exported for reuse by routes/directories.ts's nested browse endpoint, so
+ * files listed there carry the exact same shape (including `links` and the
+ * recovered `access_key`) as GET /files/ -- one FileObject type on the
+ * client covers both. */
+export function serializeFiles(
 	state: AppState,
 	req: Request,
 	files: FileRow[],
@@ -1553,6 +1573,102 @@ export function filesRouter(state: AppState): Router {
 			});
 			unlinkQueued(unlinkAfterCommit);
 			res.json({ status: "deleted" });
+		},
+	);
+
+	/** Rename and/or move a file between folders (or to/from the root). Never
+	 * touches encryption -- a file moved into a folder with a different key
+	 * (or out of an encrypted folder entirely) simply keeps whatever key it
+	 * already had, which is what lets it show up "locked" (needing its own
+	 * key) in its new location instead of silently becoming unreadable or
+	 * getting transparently re-keyed. */
+	router.patch(
+		"/:fileId(\\d+)",
+		requireSession(state),
+		requireCsrf,
+		requireActiveUser(state),
+		(req, res) => {
+			const user = req.currentUser!;
+			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: req.params.fileId,
+			});
+			if (!fileObj) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			const canEditCurrent =
+				user.role === "master" ||
+				fileObj.owner_id === user.id ||
+				(fileObj.directory_id !== null &&
+					canEditDirectory(state, fileObj.directory_id, user));
+			if (!canEditCurrent) {
+				res.status(403).json({ detail: "not your file" });
+				return;
+			}
+
+			const body = req.body ?? {};
+			const updates: string[] = [];
+			const params: SqlParams = { $id: fileObj.id };
+
+			if (body.original_filename !== undefined) {
+				const name = String(body.original_filename).trim().slice(0, 1024);
+				if (!name) {
+					res.status(400).json({ detail: "filename cannot be empty" });
+					return;
+				}
+				updates.push("original_filename = $name");
+				params.$name = name;
+			}
+
+			let newDirectoryId: number | null | undefined;
+			if (body.directory_id !== undefined) {
+				newDirectoryId = body.directory_id === null ? null : Number(body.directory_id);
+				if (newDirectoryId !== null) {
+					if (!Number.isInteger(newDirectoryId)) {
+						res.status(400).json({ detail: "invalid directory_id" });
+						return;
+					}
+					if (!canEditDirectory(state, newDirectoryId, user)) {
+						res.status(403).json({ detail: "not your destination folder" });
+						return;
+					}
+				}
+				updates.push("directory_id = $dirId");
+				params.$dirId = newDirectoryId;
+			}
+
+			if (updates.length === 0) {
+				res.status(400).json({ detail: "nothing to update" });
+				return;
+			}
+
+			db.run(`UPDATE files SET ${updates.join(", ")} WHERE id = $id`, params);
+
+			if (newDirectoryId !== undefined && newDirectoryId !== fileObj.directory_id) {
+				if (fileObj.directory_id !== null) {
+					db.run(
+						"UPDATE directories SET total_bytes = MAX(0, COALESCE(total_bytes, 0) - $dec) WHERE id = $id",
+						{ $dec: fileObj.size_bytes ?? 0, $id: fileObj.directory_id },
+					);
+				}
+				if (newDirectoryId !== null) {
+					db.run(
+						"UPDATE directories SET total_bytes = COALESCE(total_bytes, 0) + $inc WHERE id = $id",
+						{ $inc: fileObj.size_bytes ?? 0, $id: newDirectoryId },
+					);
+				}
+			}
+
+			recordAudit(db, {
+				actor: user.username,
+				action: "file.updated",
+				target: `file:${fileObj.id}`,
+				ip: clientIp(state, req),
+			});
+			const updated = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: fileObj.id,
+			})!;
+			res.json(serializeFiles(state, req, [updated])[0]);
 		},
 	);
 

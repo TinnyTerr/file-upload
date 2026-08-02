@@ -9,12 +9,26 @@ export interface PublicDirMember {
 	content_type: string | null;
 }
 
+/** An immediate subfolder, linking to its own public /d/{slug} page. Clicking
+ * one is a normal navigation -- that page resolves (and gates encryption)
+ * independently, which is what makes a "nested encrypted" subfolder (one
+ * with its own key, different from this folder's) work automatically: the
+ * link is visible here, but opening it requires whatever `?ek=`/`#ek=` that
+ * subfolder's own share link carries, not this folder's. */
+export interface PublicSubfolder {
+	slug: string;
+	title: string;
+	encryption_mode: EncryptionMode;
+	locked: boolean;
+}
+
 export interface PublicDirInfo {
 	title: string;
 	encryption_mode: EncryptionMode;
 	file_count: number;
 	total_bytes: number;
 	files: PublicDirMember[];
+	folders: PublicSubfolder[];
 	uploader: UploaderInfo | null;
 	already_saved: boolean;
 }

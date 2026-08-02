@@ -104,6 +104,14 @@ export function createSqliteDb(path: string): Db {
 		"can_watch_media INTEGER NOT NULL DEFAULT 0",
 	);
 	// Media library publication -- folders that predate it are unpublished.
+	// Mega.nz-style folder nesting -- existing directories predate it and are
+	// all root-level (NULL parent).
+	ensureColumn(
+		sqlite,
+		"directories",
+		"parent_directory_id",
+		"parent_directory_id INTEGER REFERENCES directories(id)",
+	);
 	ensureColumn(
 		sqlite,
 		"directories",
