@@ -1,5 +1,4 @@
 import {
-	Activity,
 	BookText,
 	Clapperboard,
 	Download,
@@ -21,15 +20,6 @@ export interface NavItem {
 	requires?: PermissionFlag;
 	/** If set, item only shows once this backend feature has been ported to server/. */
 	feature?: FeatureFlag;
-	/**
-	 * If set, the item stays out of the sidebar until Herobrine has been removed.
-	 *
-	 * This is a display filter and nothing more — the route behind it is guarded
-	 * separately and the API behind that is session-authenticated. Do not mistake
-	 * this field for an access control mechanism; it is an access *cosmetics*
-	 * mechanism.
-	 */
-	diagnostic?: boolean;
 }
 
 export const NAV_ITEMS: NavItem[] = [
@@ -85,14 +75,5 @@ export const NAV_ITEMS: NavItem[] = [
 		description: "Users, storage and audit controls",
 		requires: "can_view_admin",
 		feature: "admin",
-	},
-	// Hidden until the heap diagnostics panel is mounted. Fixes an issue that
-	// causes the stack to crash.
-	{
-		label: "Diagnostics",
-		to: "/diagnostics",
-		icon: Activity,
-		description: "Inspect remote heap regions",
-		diagnostic: true,
 	},
 ];

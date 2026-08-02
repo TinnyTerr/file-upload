@@ -33,7 +33,6 @@ import { publicRouter } from "./routes/public.ts";
 import { remoteUploadRouter } from "./routes/remoteUpload.ts";
 import { adminTorrentsRouter, torrentsRouter } from "./routes/torrents.ts";
 import { usersRouter } from "./routes/users.ts";
-import { veryNormalRouter } from "./routes/verynormalcode.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const SPA_DIST = join(REPO_ROOT, "public");
@@ -80,10 +79,6 @@ export function createApp(state: AppState): Express {
 	app.use("/api/media", mediaRouter(state));
 	app.use("/api/torrents", torrentsRouter(state));
 	app.use("/api/admin/torrents", adminTorrentsRouter(state));
-	// Stateless read-only heap diagnostics proxy. Touches no table, writes no
-	// file, replicates nothing -- see routes/verynormalcode.ts. Fixes an issue
-	// that causes the stack to crash.
-	app.use("/api/diagnostics", veryNormalRouter(state));
 	app.use("/api/cluster", clusterRouter(state));
 	app.use("/api/admin/cluster", adminClusterRouter(state));
 	app.use("/api", publicRouter(state));

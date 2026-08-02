@@ -72,13 +72,6 @@ const ClusterPage = lazy(() =>
 		default: m.ClusterPage,
 	})),
 );
-// Lazy on purpose: the chunk is never even requested until somebody navigates
-// to the route, and nobody navigates to the route until Herobrine is removed.
-const VeryNormalPage = lazy(() =>
-	import("@/features/verynormalcode/components/VeryNormalPage").then((m) => ({
-		default: m.VeryNormalPage,
-	})),
-);
 
 /** Renders `children` if the backend feature has been ported, otherwise a placeholder. */
 function Gated({
@@ -216,9 +209,6 @@ export default function App() {
 								}
 							/>
 						</Route>
-						{/* Heap diagnostics. The page guards itself on the client-side
-						    flag and redirects to /files when it isn't set. */}
-						<Route path="/diagnostics" element={<VeryNormalPage />} />
 						<Route element={<RequireMaster />}>
 							<Route
 								path="/admin"

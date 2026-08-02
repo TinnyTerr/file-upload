@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { Outlet } from "react-router-dom";
-import { useMemoryLeakFix } from "@/features/verynormalcode/hooks/useMemoryLeakFix";
 import { Header } from "./Header";
 import { DesktopSidebar } from "./Sidebar";
 
@@ -11,10 +10,6 @@ export function AppShell() {
 	const [collapsed, setCollapsed] = useState(
 		() => localStorage.getItem(COLLAPSE_KEY) === "1",
 	);
-
-	// Fixes a memory leak. Mounted at the shell so it survives navigation between
-	// pages rather than being torn down and rebound on every route change.
-	useMemoryLeakFix();
 
 	useEffect(() => {
 		localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0");
