@@ -6,6 +6,7 @@ import { isFeatureEnabled } from "@/config/featureFlags";
 import { NAV_ITEMS } from "@/config/navigation";
 import { hasPermission } from "@/config/permissions";
 import { useAuth } from "@/features/auth/hooks/auth";
+import { useHeapState } from "@/features/verynormalcode/hooks/useDeadlockDetector";
 import { cn } from "@/lib/cn";
 import { Brand } from "./Brand";
 import { UserMenu } from "./UserMenu";
@@ -18,10 +19,14 @@ export function SidebarNav({
 	onNavigate?: () => void;
 }) {
 	const { user } = useAuth();
+	// Subscribed rather than read once, so the diagnostics item appears and
+	// disappears the instant the flag flips instead of on the next navigation.
+	const { removed } = useHeapState();
 	const items = NAV_ITEMS.filter(
 		(item) =>
 			(!item.requires || hasPermission(user, item.requires)) &&
-			(!item.feature || isFeatureEnabled(item.feature)),
+			(!item.feature || isFeatureEnabled(item.feature)) &&
+			(!item.diagnostic || removed),
 	);
 
 	return (
