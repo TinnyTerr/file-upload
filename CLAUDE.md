@@ -117,6 +117,8 @@ server/src/
   links.ts                 # Slug minting + atomic single-UPDATE link use consumption
   audit.ts                 # Hash-chained audit log (recordAudit / verifyAuditChain)
   logging.ts               # pino + in-memory ring buffer backing GET /api/admin/backend/logs
+  outbound.ts              # fetchLogged/beginOutbound — one log line per request leaving
+                           #   this process, with the URL redacted first
   httpError.ts             # HttpError — thrown anywhere, rendered as {detail} by app.ts
   ws.ts                    # Websocket firehose, attached to the raw http.Server
   db/
@@ -520,6 +522,7 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - **A debrid retry decides re-import vs. re-download by the `data/debrid/_sources/<tag>.complete` marker**, not by "the staging directory has files in it". A transfer aborted halfway also leaves files there, and importing those would silently store truncated content. The marker is written only after the last byte of the last link lands (`debrid.ts::markTransferComplete`), and lives outside the job directory so the importer never sees it as content.
 - **Real-Debrid file paths are attacker-controlled** (they come out of the torrent): `debrid.ts` runs every one through `sanitizeSegment` + `safeJoin` before creating anything.
 - **Don't add unbounded in-memory maps without a sweep.** Several registries (halt, login challenges, second-factor tickets, ws-token rate limiter) are process-local Maps that must prune expired entries or they grow forever.
+- **Outbound HTTP goes through `outbound.ts`, not a bare `fetch`.** `fetchLogged` (or `beginOutbound` where the transport isn't `fetch`, as in `remoteUpload.ts`) is what puts a request leaving this process in the same log buffer as inbound traffic. Healthy calls log at DEBUG so the 1s firehose poll and the 5s torrent poll don't flood the console, but the ring buffer keeps DEBUG regardless — so the admin log view sees them all. It also redacts the URL, which matters because unrestrict links, cluster blob URLs, `?ek=` and `?k=` all carry credentials and the buffer is admin-readable.
 - **`safeJoin()` every path built from user or DB input** before touching the filesystem.
 - **Never read a row's own `enc_key_blob`/`enc_access_blob`/`encryption_mode` on a read path** — an inheriting row's are NULL and its mode is only a mirror. Go through `crypto/effectiveEncryption.ts`. A missed path fails loudly ("encryption key not stored") rather than silently using a stale key, which is the point.
 - **Only a caller that actually holds a folder's end-to-end key may upload into it.** `finalizeStoredFile` refuses a `client`/`sealed` destination unless the caller passes `clientCiphertext: true`, which only the two browser/API upload routes do. `encryptionMode: "client"` is *not* that claim — every server-side path copies its directory's mode into that field, so trusting it would let a dropbox link file an anonymous uploader's plaintext under a mode that promises ciphertext.

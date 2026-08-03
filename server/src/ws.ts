@@ -1,10 +1,12 @@
 import { timingSafeEqual } from "node:crypto";
 import type { Server as HttpServer, IncomingMessage } from "node:http";
+import type { Request } from "express";
 import { type WebSocket, WebSocketServer } from "ws";
 import type { AppState } from "./appState.ts";
 import type { ClusterEvent, EventPredicate } from "./cluster/eventBus.ts";
 import type { UserRow } from "./db/rows.ts";
 import { getLogger } from "./logging.ts";
+import { clientIp } from "./middleware/auth.ts";
 import { COOKIE_NAME } from "./security/sessions.ts";
 
 /** Realtime event firehose. Mirrors app/routes/ws.py, adapted from FastAPI's
@@ -25,6 +27,47 @@ import { COOKIE_NAME } from "./security/sessions.ts";
  *    pushes real-time login-state transitions during a login attempt. */
 
 const log = getLogger("app.ws");
+
+/** The upgrade handler gets a raw `IncomingMessage`, not an Express `Request`,
+ * so `clientIp` can't be called directly. The shim gives it the two things it
+ * touches -- `header()` and `socket` -- rather than duplicating the
+ * proxy-header trust rules here, where they would drift. */
+function peerIp(state: AppState, req: IncomingMessage): string {
+	const shim = {
+		header(name: string): string | undefined {
+			const value = req.headers[name.toLowerCase()];
+			return Array.isArray(value) ? value[0] : value;
+		},
+		socket: req.socket,
+	};
+	return clientIp(state, shim as unknown as Request) || "unknown";
+}
+
+/** Logs the connection's lifetime once it closes, so a socket that opens and
+ * immediately drops is distinguishable from one that stayed up. */
+function logConnection(ws: WebSocket, path: string, who: string): void {
+	const openedAt = Date.now();
+	log.info(`websocket open ${path} ${who}`);
+	ws.on("close", (code: number) => {
+		const seconds = ((Date.now() - openedAt) / 1000).toFixed(1);
+		log.info(`websocket close ${path} ${who} code=${code} after ${seconds}s`);
+	});
+	ws.on("error", (err: Error) => {
+		log.warning(`websocket error ${path} ${who}: ${err.message}`);
+	});
+}
+
+/** A refused upgrade is logged at WARNING: it is either a misconfigured client
+ * or someone probing the endpoints, and neither should need DEBUG to see. */
+function rejectUpgrade(
+	socket: { destroy(): void },
+	path: string,
+	ip: string,
+	reason: string,
+): void {
+	log.warning(`websocket rejected ${path} ip=${ip}: ${reason}`);
+	socket.destroy();
+}
 
 function parseCookies(header: string | undefined): Record<string, string> {
 	const out: Record<string, string> = {};
@@ -87,25 +130,33 @@ export function setupWebSockets(server: HttpServer, state: AppState): void {
 
 	server.on("upgrade", (req: IncomingMessage, socket, head) => {
 		const url = new URL(req.url ?? "/", "http://internal");
+		const path = url.pathname;
+		const ip = peerIp(state, req);
 
-		if (url.pathname === "/api/ws/events") {
+		if (path === "/api/ws/events") {
 			const cookies = parseCookies(req.headers.cookie);
 			const sessionRow = state.sessionManager.resolve(
 				state.db,
 				cookies[COOKIE_NAME],
 			);
 			if (!sessionRow) {
-				socket.destroy();
+				rejectUpgrade(socket, path, ip, "no valid session cookie");
 				return;
 			}
 			const user = state.db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 				$id: sessionRow.user_id,
 			});
 			if (!user || user.must_change_credentials) {
-				socket.destroy();
+				rejectUpgrade(
+					socket,
+					path,
+					ip,
+					user ? "account must change credentials" : "session user is gone",
+				);
 				return;
 			}
 			userWss.handleUpgrade(req, socket, head, (ws) => {
+				logConnection(ws, path, `user=${user.username} ip=${ip}`);
 				const predicate: EventPredicate =
 					user.role === "master"
 						? () => true
@@ -115,7 +166,7 @@ export function setupWebSockets(server: HttpServer, state: AppState): void {
 			return;
 		}
 
-		if (url.pathname === "/api/admin/cluster/firehose") {
+		if (path === "/api/admin/cluster/firehose") {
 			let presented = url.searchParams.get("token") ?? "";
 			if (!presented) {
 				const header = req.headers.authorization ?? "";
@@ -124,23 +175,38 @@ export function setupWebSockets(server: HttpServer, state: AppState): void {
 					: "";
 			}
 			if (!safeTokenEqual(presented, state.clusterToken)) {
-				socket.destroy();
+				rejectUpgrade(
+					socket,
+					path,
+					ip,
+					presented ? "cluster token mismatch" : "no cluster token presented",
+				);
 				return;
 			}
 			firehoseWss.handleUpgrade(req, socket, head, (ws) => {
+				logConnection(ws, path, `cluster-token ip=${ip}`);
 				pump(state, ws, () => true, afterId(url));
 			});
 			return;
 		}
 
-		if (url.pathname === "/api/auth") {
+		if (path === "/api/auth") {
 			const connId = url.searchParams.get("conn_id") ?? "";
 			const entry = state.loginChallenges.get(connId);
 			if (!entry) {
-				socket.destroy();
+				rejectUpgrade(
+					socket,
+					path,
+					ip,
+					connId ? "unknown or expired conn_id" : "no conn_id",
+				);
 				return;
 			}
 			authWss.handleUpgrade(req, socket, head, (ws) => {
+				// conn_id is a transport correlation id, not a credential, so it
+				// is safe in the log -- and it is the only handle a pre-login
+				// socket has.
+				logConnection(ws, path, `conn_id=${connId} ip=${ip}`);
 				state.loginChallenges.attach(connId, ws);
 				ws.send(JSON.stringify({ type: "ready", state: entry.state }));
 				ws.on("close", () => state.loginChallenges.detach(connId));
@@ -148,7 +214,7 @@ export function setupWebSockets(server: HttpServer, state: AppState): void {
 			return;
 		}
 
-		socket.destroy();
+		rejectUpgrade(socket, path, ip, "no websocket route at this path");
 	});
 
 	log.info(

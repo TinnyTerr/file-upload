@@ -1,5 +1,6 @@
 import type { Settings } from "../config.ts";
 import { getLogger } from "../logging.ts";
+import { fetchLogged } from "../outbound.ts";
 
 const log = getLogger("app.torrents.realdebrid");
 
@@ -200,7 +201,7 @@ async function call<T>(
 
 	let res: Response;
 	try {
-		res = await fetch(`${API_BASE}${path}`, {
+		res = await fetchLogged("realdebrid", `${API_BASE}${path}`, {
 			method: opts.method ?? (body ? "POST" : "GET"),
 			headers,
 			body,

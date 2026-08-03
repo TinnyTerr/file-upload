@@ -14,6 +14,7 @@ import type { Settings } from "../config.ts";
 import { nowIso, type TorrentJobRow, type UserRow } from "../db/rows.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
+import { fetchLogged } from "../outbound.ts";
 import { ensurePermissions } from "../permissions.ts";
 import { debridRoot, safeJoin } from "../storage/paths.ts";
 import {
@@ -423,7 +424,14 @@ async function streamToFile(
 	try {
 		let res: Response;
 		try {
-			res = await fetch(url, { signal: controller.signal, redirect: "follow" });
+			// The unrestricted link's path *is* the credential, so only its
+			// origin is logged.
+			res = await fetchLogged(
+				"realdebrid",
+				url,
+				{ signal: controller.signal, redirect: "follow" },
+				{ redact: "origin", note: "file transfer" },
+			);
 		} catch (err) {
 			throw failure(err);
 		}

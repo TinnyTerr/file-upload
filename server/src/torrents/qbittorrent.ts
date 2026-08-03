@@ -1,6 +1,7 @@
 import type { Settings } from "../config.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
+import { fetchLogged } from "../outbound.ts";
 
 const log = getLogger("app.torrents.qbittorrent");
 
@@ -66,15 +67,19 @@ async function login(settings: Settings): Promise<string> {
 	});
 	let res: Response;
 	try {
-		res = await fetch(`${settings.qbittorrentUrl}/api/v2/auth/login`, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/x-www-form-urlencoded",
-				Referer: settings.qbittorrentUrl,
+		res = await fetchLogged(
+			"qbittorrent",
+			`${settings.qbittorrentUrl}/api/v2/auth/login`,
+			{
+				method: "POST",
+				headers: {
+					"Content-Type": "application/x-www-form-urlencoded",
+					Referer: settings.qbittorrentUrl,
+				},
+				body,
+				signal: AbortSignal.timeout(15000),
 			},
-			body,
-			signal: AbortSignal.timeout(15000),
-		});
+		);
 	} catch (err) {
 		throw new HttpError(
 			502,
@@ -114,11 +119,15 @@ async function call(
 
 	let res: Response;
 	try {
-		res = await fetch(`${settings.qbittorrentUrl}${path}`, {
-			...init,
-			headers,
-			signal: AbortSignal.timeout(30000),
-		});
+		res = await fetchLogged(
+			"qbittorrent",
+			`${settings.qbittorrentUrl}${path}`,
+			{
+				...init,
+				headers,
+				signal: AbortSignal.timeout(30000),
+			},
+		);
 	} catch (err) {
 		throw new HttpError(
 			502,

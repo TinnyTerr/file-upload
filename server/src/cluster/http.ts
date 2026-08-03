@@ -1,10 +1,13 @@
 /** Node-to-node HTTP helpers. Mirrors app/cluster/http.py.
  *
  * Uses the global `fetch` (available in Bun) so the cluster runtime adds no
- * new third-party dependency for outbound calls. These calls always target
- * operator-configured peer base URLs authenticated by the shared cluster
- * token -- they are not user-controlled URLs, so the SSRF pinning that
- * remoteUpload.ts needs does not apply here. */
+ * new third-party dependency for outbound calls -- through `fetchLogged`, so
+ * every peer call shows up in the log buffer like any other outbound request.
+ * These calls always target operator-configured peer base URLs authenticated
+ * by the shared cluster token -- they are not user-controlled URLs, so the
+ * SSRF pinning that remoteUpload.ts needs does not apply here. */
+
+import { fetchLogged } from "../outbound.ts";
 
 export class ClusterHTTPError extends Error {
 	status: number;
@@ -35,7 +38,7 @@ async function request(
 		headers["Content-Type"] = "application/json";
 	}
 	try {
-		const resp = await fetch(url, {
+		const resp = await fetchLogged("cluster", url, {
 			method,
 			headers,
 			body,
@@ -84,11 +87,16 @@ export async function openStream(
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	try {
-		const resp = await fetch(url, {
-			method: "GET",
-			headers: { Authorization: `Bearer ${token}` },
-			signal: controller.signal,
-		});
+		const resp = await fetchLogged(
+			"cluster",
+			url,
+			{
+				method: "GET",
+				headers: { Authorization: `Bearer ${token}` },
+				signal: controller.signal,
+			},
+			{ note: "streaming" },
+		);
 		if (!resp.ok) {
 			throw new ClusterHTTPError(resp.status);
 		}

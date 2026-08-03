@@ -19,6 +19,7 @@ import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
 import { requireActiveUser, requirePermission } from "../middleware/deps.ts";
+import { beginOutbound } from "../outbound.ts";
 import { ensurePermissions } from "../permissions.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { storageRoot } from "../storage/paths.ts";
@@ -162,9 +163,10 @@ async function downloadRemoteUrl(
 		const ip = await resolvePublicAddress(host);
 
 		const target = parsed.pathname + parsed.search;
+		const call = beginOutbound("remote-upload", "GET", current);
 		const result = await new Promise<
 			| { status: number; headers: Record<string, string>; body: Buffer }
-			| { redirect: string }
+			| { redirect: string; status: number }
 		>((resolve, reject) => {
 			const requestLine = `GET ${target} HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: fileupload-remote-fetch/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n`;
 			const onSocket = (
@@ -226,7 +228,10 @@ async function downloadRemoteUrl(
 								reject(new HttpError(400, "remote redirect missing location"));
 								return;
 							}
-							resolve({ redirect: new URL(location, current).toString() });
+							resolve({
+								redirect: new URL(location, current).toString(),
+								status,
+							});
 							return;
 						}
 						// The raw framing (hex size lines + CRLF delimiters) is not the
@@ -262,7 +267,16 @@ async function downloadRemoteUrl(
 					reject(new HttpError(400, `remote download failed: ${err.message}`)),
 				);
 			}
-		});
+		}).then(
+			(resolved) => {
+				call.ok(resolved.status);
+				return resolved;
+			},
+			(err: unknown) => {
+				call.fail(err);
+				throw err;
+			},
+		);
 
 		if ("redirect" in result) {
 			current = result.redirect;

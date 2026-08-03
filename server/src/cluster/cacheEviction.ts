@@ -4,6 +4,7 @@ import type { ClusterNodeRow, ContentBlobRow } from "../db/rows.ts";
 import { nowIso } from "../db/rows.ts";
 import type { Db } from "../db/types.ts";
 import { getLogger } from "../logging.ts";
+import { fetchLogged } from "../outbound.ts";
 import { safeJoin, storageRoot } from "../storage/paths.ts";
 
 /** LRU eviction for REPLICATION_MODE=cache nodes.
@@ -58,7 +59,7 @@ async function peerHasBlob(
 ): Promise<boolean> {
 	const url = `${peer.base_url.replace(/\/$/, "")}/api/cluster/blobs/${storedSha256}?transform=${encodeURIComponent(transformKey)}`;
 	try {
-		const resp = await fetch(url, {
+		const resp = await fetchLogged("cluster", url, {
 			method: "HEAD",
 			headers: { Authorization: `Bearer ${peer.token}` },
 		});
