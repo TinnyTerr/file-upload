@@ -3,6 +3,10 @@
 **Status:** design agreed, no code written. Part 4 records the decisions; Parts 5–7 are
 built on them. Revised 2026-08-06 — the first draft recommended a **leaderless** design,
 and that was overruled in favour of the **auto-tiered master/region topology** in Part 5.
+Second revision, same day: credential material now replicates **on demand at login**
+(§5.10), the master is **never** a region leader (§5.1), non-quota conflicts are arbitrated
+by **timestamp then node id** (§5.8), quota is accounted in **logical quota bytes** with a
+**sliding** reservation TTL (§5.9), and Option C is now rejected outright (Part 6).
 **Scope:** `server/src/cluster/*` (3,352 lines incl. `routes/cluster.ts` and `ws.ts`), the
 `cluster_*` tables in `db/schema.sql`, and the replication call sites in `routes/files.ts`.
 
@@ -293,13 +297,17 @@ which the first draft recommended deleting.
 | D-5 | Re-tiering trigger | **Manual, or `trunc(n/3)` status changes, n = whole cluster.** |
 | D-6 | Down-replication | **Metadata to every node; bytes on demand**, and a region that pulls bytes **retains them as cache**. |
 | D-7 | Cache eviction | **LRU**, with used-bytes surfaced in the UI and a configurable cap. |
-| D-8 | Conflict resolution | **Master serializes; the losing edit is recorded and surfaced in the admin panel.** |
+| D-8 | Conflict resolution | **Master serializes.** For non-quota edits it picks by **timestamp, then origin node id**; the losing edit is recorded and surfaced in the admin panel. |
 | D-9 | Deployment shape | **2–10 nodes, one region today.** Region tier is designed in but dormant. |
 | D-10 | Chunk splitting | **Yes — reuse the chunked-upload blobbing.** Chunks are content-addressed like blobs. |
 | D-11 | Chunk durability | **Replicate each chunk**, factor configurable. |
-| D-12 | Identity replication | **Everything replicates except `password_hash`**, which is fetched/verified on demand at login. |
+| D-12 | Identity replication | **`password_hash` and TOTP seeds replicate on demand**, pulled to a node the first time a user attempts a login there. Never pushed cluster-wide. |
 | D-13 | Permission staleness | **Grants lazy, revocations synchronous** to every reachable node. |
 | D-14 | Live data | **Single node with real data.** Backfills must be live-safe; no wire-compat window needed. |
+| D-15 | Can the master be a region leader? | **No.** A region's leader is its top *non-master* node. A region holding one node — that node is the leader and is the whole region. |
+| D-16 | Quota reservation lifetime | **Sliding TTL**, refreshed on chunk activity (keepalive after ~30 s idle) and on a ~10 h tick for transfers with no chunk cadence. |
+| D-17 | Quota accounting unit | **Logical quota bytes** (`SUM(size_bytes)` against `quota_bytes`). Every path that creates a file row reserves, dedup or not. |
+| D-18 | WebAuthn credentials | **Never replicate.** Per-node domains mean a credential registered on one node is unusable on another. |
 
 ### 4.1 What these decisions cost, stated plainly
 
@@ -313,9 +321,18 @@ makes them sound free:
   failing to prevent (B6, B7, B8). Choosing not to guess is cheaper and safer than
   guessing badly. The mitigation is operational, not algorithmic — a loud alert and a
   one-click promote (§5.5).
-- **D-12 means a user cannot log in on a node that cannot reach the master**, unless that
-  node already holds their password material. Existing sessions are node-local and
-  unaffected, so this bites new logins during an outage only.
+- **D-12 means a user cannot log in on a node that cannot reach a holder of their
+  credential**, unless that node already pulled it during an earlier login. Existing
+  sessions are node-local and unaffected, so this bites *first* logins on a given node
+  during an outage only — a user's habitual node holds their material already.
+- **D-12 also widens where the hash lives.** It ends up on every node a user has ever
+  logged in on, rather than nowhere but its origin. That is the price of degraded-mode
+  logins and of not shipping a plaintext password to a peer on every attempt; it is
+  bounded by *use*, not by cluster size, and `/export` is gone either way (§5.13).
+- **D-18 means passkeys are per node.** A user with `require_passkey` must enrol one on
+  each node they intend to use, and usernameless WebAuthn login only works where the
+  passkey was registered. TOTP does not have this problem, which is why it rides with
+  the password hash instead.
 - **D-5 with n = 3 gives a threshold of 1**, so a single flapping node would re-tier the
   whole cluster. §5.4 adds a hold-down window and a floor to stop that.
 
@@ -357,8 +374,18 @@ are untouched by the leadership decision.
 - **A follower may reach the master directly** when its region leader is down. The region
   leader is a relay and a cache, not an authority — losing it degrades latency, not
   capability.
-- **Single-region case (D-9, today):** the master *is* the region leader for the only
-  region and tier 1 collapses. The code path is the same; the region set has one member.
+- **The master is never a region leader (D-15).** It is excluded from region-leader
+  eligibility entirely, so tier 0 and tier 1 are always different nodes. A master that
+  also relayed for its own region would be doing both jobs on one box — the tier that is
+  supposed to absorb fan-out would be the tier already serialising every write.
+- **A region holding exactly one node:** that node is its own region leader, and it is the
+  entire region. It talks to the master directly, which is what a region leader does
+  anyway — no special case in the code, just a member list of length 1.
+- **A region holding only the master** has no leader and needs none: there is nothing to
+  relay to, and the master's own control-plane path to itself is not a network hop.
+- **Single-region case (D-9, today):** master + region leader + followers, all in one
+  region. Tier 1 does **not** collapse — the region leader is the largest non-master node.
+  At n = 2 that leaves a master and a leader with no followers, which is fine.
 
 ### 5.2 Region assignment
 
@@ -385,9 +412,15 @@ throughput_bps  INTEGER                  -- observed bytes/sec from chunk transf
 ### 5.3 Leader selection is a pure function, not an election
 
 ```
-regionLeader(r) = argmax over eligible nodes in r   of (disk_total_bytes, then node_id ASC)
-master          = argmax over region leaders        of (disk_total_bytes, then node_id ASC)
+master          = argmax over all eligible nodes            of (disk_total_bytes, then node_id ASC)
+regionLeader(r) = argmax over eligible nodes in r, MINUS the master
+                                                            of (disk_total_bytes, then node_id ASC)
 ```
+
+The master is computed **first**, over the whole cluster, and is then struck out of every
+region's candidate set (D-15). So the master's own region is led by its second-largest
+node; a region whose only member is the master has no leader; a region with one non-master
+node has that node as leader by definition.
 
 `disk_total_bytes` is already a `cluster_nodes` column, populated by `heartbeatJob`.
 Ineligible: `REPLICATION_MODE=cache` nodes, nodes an operator has flagged ineligible, and
@@ -462,7 +495,8 @@ Degraded mode, per node, working from local information only:
 | All reads — listings, downloads, previews, thumbnails | Uploads (browser, API, dropbox, remote, torrent) — quota unverifiable |
 | Public share links and folder links | Renames, moves, deletes — no ordering authority |
 | Media streaming and play keys (node-local already) | Permission and quota changes |
-| Existing sessions (node-local, 24 h) | New logins for users this node holds no password material for (§5.10) |
+| Existing sessions (node-local, 24 h) | First-ever logins for users this node has never pulled credentials for (§5.10) |
+| Logins for any user who has logged in on this node before (§5.10) | Passkey enrolment for a user who has none here (§5.10) |
 | Cached and locally-held chunk serving | New link creation, encryption changes, sealing |
 
 Recovery is either the master returning, or an operator promoting a node — a typed
@@ -536,13 +570,31 @@ media publishes — the entire B5 table. **It deletes:** `replicateFile`, `colle
 
 The master gates *quota*, not every mutation. A rename, a move, a permission edit and a
 link revocation consume no quota, so two nodes can still both accept an edit to the same
-row. Resolution is optimistic concurrency control keyed on `master_seq` (D-8):
+row. Detection is optimistic concurrency control keyed on `master_seq`; **arbitration is by
+timestamp, then origin node id** (D-8).
 
 On apply at the master, for an incoming entry on row `uid`:
 
 - `incoming.base_master_seq == row.master_seq` → **accept**, assign the next `master_seq`,
-  ship down.
-- otherwise → **reject**, and write:
+  ship down. No arbitration needed; nothing else touched the row.
+- otherwise the two edits are concurrent, and the master picks a winner:
+  1. **Later `ts` wins.**
+  2. **Tie on `ts` → higher `origin_node` wins** (lexical on the node id).
+
+Every log entry already carries `origin_node` and `ts` (§5.7), so both inputs are on the
+wire for free. Notes on why it is shaped this way:
+
+- **Only the master runs the rule**, so it is evaluated once against one clock's view of
+  arrival, not independently on each node against its own. Two nodes cannot reach opposite
+  verdicts, which is the failure LWW-at-every-node has and this does not.
+- **The node id tiebreak is not decoration.** ISO8601-second (or even millisecond)
+  timestamps collide in practice on scripted or bulk edits, and a rule that is undefined on
+  a tie is a rule that diverges on a tie.
+- **Clock skew is bounded, not trusted.** An entry whose `ts` is ahead of the master's own
+  clock by more than the skew allowance is clamped to master receipt time before the
+  comparison — otherwise a node with a fast clock silently wins every conflict it enters.
+- **The winner may be the row already committed**, in which case the incoming entry loses
+  and nothing changes except a conflict record. Either way the loser is written:
 
 ```sql
 CREATE TABLE IF NOT EXISTS replication_conflicts (
@@ -550,16 +602,20 @@ CREATE TABLE IF NOT EXISTS replication_conflicts (
   table_name     TEXT NOT NULL,
   row_uid        TEXT NOT NULL,
   losing_payload TEXT NOT NULL,
+  losing_ts      TEXT NOT NULL,
   winning_master_seq INTEGER NOT NULL,
-  origin_node    TEXT NOT NULL,
+  winning_ts     TEXT NOT NULL,
+  origin_node    TEXT NOT NULL,   -- who wrote the losing edit
+  winner_node    TEXT NOT NULL,   -- who wrote the winning one
   detected_at    TEXT NOT NULL,
   dismissed_at   TEXT
 );
 ```
 
-The conflict row ships down like any other row, so the node whose edit lost learns about
-it. Followers apply the master's stream unconditionally — the losing row is overwritten on
-the way back down.
+`losing_payload` holds whichever edit lost — the incoming one, or the one already committed
+when the timestamp rule went the other way. The conflict row ships down like any other row,
+so the node whose edit lost learns about it. Followers apply the master's stream
+unconditionally — the losing row is overwritten on the way back down.
 
 The admin panel gets a **Conflicts** view: what was attempted, what won, on which node,
 with *dismiss* and *re-apply* (re-apply = a fresh edit on top of the winner, not a replay).
@@ -574,21 +630,47 @@ Two different rules for two different risks.
 
 ```
 POST /api/cluster/quota/reserve   { user_uid, bytes }  →  { reservation_uid, expires_at }
+POST /api/cluster/quota/renew     { reservation_uid }  →  { expires_at }
 POST /api/cluster/quota/commit    { reservation_uid, actual_bytes }
 POST /api/cluster/quota/release   { reservation_uid }
 ```
 
-- Called from `POST /files/init`, chunked-upload init, torrent add, and remote-upload
-  submit — i.e. before bytes are accepted, not after.
-- Reservations live in a durable master-side table so an in-flight upload counts against
-  quota before its bytes exist. Committed at `finalizeStoredFile`, released on abort,
-  expired by a sweep (TTL matched to `CHUNK_SESSION_TTL`, 12 h).
-- The same call covers the **global storage cap** and the **free-disk check**
-  (`storage/accounting.ts`), both of which are cluster-wide facts now rather than local
-  ones.
-- Per-user quota still uses the logical `SUM(size_bytes)` number, and the global cap the
-  post-dedup `SUM(stored_size_bytes)` number — that distinction survives unchanged, it
-  just gets computed on the master.
+**The unit is logical quota bytes, everywhere (D-17).** `quota_bytes` versus
+`SUM(files.size_bytes)` is the number that decides whether a user may write, so it is the
+number the master reserves against — and every path that creates a `files` row reserves,
+with no exemptions:
+
+- Uploads: `POST /files/init`, chunked-upload init, dropbox upload, remote-upload submit,
+  torrent add — i.e. before bytes are accepted, not after.
+- Paths that create a row **without new bytes**: `POST /d/:slug/save` (R-5) and file copy.
+  They attach an existing blob, so physical bytes may not grow at all — but logical bytes
+  do, and logical bytes are the quota. Skipping the reservation there would let a user
+  clone their way past `quota_bytes` for free.
+- Dedup savings never reduce a reservation. That is already the rule locally
+  (`usedStorageBytesForUser`) and it is the rule the master enforces cluster-wide.
+
+The **global storage cap** and the **free-disk check** (`storage/accounting.ts`) ride the
+same call and stay on post-dedup `SUM(stored_size_bytes)` — they are about disk, not
+entitlement. They are cluster-wide facts now rather than local ones, but they are a
+secondary gate: a reservation that passes the cap and fails quota is refused, and the
+message names quota, because that is the one a user can do something about.
+
+**Reservations are durable and their TTL slides (D-16).** They live in a master-side table
+so an in-flight upload counts against quota before its bytes exist. Committed at
+`finalizeStoredFile`, released on abort, expired by a sweep. The TTL is **not** a ceiling on
+how long a transfer may take — a 12 h absolute cap would kill a legitimate multi-day torrent
+import — it is an inactivity window:
+
+- **Every chunk commit renews it.** For a chunked upload that is the natural heartbeat.
+- **An idle keepalive renews it** when chunks stop arriving: ~30 s after the last chunk
+  finished, the uploading node renews on the session's behalf, and keeps doing so while the
+  session is alive. A stalled-but-live transfer holds its reservation; a client that walked
+  away stops renewing.
+- **A ~10 h periodic tick renews long transfers with no chunk cadence** — torrent imports
+  and remote uploads, which are one opaque stream from the quota system's point of view.
+- Expiry therefore means "nobody has touched this for a full window", which is the only
+  condition under which releasing the bytes is safe. `CHUNK_SESSION_TTL` (12 h) remains the
+  window length, so a resumable session still can't outlive its reservation.
 
 **Permissions — local read, asymmetric write (D-13).**
 
@@ -607,33 +689,67 @@ The asymmetry is the point: a stale grant is a security hole, a stale denial is 
 inconvenience. It is also why `POST /files/:id/seal`, link revocation and encryption
 changes ride the revocation path rather than the ordinary one.
 
-### 5.10 Identity: everything replicates except the password hash
+### 5.10 Identity: credential material replicates on demand, at login
 
-**Replicated to every node:** `users` (minus `password_hash`), `permissions`, avatar,
-`webauthn_user_handle`, MFA flags. Every node can therefore *authorize* every user without
-a round-trip, which is what §5.9's local permission read depends on.
+**Replicated to every node, eagerly:** `users` (minus the credential columns),
+`permissions`, avatar, `webauthn_user_handle`, MFA flags. Every node can therefore
+*authorize* every user without a round-trip, which is what §5.9's local permission read
+depends on.
 
-**Not replicated:** `password_hash`, and TOTP seeds. On a login for a user whose hash this
-node does not hold:
+**Replicated lazily, on first login attempt (D-12):** `password_hash` and TOTP seeds. They
+are never pushed cluster-wide. A node that has never seen a given user holds nothing for
+them; the first time someone attempts to log in as that user there, the node pulls the
+material up the tier:
 
 ```
-POST /api/cluster/identity/verify  { username, password }  →  { ok, must_change, mfa_required, methods }
+POST /api/cluster/identity/fetch  { username }
+     → { password_hash, totp_secret_enc, must_change, mfa_required, methods, hash_version }
 ```
 
-forwarded up the tier to a holder. **Argon2id verification happens on the holder**, so the
-hash never crosses the wire in either direction — the request carries the candidate
-password over the already-authenticated node-to-node channel and gets back a boolean plus
-the ceremony metadata `routes/auth.ts` needs.
+and stores it locally. Verification is then **local Argon2id**, on that node, exactly as it
+is today — and stays local for every subsequent login there.
 
-The verifying node caches the *outcome* for the session lifetime, never the hash. A
-password change publishes an invalidation down the log.
+Why on-demand rather than never:
 
-Consequences, both intended:
+- **Degraded mode keeps working where it is used.** A node that can't reach the master can
+  still log in every user who has logged in there before, which in practice is that node's
+  entire population. Verify-at-a-holder cannot do that: it needs the holder, every time,
+  forever.
+- **The candidate password never leaves the node the user typed it into.** The alternative
+  ships a plaintext password to a peer on every single login. Moving the hash once is a
+  smaller exposure than moving the plaintext repeatedly.
+- **Login latency is one round-trip, once per user per node**, not per login.
 
-- `GET /api/cluster/export` — the credential dump in **S1** — is closed by construction:
-  after §5.7 the endpoint is gone, and even the change log carries no hash.
-- In degraded mode a user cannot log in on a node that can't reach a holder. Existing
-  sessions are node-local and 24 h, so this affects new logins during an outage only.
+What it costs, stated plainly: the hash ends up on every node a user has actually used.
+That set grows with use, not with cluster size, and a node holding it is already a node
+that could mint that user's session. `/export` is deleted regardless (§5.13), so the
+bulk-dump surface in **S1** is gone either way.
+
+**Invalidation.** A password change, a TOTP re-enrolment, or an account disable publishes an
+invalidation down the log; every node holding cached material drops it and re-fetches on the
+next attempt. A node that was unreachable drops it when it reconnects and reads the log —
+and until then it cannot accept writes anyway (§5.5). The fetch is rate-limited per
+(node, username) so it cannot be used to enumerate accounts, and it is subject to
+`security/lockout.ts` on the requesting node exactly as a local login is.
+
+**TOTP seeds ride with the password hash** (D-12). Same table, same fetch, same
+invalidation: a second factor that is unavailable on the node you are logging into is not a
+second factor, it is an outage.
+
+**WebAuthn credentials never replicate (D-18).** The relying-party id and origin are derived
+from the node's own hostname (`security/webauthn.ts`, gated by `ALLOWED_HOSTS`), so a
+credential registered against node A's domain cannot be asserted against node B's — sending
+it would be shipping something unusable. Consequences to design around rather than paper
+over:
+
+- A passkey works on the node it was enrolled on. Usernameless WebAuthn login likewise.
+- `require_passkey` replicates as a flag, so a user carrying it must enrol a passkey on each
+  node they use; the enrolment endpoints stay reachable for exactly that reason.
+- `webauthn_user_handle` **does** replicate — it is an identifier, not a credential, and
+  keeping it stable is what makes the same user recognisable when they enrol on a second
+  node.
+- If shared passkeys are ever wanted, the fix is one cluster-wide domain in front of every
+  node, not credential replication. That is a deployment decision, out of scope here.
 
 ### 5.11 Blobs: chunking, placement, and the region cache
 
@@ -734,8 +850,12 @@ fixes, independent of everything above, and they are what makes the rest debugga
   contains another node's token (fixes **S1**, **S2**).
 - **Rotation propagates.** A node announces its new credential over the log before the old
   one stops being accepted, with an overlap window (fixes **S3**).
-- **`/export` is deleted** by §5.7, and §5.10 means no endpoint returns a password hash at
-  all — the credential-dump surface is gone rather than merely gated.
+- **`/export` is deleted** by §5.7, so the bulk credential dump in **S1** is gone rather
+  than merely gated. What replaces it is deliberately narrow: `/cluster/identity/fetch`
+  returns material for **one named user at a time**, rate-limited per (node, username),
+  logged as an audit event on the holder, and answerable only over the per-node-pair
+  credential above. "One user, on request, recorded" is a different surface from "every
+  row in `users`, unlogged, to anything holding a shared static token".
 - **Role and tiering are derived, not asserted.** With `election.ts` gone there is no
   `epoch` or `role` field in a request body to forge; a node's tier comes from the
   master-minted `cluster_tiering` generation, and only the master can mint one (fixes
@@ -755,7 +875,10 @@ cluster/
                    generation minting, drift counter + hold-down
   membership.ts    enrol / heartbeat / peer table, RTT + throughput sampling
                    (no election, no epochs, no votes)
-  quota.ts         master-side reservations; client side of reserve/commit/release
+  quota.ts         master-side reservations on logical bytes; client side of
+                   reserve/renew/commit/release + the idle keepalive
+  credentials.ts   on-demand password-hash / TOTP-seed fetch, local cache,
+                   invalidation on password or MFA change
   degraded.ts      master-reachability state machine, 5-min grace, held-request queue
   placement.ts     blob_chunks, chunk_locations, replication factor, push targets,
                    LRU eviction with pinned exemption and cache caps
@@ -791,15 +914,22 @@ joint-consensus membership changes and the corner cases that make the papers lon
 operator-run nodes (D-9) with a human on call, that trade is not worth taking. The existing
 `election.ts` is what a half-implemented Raft looks like, and it is the thing being deleted.
 
-**Option C — externalize the metadata store (shared Postgres).**
-Now genuinely competitive, because D-1 dropped the requirement that made it a non-starter.
-It deletes the log, the uid scheme, conflicts and cursors outright. The remaining
-difference is read locality: Postgres makes *every* metadata read a network call, whereas
-this design keeps all reads local and sends only the small authoritative decisions (quota,
-ordering, revocation) to the master. For geographically spread nodes on slow links that
-gap is the whole argument. It also adds a hard operational dependency the project
-deliberately avoided. **Keep it as the named fallback**: if the master-gated write path
-turns out to be most of the complexity anyway, Option C is the cheaper way to get it.
+**Option C — externalize the metadata store (shared Postgres).** *(rejected)*
+It would delete the log, the uid scheme, conflicts and cursors outright, and the first
+revision kept it as a named fallback. **That is withdrawn: cross-region network timings
+rule it out.** Postgres makes *every* metadata read a network call. A cross-region node is
+tens to hundreds of milliseconds from the store, and the read path here is not one query —
+listing a folder, walking an ancestor chain, resolving effective encryption, checking a
+link, serving a range request all multiply out. At 150 ms RTT a page that costs a dozen
+sequential round-trips is unusable, and no amount of pooling or caching fixes a design
+whose base case is remote reads.
+
+This design inverts that: **every read is local**, and only the small authoritative
+decisions — quota reservation, write ordering, revocation — pay a round-trip, once. Those
+are the operations where a delay is acceptable and correctness is not. Option C also adds
+the hard operational dependency the project deliberately avoided. It is no longer the
+fallback; if the master-gated write path proves too costly the answer is to narrow what the
+master gates, not to move every read off-box.
 
 **Option D — patch what's there.** Unchanged: D1's colliding integer ids can't be patched
 without the uid change, and without that the announce/rebase machinery has to stay. The
@@ -821,9 +951,9 @@ wire-protocol compatibility window.
 | **2** | `uid` column + live-safe backfill on replicated tables | D1 |
 | **3** | `replication_log` + in-transaction append at the adapter layer; hierarchical up/down pull + cursors. Delete `replicateFile`, `/reserve`, `/replicate`, `/export`, `rebaseFromMaster` | B4, B5, D4, S1 |
 | **4** | `cluster_tiering`, region columns, RTT sampling, deterministic leader function, drift counter. **Delete `election.ts`**, epochs, `cluster_self_state`, `digest.ts`'s split-brain check | B6, B7, B8, B9, D3, D5, S4 |
-| **5** | Master-gated quota reservations; degraded mode + 5-minute grace + held-request queue; admin promote + banner | D-1, D-2 |
-| **6** | `replication_conflicts` + admin Conflicts view; synchronous revocation path | D2, D-13 |
-| **7** | Identity split — `password_hash` stays home, `/cluster/identity/verify` | D-12, closes S1 fully |
+| **5** | Master-gated quota reservations on logical quota bytes, sliding TTL + renew/keepalive; degraded mode + 5-minute grace + held-request queue; admin promote + banner | D-1, D-2, D-16, D-17 |
+| **6** | `replication_conflicts` + timestamp/node-id arbitration + admin Conflicts view; synchronous revocation path | D2, D-8, D-13 |
+| **7** | Identity split — on-demand `/cluster/identity/fetch` for hash + TOTP seed, invalidation down the log, WebAuthn stays node-local | D-12, D-18, closes S1 fully |
 | **8** | Chunking: `blob_chunks`, `chunk_locations`, replication factor, push replication, LRU + pinned exemption, cache caps and admin UI | B10, D6, D-10, D-11 |
 | **9** | Per-node credentials, rotation with overlap, node-to-node router split | S2, S3 |
 
@@ -837,11 +967,16 @@ correctness.
 ## Part 8 — Residual questions
 
 None of these block Phase 0–3. Each carries a recommendation, so silence is a valid answer.
+R-1, R-4 and R-5 are now **answered** and folded into Parts 4–5; they are kept here with
+their resolutions so the reasoning isn't lost.
 
-**R-1 — WebAuthn credentials and TOTP seeds.** §5.10 keeps `password_hash` home, but
-WebAuthn verification needs the credential's *public* key locally and a passkey is
-phishing-resistant, so the risk profile is very different. *Recommend:* replicate WebAuthn
-public keys, keep TOTP seeds home alongside the password hash.
+**R-1 — WebAuthn credentials and TOTP seeds.** ~~Recommend replicating WebAuthn public
+keys.~~ **Resolved (D-18): WebAuthn credentials do not replicate at all.** The recommendation
+was wrong on the deployment reality — nodes serve different domains, so the rpID/origin a
+credential was registered against doesn't exist on a peer and the credential is unusable
+there no matter what is replicated. **TOTP seeds replicate with the password hash** (D-12),
+on demand at login, because a second factor that only works on one node is an outage rather
+than a factor. §5.10 has the detail.
 
 **R-2 — Legacy blobs at the chunking cutover.** Rechunk existing blobs in place, or record
 them as single-chunk manifests and only chunk new writes? *Recommend:* single-chunk
@@ -851,10 +986,17 @@ manifests, with an optional background rechunk job — it makes Phase 8 non-disr
 to `disk_total_bytes` would make routine disk growth look like churn. *Recommend:* only a
 change that would alter the computed leader, plus crossing an eligibility boundary.
 
-**R-4 — Quota reservation TTL.** 12 h matches `CHUNK_SESSION_TTL` so a resumable chunked
-upload never outlives its reservation. Confirm that's the right ceiling for very large
-torrent imports, which can legitimately run longer.
+**R-4 — Quota reservation TTL.** **Resolved (D-16): it is not a ceiling, it is an
+inactivity window.** 12 h stays as the window length, but it *slides* — renewed on every
+chunk commit, by a keepalive ~30 s after the last chunk finished while the session is still
+alive, and by a ~10 h periodic tick for transfers with no chunk cadence (torrent imports,
+remote uploads). A multi-day import therefore holds its reservation for as long as it is
+making or attempting progress, and expiry only ever means the uploader is genuinely gone.
+§5.9 has the shape.
 
-**R-5 — Does `POST /d/:slug/save` need a quota reservation?** It creates a file row and
-attaches an existing blob, so logical bytes grow while physical bytes may not. *Recommend:*
-yes — per-user quota is the logical number, so it must reserve.
+**R-5 — Does `POST /d/:slug/save` need a quota reservation?** **Resolved (D-17): yes, and
+the general rule is that quota bytes are what matter.** Every path that creates a `files`
+row reserves against logical `SUM(size_bytes)` — saves, copies, uploads, imports alike —
+because `quota_bytes` is the entitlement being enforced and physical dedup savings are the
+system's, not the user's. The global cap and free-disk check keep using post-dedup bytes,
+but they are the secondary gate. §5.9 has the list.
