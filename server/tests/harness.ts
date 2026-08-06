@@ -10,6 +10,7 @@ import { randomBytes } from "node:crypto";
 import type { Express } from "express";
 import { createApp } from "../src/app.ts";
 import { createAppState } from "../src/appState.ts";
+import { initSelfState } from "../src/cluster/election.ts";
 import type { Settings } from "../src/config.ts";
 import { nowIso, type UserRow } from "../src/db/rows.ts";
 import { createSqliteDb } from "../src/db/sqlite.ts";
@@ -69,6 +70,8 @@ export async function makeHarness(
 ): Promise<Harness> {
 	const settings = testSettings(settingsOverrides);
 	const db = createSqliteDb(":memory:");
+	// Same order as index.ts: the node knows its role before anything reads it.
+	initSelfState(db, settings);
 	const state = createAppState(settings, db);
 	const app = createApp(state);
 	const server = app.listen(0);

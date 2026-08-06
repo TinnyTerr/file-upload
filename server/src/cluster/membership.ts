@@ -131,11 +131,12 @@ export interface EnrollResult {
 	status: "ok" | "skipped" | "error";
 	reason?: string;
 	master?: string;
-	rebased?: boolean;
+	/** Change-log entries applied by the catch-up pull the join kicks off. */
+	synced?: number;
 }
 
-/** Join the given master and rebase this node onto it, then full-mesh with
- * its peers. Returns a status describing the outcome.
+/** Join the given master, full-mesh with its peers, then pull its change log.
+ * Returns a status describing the outcome.
  *
  * Shared by two callers that supply the master coordinates differently:
  * config-driven auto-join (`joinCluster`) reads them from this node's env;
@@ -245,15 +246,24 @@ export async function enrollWithMaster(
 	}
 	log.info(`joined cluster via master ${masterUrl}`);
 
-	// Rebase onto the master so this node starts with the cluster's canonical
-	// users/files/links/etc. (the source-of-truth snapshot).
-	let rebased = false;
+	// Pull the master's change log immediately rather than waiting for the
+	// first scheduled tick, so a freshly joined node is usable in seconds.
+	//
+	// There is no snapshot step here any more, and that is the point: the
+	// master seeded its log with an entry per existing row (changelog.ts::
+	// seedChangeLog), so "catch up from nothing" and "keep up from now on" are
+	// the same code path reading from cursor 0. The full-table rebase this
+	// replaced could only overwrite local state wholesale and had no way to
+	// express a delete.
+	let synced = 0;
 	try {
-		const { rebaseFromMaster } = await import("./replication.ts");
-		rebased = await rebaseFromMaster(state);
+		const { replicationPullJob } = await import("./replication.ts");
+		for (const outcome of await replicationPullJob(state)) {
+			synced += outcome.applied;
+		}
 	} catch (err) {
 		log.warning(
-			`initial rebase from master failed: ${err instanceof Error ? err.message : String(err)}`,
+			`initial change-log pull from master failed: ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
 
@@ -266,7 +276,7 @@ export async function enrollWithMaster(
 	} catch {
 		// best-effort -- an audit-mirror failure must never fail the enrollment
 	}
-	return { status: "ok", master: masterUrl, rebased };
+	return { status: "ok", master: masterUrl, synced };
 }
 
 /** Bootstrap this (non-master) node into the mesh from its own config. Thin

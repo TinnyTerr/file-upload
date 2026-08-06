@@ -18,7 +18,6 @@ import type { Request, Response } from "express";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
-import { replicateFile } from "../cluster/replication.ts";
 import { getMasterKey } from "../config.ts";
 import { encryptFile } from "../crypto/aead.ts";
 import {
@@ -545,15 +544,11 @@ export async function finalizeStoredFile(
 		log.info(
 			`upload finalized file_id=${fileObj.id} owner_id=${user.id} stored_bytes=${blob.stored_size_bytes} size_bytes=${sizeBytes} encryption=${encryptionMode} compressed=${fileCompressed} directory_id=${directoryId}`,
 		);
-		// Best-effort, fire-and-forget cluster replication -- never adds peer
-		// round-trip latency to the upload response, and a no-op without any
-		// linked peers (see cluster/replication.ts::replicateFile).
-		void replicateFile(state, fileObj.id).catch((err) => {
-			log.warning(
-				`cluster replication failed file_id=${fileObj.id}: ${err instanceof Error ? err.message : String(err)}`,
-			);
-		});
-
+		// No replication call here, deliberately. The row's INSERT already
+		// appended to the change log inside its own transaction
+		// (cluster/changelog.ts), so a peer picks it up on its next pull along
+		// with the blob, links and folders it depends on -- and, unlike the push
+		// this replaced, along with every later rename, move and delete too.
 		const baseUrl = fileUrl(req, slug);
 		return {
 			file_id: fileObj.id,
@@ -1686,13 +1681,6 @@ export function filesRouter(state: AppState): Router {
 			log.info(
 				`file copied source_file_id=${source.id} copy_file_id=${copy.id} owner_id=${user.id} directory_id=${copy.directory_id}`,
 			);
-			// Fire-and-forget, exactly as the upload path does it: a peer round-trip
-			// must not sit in front of the response.
-			void replicateFile(state, copy.id).catch((err) => {
-				log.warning(
-					`cluster replication failed file_id=${copy.id}: ${err instanceof Error ? err.message : String(err)}`,
-				);
-			});
 			res.json(serializeFiles(state, req, [copy])[0]!);
 		},
 	);

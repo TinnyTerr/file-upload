@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { installChangeLog } from "../cluster/changelog.ts";
 import { backfillUids, UID_TABLES } from "../cluster/identity.ts";
 import { ensureColumn } from "./backfill.ts";
 import type { Db, Row, SqlParams } from "./types.ts";
@@ -269,8 +270,16 @@ export function createSqliteDb(path: string): Db {
 	// column, in small transactions. Runs here rather than at a call site in
 	// index.ts so that every database this process opens is converted, tests
 	// included -- a half-converted database is exactly the state the change log
-	// must never see.
+	// must never see. It runs BEFORE installChangeLog for the same reason: a
+	// mass uid mint is not a change any peer needs to hear about.
 	backfillUids(db);
+
+	// Replication triggers (cluster/changelog.ts). Installed here, at the
+	// adapter, so that every database this process opens logs its own
+	// mutations -- there is no code path that can write to a replicated table
+	// without being recorded, because no code path is asked to cooperate.
+	// Inert until createAppState names the node: see setNodeIdentity.
+	installChangeLog(sqlite);
 
 	return db;
 }

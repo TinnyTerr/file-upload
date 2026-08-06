@@ -17,7 +17,27 @@ import {
 	uidToId,
 } from "../src/cluster/identity.ts";
 import { createSqliteDb } from "../src/db/sqlite.ts";
+import type { Db } from "../src/db/types.ts";
 import { makeDirectory, makeFile, makeHarness, makeUser } from "./harness.ts";
+
+/** Put rows back into the state a database that predates the uid column is in.
+ *
+ * The changelog triggers mint a uid on any insert or update, so this is only
+ * reachable while the node has no identity — which is exactly the window the
+ * boot backfill runs in (cluster/changelog.ts arms the triggers only once
+ * createAppState names the node). */
+function withoutUids(db: Db, tables: string[], where = "1 = 1"): void {
+	const nodeId = db.get<{ node_id: string }>(
+		"SELECT node_id FROM replication_control WHERE id = 1",
+	)!.node_id;
+	db.run("UPDATE replication_control SET node_id = '' WHERE id = 1");
+	for (const table of tables) {
+		db.run(`UPDATE ${table} SET uid = NULL WHERE ${where}`);
+	}
+	db.run("UPDATE replication_control SET node_id = $id WHERE id = 1", {
+		$id: nodeId,
+	});
+}
 
 describe("newUid", () => {
 	test("is a 26-character Crockford base32 ULID", () => {
@@ -137,10 +157,7 @@ describe("backfill", () => {
 					directoryId: dirId,
 				});
 			}
-			// Simulate rows written before the column existed.
-			h.db.run("UPDATE files SET uid = NULL");
-			h.db.run("UPDATE directories SET uid = NULL");
-			h.db.run("UPDATE users SET uid = NULL");
+			withoutUids(h.db, ["files", "directories", "users"]);
 
 			const minted = backfillUids(h.db);
 			expect(minted.files).toBe(20);
@@ -169,9 +186,7 @@ describe("backfill", () => {
 			const dirId = makeDirectory(h.db, { ownerId: owner.id, title: "docs" });
 			const kept = ensureUid(h.db, "directories", dirId);
 			const other = makeDirectory(h.db, { ownerId: owner.id, title: "other" });
-			h.db.run("UPDATE directories SET uid = NULL WHERE id = $id", {
-				$id: other,
-			});
+			withoutUids(h.db, ["directories"], `id = ${other}`);
 
 			expect(backfillUids(h.db).directories).toBe(1);
 			expect(idToUid(h.db, "directories", dirId)).toBe(kept);

@@ -128,9 +128,22 @@ export async function makeCluster(
 		);
 	}
 
+	// Point every follower at nodes[0] as its master. In production the join
+	// handshake learns this (membership.ts::learnMasterPointer); here it is
+	// config, because these tests are about what happens once the mesh exists.
+	const master = nodes[0]!;
+	for (const node of nodes.slice(1)) {
+		node.db.run(
+			`UPDATE cluster_self_state
+          SET current_master_id = $id, current_master_url = $url, updated_at = $now
+        WHERE id = 1`,
+			{ $id: master.nodeId, $url: master.baseUrl, $now: nowIso() },
+		);
+	}
+
 	return {
 		nodes,
-		master: nodes[0]!,
+		master,
 		node(nodeId) {
 			const found = nodes.find((n) => n.nodeId === nodeId);
 			if (!found) throw new Error(`no such node in harness: ${nodeId}`);

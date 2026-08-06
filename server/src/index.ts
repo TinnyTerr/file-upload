@@ -23,14 +23,16 @@ if (!settings.allowedHosts) {
 	);
 }
 const db = createDb(settings.databaseUrl);
-const state = createAppState(settings, db);
-
-await ensureMaster(db);
 // Seed this node's election state (cluster/election.ts) from NODE_ROLE on
 // first ever boot; a no-op on every later boot since persisted role/epoch
 // always wins over env config. Must run before anything else (heartbeat,
-// join, the scheduler) reads or writes cluster_self_state.
+// join, the scheduler) reads or writes cluster_self_state -- and before
+// createAppState, whose change-log seed reads the role to decide whether
+// this node assigns master_seq.
 initSelfState(db, settings);
+const state = createAppState(settings, db);
+
+await ensureMaster(db);
 state.eventWriter.start();
 startBackendWorkers(state);
 

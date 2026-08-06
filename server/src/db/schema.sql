@@ -466,6 +466,76 @@ CREATE TABLE IF NOT EXISTS cluster_events (
 CREATE INDEX IF NOT EXISTS ix_cluster_events_ts ON cluster_events(ts);
 CREATE INDEX IF NOT EXISTS ix_cluster_events_origin_node_id ON cluster_events(origin_node_id);
 
+-- ── the replication change log (cluster/changelog.ts, redesign §5.7) ────────
+--
+-- Every mutation to a replicated table appends one row here, from a trigger,
+-- inside the same transaction as the write itself. That is the whole point: a
+-- write that isn't logged has to be impossible rather than merely discouraged,
+-- and no call site can forget because no call site is involved.
+
+CREATE TABLE IF NOT EXISTS replication_log (
+  -- This node's local stream. Peers cursor on it, and it is also the order
+  -- entries are applied in -- see cluster/changelog.ts::applyChanges for why
+  -- that ordering is what removes the need for a pending-parent buffer.
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- Assigned where the entry lands in the master's log, and only there; NULL
+  -- means "this node has written it but the master has not yet ordered it"
+  -- (§5.7's provisional state).
+  master_seq INTEGER,
+  table_name TEXT NOT NULL,
+  -- The row's cluster identity (ULID). Never its local `id`.
+  row_uid TEXT NOT NULL,
+  op TEXT NOT NULL,                 -- 'upsert' | 'delete'
+  -- JSON of the replicated columns, `id` excluded. Foreign keys travel as the
+  -- parent's uid and BLOBs as uppercase hex; cluster/changelog.ts holds both
+  -- maps and is the only thing that reads this.
+  payload TEXT,
+  -- The master_seq this row was at when the writer changed it. Phase 6 turns
+  -- this into optimistic concurrency control; recorded from the start so the
+  -- log written before then is still arbitrable.
+  base_master_seq INTEGER,
+  -- Preserved across every forwarding hop -- an entry relayed by a region
+  -- leader still names the node that made the change.
+  origin_node TEXT NOT NULL,
+  -- The origin's own `seq` for this entry. Filled in by trigger for locally
+  -- written rows; carried verbatim for forwarded ones, which is what makes the
+  -- UNIQUE below a cluster-wide dedup key rather than a local one.
+  origin_seq INTEGER,
+  ts TEXT NOT NULL,
+  UNIQUE(origin_node, origin_seq)
+);
+-- base_master_seq's lookup ("what master_seq is this row at?") and the
+-- conflict scan Phase 6 adds.
+CREATE INDEX IF NOT EXISTS ix_replication_log_row ON replication_log(table_name, row_uid, master_seq);
+CREATE INDEX IF NOT EXISTS ix_replication_log_master_seq ON replication_log(master_seq);
+
+CREATE TABLE IF NOT EXISTS replication_cursors (
+  peer_node_id TEXT NOT NULL,
+  direction    TEXT NOT NULL,       -- 'up' (from a child) | 'down' (from the parent)
+  seq          INTEGER NOT NULL,
+  updated_at   TEXT NOT NULL,
+  PRIMARY KEY (peer_node_id, direction)
+);
+
+-- One row, read by every changelog trigger.
+--
+-- `node_id` is this node's identity, needed inside a trigger where no
+-- application state is reachable. It stays empty until createAppState sets it,
+-- and the triggers refuse to log while it is -- which is deliberate: the uid
+-- backfill runs during database open, before the node has an identity, and
+-- minting a uid is not a change worth replicating.
+--
+-- `suppressed` is raised while applying a peer's entries, so an applied change
+-- is not re-logged as if this node had originated it, and lowered again
+-- immediately. It is also raised for the uid mint inside the insert trigger,
+-- because a trigger's own statements do fire other triggers (SQLite's
+-- recursive_triggers pragma governs self-recursion only).
+CREATE TABLE IF NOT EXISTS replication_control (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  node_id TEXT NOT NULL DEFAULT '',
+  suppressed INTEGER NOT NULL DEFAULT 0
+);
+
 -- OAuth 2.0 authorization-server tables (security/oauth.ts, routes/oauth.ts).
 -- Deliberately absent from cluster/replication.ts's REPLICATED_TABLES: like
 -- sessions and media_play_keys, an issued token is a node-local credential and

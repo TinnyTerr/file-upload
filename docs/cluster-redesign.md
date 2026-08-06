@@ -1,7 +1,7 @@
 # Cluster redesign — analysis and proposal
 
-**Status:** design agreed, no code written. Part 4 records the decisions; Parts 5–7 are
-built on them. Revised 2026-08-06 — the first draft recommended a **leaderless** design,
+**Status:** **Phases 0–3 are built and green** (see Part 7). Part 4 records the decisions;
+Parts 5–7 are built on them. Revised 2026-08-06 — the first draft recommended a **leaderless** design,
 and that was overruled in favour of the **auto-tiered master/region topology** in Part 5.
 Second revision, same day: credential material now replicates **on demand at login**
 (§5.10), the master is **never** a region leader (§5.1), non-quota conflicts are arbitrated
@@ -10,8 +10,10 @@ by **timestamp then node id** (§5.8), quota is accounted in **logical quota byt
 **Scope:** `server/src/cluster/*` (3,352 lines incl. `routes/cluster.ts` and `ws.ts`), the
 `cluster_*` tables in `db/schema.sql`, and the replication call sites in `routes/files.ts`.
 
-Parts 1–3 (what exists, defect inventory, root causes) are unchanged and still accurate —
-they are the case for doing any of this. **If you only read one section, read Part 4.**
+Parts 1–3 (what exists, defect inventory, root causes) are unchanged as the case for doing
+any of this, but Part 1's module map and Part 2's B1–B5/D1/D4 now describe what was
+*replaced* rather than what is there — Phases 0–3 have landed. **If you only read one
+section, read Part 4.**
 
 ---
 
@@ -961,6 +963,37 @@ Phases 1 and 2 are safe against the current design. **Phase 3 is the one-way doo
 Phase 4 is the point at which the topology in this document actually exists. Phase 8 is
 separable and can slip without blocking anything above it — chunking is capability, not
 correctness.
+
+### Built so far (2026-08-06)
+
+Phases **0, 1, 2 and 3** are implemented and green — the door is walked through.
+
+| Phase | Landed as |
+|---|---|
+| 0 | `server/tests/clusterHarness.ts` — `makeCluster({size})`, N real nodes on real ports |
+| 1 | `eventBus.seedSeq` + front-truncated `recent()`; `/admin/cluster/events` serves the durable table; local events persist synchronously |
+| 2 | `cluster/identity.ts` — ULID `uid` on all seven replicated tables, unique, backfilled at database open |
+| 3 | `cluster/changelog.ts` (triggers + apply + cursors + seed), `cluster/replication.ts` rewritten as the pull, `GET /api/cluster/changes`, `cluster_replication_pull` job |
+
+Tests: `clusterEvents`, `clusterIdentity`, `clusterChangelog`, `clusterReplication`.
+
+Three implementation decisions worth recording, because the text above does not predict
+them:
+
+- **The append is a SQLite trigger, not a wrapper around `db.run()`.** Detecting writes by
+  parsing SQL at the adapter would be guesswork; a trigger sees the committed row. It also
+  means the mint moved into the trigger, so §5.6's "minted where the row is created" is
+  now literally true rather than aspirational. `replication_control` carries the node
+  identity and a suppression flag the triggers read, because a trigger cannot reach
+  application state.
+- **No pending-parent buffer.** §5.7 allows for one; it turned out to be unnecessary.
+  Entries apply in `seq` order and a forwarding hop re-appends in the order it applied, so
+  seq order *is* dependency order. Apply halts at the first entry it cannot write and
+  leaves the cursor before it, which retries rather than drops.
+- **`/cluster/export` was deleted with nothing replacing it.** `seedChangeLog` writes an
+  `upsert` entry per existing row the first time a populated database meets an empty log,
+  so a joining node gets the whole corpus from cursor 0 through the ordinary pull. One
+  mechanism for state transfer instead of two that can disagree.
 
 ---
 

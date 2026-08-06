@@ -1,3 +1,4 @@
+import { seedChangeLog, setNodeIdentity } from "./cluster/changelog.ts";
 import { EventBus } from "./cluster/eventBus.ts";
 import { ClusterEventWriter } from "./cluster/eventStore.ts";
 import { HaltRegistry } from "./cluster/halt.ts";
@@ -30,6 +31,14 @@ export interface AppState {
 
 export function createAppState(settings: Settings, db: Db): AppState {
 	const secure = settings.appEnv !== "dev";
+	// Arm the replication triggers installed by the DB adapter: until the node
+	// has an identity they deliberately do nothing, which is what keeps the boot
+	// uid backfill out of the log. Nothing writes between createDb and here.
+	setNodeIdentity(db, settings.nodeId);
+	// A database that predates the change log gets one describing what it
+	// already holds, so a peer joining later receives the existing corpus
+	// through the ordinary pull path rather than a separate snapshot endpoint.
+	seedChangeLog(db);
 	const eventBus = new EventBus(settings);
 	const eventWriter = new ClusterEventWriter(db);
 	// Locally-originated events persist synchronously (see eventWriter.write):

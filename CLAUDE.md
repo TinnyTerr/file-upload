@@ -13,7 +13,9 @@ Many source comments still say "Mirrors `app/routes/x.py`" or similar. Those ref
 Multi-node replication lives in `server/src/cluster/*.ts`:
 - `membership.ts` — join/heartbeat/enroll handshake, full-mesh peer topology
 - `election.ts` — elected, epoch-versioned leadership (vote-request / master-assumed), layered *under* the replication protocol
-- `replication.ts` — announce-id row replication (reserve/replicate/export) + rebase-from-master conflict fallback
+- `identity.ts` — ULID row identity (`uid`) for replicated tables + the live-safe boot backfill
+- `changelog.ts` — the `replication_log`: trigger-generated, appended **inside the writing transaction**, and the only mechanism by which metadata leaves a node
+- `replication.ts` — hierarchical pull of that log (`GET /api/cluster/changes`) + per-peer cursors
 - `blobs.ts` — content-addressed blob fetch-on-miss from peers (read-time failover for `routes/public.ts`'s raw/preview handlers)
 - `cacheEviction.ts` — LRU eviction for `REPLICATION_MODE=cache` nodes; verifies durability on a full-replica peer before deleting anything
 - `halt.ts` — in-memory TTL'd upload halt registry (user-scope + global), gossiped over the event firehose
@@ -293,8 +295,8 @@ Authorization-code flow with PKCE (S256 only); the consent page is the SPA route
   unexpired row *is* the reuse-detection record; dropping it early would
   downgrade a replayed refresh token to a bare unknown-token error.
 - **OAuth state is node-local**, like sessions and play keys: `oauth_clients`,
-  `oauth_auth_codes` and `oauth_tokens` are deliberately absent from
-  `REPLICATED_TABLES`. Registering an app on one node does not make it usable
+  `oauth_auth_codes` and `oauth_tokens` are deliberately absent from the change
+  log's `CHANGELOG_TABLES`. Registering an app on one node does not make it usable
   against a peer.
 - Adding a scope means wiring it into the routes it is supposed to unlock, or an
   app gets granted something that silently does nothing.
@@ -416,7 +418,7 @@ admin by default would lock the panel out.
 
 Plus the non-boolean `quota_bytes`, `max_file_bytes`, `archive_after_idle_days`. `master` bypasses every check.
 
-Adding a flag means touching **all** of: `db/schema.sql`, an `ensureColumn` backfill in `db/sqlite.ts`, `db/rows.ts`, `permissions.ts` (`BOOL_FLAGS` + the master seed insert), `bootstrap.ts`, `MASTER_ALL_TRUE` in `routes/users.ts`, the `/account/me` payload in `routes/account.ts`, `TABLE_COLUMNS.permissions` in `cluster/replication.ts` (or it silently resets to the default on every peer), and `client/src/config/permissions.ts`.
+Adding a flag means touching **all** of: `db/schema.sql`, an `ensureColumn` backfill in `db/sqlite.ts`, `db/rows.ts`, `permissions.ts` (`BOOL_FLAGS` + the master seed insert), `bootstrap.ts`, `MASTER_ALL_TRUE` in `routes/users.ts`, the `/account/me` payload in `routes/account.ts`, `TABLE_COLUMNS.permissions` in `cluster/changelog.ts` (or it silently resets to the default on every peer), and `client/src/config/permissions.ts`.
 
 ### Admin panel
 
@@ -470,7 +472,7 @@ decrypt rather than a join (mpv issues a Range request per seek), with
   never revive a working key.
 - **Play keys are node-local**, like sessions. The token pins the minting node's
   `NODE_ID`; presented to a peer it fails with a "wrong node" error rather than a
-  bare 401. `media_play_keys` is deliberately absent from `REPLICATED_TABLES`.
+  bare 401. `media_play_keys` is deliberately absent from `CHANGELOG_TABLES`.
 - **Entitlement is re-checked per stream request**, not just at mint time, so
   revoking `can_watch_media` kills outstanding keys immediately.
 - **Seeking depends on storage form.** An untransformed file is served with
@@ -516,7 +518,9 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - **`/account/reset` must not delete the user's `permissions` row** — that would silently reset an admin-assigned quota to the default. Reset purges *content*; only true account deletion purges identity.
 - **Decrypt/decompress order depends on the producer.** `archived && !compressed` is `ZSTD(ENC(x))` (decompress, then decrypt); every other compressed+encrypted combination is `ENC(ZSTD(x))` (decrypt, then decompress). `routes/public.ts` and `storage/zip.ts` both branch on this — keep them in sync.
 - **`TRUST_PROXY` must be set behind a TLS-terminating proxy.** Otherwise `req.protocol` stays `http` in prod and `httpsRedirect` 308s in an infinite loop.
-- **Anything added to `permissions` or `users` must also be added to `cluster/replication.ts`'s `TABLE_COLUMNS`**, or the column silently resets to its default on every peer during replication.
+- **Anything added to a replicated table must also be added to `cluster/changelog.ts`'s `TABLE_COLUMNS`**, or the column silently resets to its default on every peer. A new `BLOB` column additionally needs an entry in `BLOB_COLUMNS` (`json_object()` refuses to hold blob values, so they travel as hex) and a new id-valued column needs one in `FOREIGN_KEYS` — an untranslated id lands on a peer pointing at whatever row happens to occupy that number there.
+- **Don't call anything to replicate a write.** The change log is appended by a trigger inside the same transaction as the write itself (`cluster/changelog.ts`), which is the entire point of Phase 3 — the previous design asked every route handler to remember, and two of about forty did. A route that "also replicates" is a bug.
+- **`replication_control.suppressed` must be lowered on every path that raises it.** It is raised while applying a peer's entries so they aren't re-logged as local writes; left raised, this node silently stops logging its own. `installChangeLog` clears it at boot for exactly that reason.
 - **A play key must never be trusted on a jti that isn't in `media_play_keys`.** Treating a missing row as valid would make the prune job a revocation-bypass.
 - **Deleting a file must also call `deleteThumbnail(fileId)`** — the thumbnail cache is keyed by file id and is not reference-counted.
 - **A debrid retry decides re-import vs. re-download by the `data/debrid/_sources/<tag>.complete` marker**, not by "the staging directory has files in it". A transfer aborted halfway also leaves files there, and importing those would silently store truncated content. The marker is written only after the last byte of the last link lands (`debrid.ts::markTransferComplete`), and lives outside the job directory so the importer never sees it as content.

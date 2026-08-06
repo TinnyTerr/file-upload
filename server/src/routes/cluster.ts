@@ -4,24 +4,17 @@ import type { NextFunction, Request, Response } from "express";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
+import { logHead, readChanges } from "../cluster/changelog.ts";
 import { computeDigest } from "../cluster/digest.ts";
 import {
-	adoptEpochIfHigher,
 	getSelfState,
 	handleMasterAssumed,
 	handleVoteRequest,
-	resolveMaster,
 } from "../cluster/election.ts";
 import { readOwnEvents } from "../cluster/eventStore.ts";
 import * as clusterHttp from "../cluster/http.ts";
 import { ClusterHTTPError } from "../cluster/http.ts";
 import { enrollWithMaster, upsertPeer } from "../cluster/membership.ts";
-import {
-	applyRows,
-	exportAll,
-	localIdentity,
-	type SerializedRow,
-} from "../cluster/replication.ts";
 import { setEnvValue } from "../config.ts";
 import { type ClusterNodeRow, nowIso } from "../db/rows.ts";
 import { getLogger, queryBackendLogs } from "../logging.ts";
@@ -492,55 +485,34 @@ export function clusterRouter(state: AppState): Router {
 		res.json(computeDigest(state));
 	});
 
-	// ── row metadata replication (announce-id protocol) ─────────────────────
+	// ── the replication change log (redesign §5.7) ──────────────────────────
+	//
+	// One endpoint, both directions. A peer pulls from here with the cursor it
+	// last reached; whether that is a follower reading down from its master or
+	// the master reading up from a follower is the caller's business, not this
+	// handler's -- which is what lets the region tier slot in later without a
+	// new endpoint.
+	//
+	// Ascending from `after`, front-truncated at `limit`. Returning the newest
+	// N instead would silently strand everything older, which is exactly the
+	// bug B2 was in the event pipeline.
 
-	router.post("/reserve", clusterAuth, (req, res) => {
-		const body = req.body as {
-			table?: string;
-			id?: number;
-			identity?: string;
-			epoch?: number;
-		};
-		if (!body?.table || body.id === undefined || !body.identity) {
-			res.status(400).json({ detail: "table, id and identity are required" });
-			return;
-		}
-
-		// Epoch fencing: a requester behind the epoch we already know about is
-		// stale (told to re-resolve current epoch/master and retry); a
-		// requester AHEAD of us means WE'RE behind (e.g. missed an election
-		// while partitioned) -- adopt the higher epoch and self-demote if we
-		// mistakenly still believe we're master, but let the request proceed
-		// once adopted rather than bouncing it needlessly.
-		const requestEpoch = Number(body.epoch ?? 0);
-		const self = getSelfState(db);
-		if (Number.isFinite(requestEpoch) && requestEpoch < self.epoch) {
-			res.json({
-				ok: false,
-				conflict: false,
-				stale_epoch: true,
-				current_epoch: self.epoch,
-				current_master: resolveMaster(state),
-			});
-			return;
-		}
-		if (Number.isFinite(requestEpoch) && requestEpoch > self.epoch) {
-			adoptEpochIfHigher(state, requestEpoch, {});
-		}
-
-		const existing = localIdentity(db, body.table, body.id);
-		const ok = existing === null || existing === body.identity;
-		res.json({ ok, conflict: !ok, epoch: getSelfState(db).epoch });
-	});
-
-	router.post("/replicate", clusterAuth, (req, res) => {
-		const body = req.body as { rows?: SerializedRow[] };
-		const applied = applyRows(db, body?.rows ?? []);
-		res.json({ applied });
-	});
-
-	router.get("/export", clusterAuth, (_req, res) => {
-		res.json({ rows: exportAll(db) });
+	router.get("/changes", clusterAuth, (req, res) => {
+		const after = Number(req.query.after ?? 0) || 0;
+		const limitRaw = Number(req.query.limit ?? 500);
+		const limit = Math.max(
+			1,
+			Math.min(Number.isFinite(limitRaw) ? limitRaw : 500, 1000),
+		);
+		const entries = readChanges(db, { after, limit });
+		res.json({
+			entries,
+			last_seq: entries.length > 0 ? entries[entries.length - 1]!.seq : after,
+			// This node's log head, so a caller can tell "nothing new" from
+			// "still catching up" without a second request.
+			head: logHead(db),
+			count: entries.length,
+		});
 	});
 
 	// ── leader election (cluster-token auth, same as the rest of the

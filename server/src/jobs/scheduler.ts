@@ -3,6 +3,7 @@ import { cacheEvictionJob } from "../cluster/cacheEviction.ts";
 import { syncCheckJob } from "../cluster/digest.ts";
 import { checkMasterLivenessJob } from "../cluster/election.ts";
 import { heartbeatJob } from "../cluster/membership.ts";
+import { replicationPullJob } from "../cluster/replication.ts";
 import { getLogger } from "../logging.ts";
 import { prunePlayKeys } from "../media/playKeys.ts";
 import { sweepStaleParts } from "../routes/files.ts";
@@ -33,6 +34,7 @@ const TEN_MIN_MS = 10 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 const FIFTEEN_SEC_MS = 15 * 1000;
 const FIVE_SEC_MS = 5 * 1000;
+const SECOND_MS = 1000;
 
 interface JobSpec {
 	id: string;
@@ -83,6 +85,15 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 			id: "cluster_election_liveness",
 			intervalMs: FIFTEEN_SEC_MS,
 			run: () => checkMasterLivenessJob(state),
+		},
+		// One pull interval per hop is the propagation budget the redesign sets
+		// (§5.7). Costs nothing on a node with no peers, and nothing on a
+		// follower that cannot resolve a master -- both return an empty target
+		// list without making a request.
+		{
+			id: "cluster_replication_pull",
+			intervalMs: SECOND_MS,
+			run: () => replicationPullJob(state),
 		},
 		{
 			id: "cluster_cache_eviction",
