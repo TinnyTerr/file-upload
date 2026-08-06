@@ -1,8 +1,13 @@
 # Cluster redesign — analysis and proposal
 
-**Status:** proposal, no code written.
+**Status:** design agreed, no code written. Part 4 records the decisions; Parts 5–7 are
+built on them. Revised 2026-08-06 — the first draft recommended a **leaderless** design,
+and that was overruled in favour of the **auto-tiered master/region topology** in Part 5.
 **Scope:** `server/src/cluster/*` (3,352 lines incl. `routes/cluster.ts` and `ws.ts`), the
 `cluster_*` tables in `db/schema.sql`, and the replication call sites in `routes/files.ts`.
+
+Parts 1–3 (what exists, defect inventory, root causes) are unchanged and still accurate —
+they are the case for doing any of this. **If you only read one section, read Part 4.**
 
 ---
 
@@ -264,280 +269,592 @@ Strip away the individual bugs and there are three:
 The leader election is a fourth thing, but it isn't a root cause — it's a symptom.
 It was added to arbitrate conflicts that a proper identity scheme wouldn't produce.
 
----
-
-## Part 4 — Requirements this proposal assumes
-
-Stated explicitly so they can be corrected before anything is built:
-
-1. **Scale:** a handful of nodes (2–10), operator-run, not hostile to each other.
-   Not a hundred-node system, not multi-tenant.
-2. **Consistency:** eventual consistency is acceptable for metadata. A file uploaded on
-   node A appearing on node B a few seconds later is fine. **Deletes and revocations
-   converging is not optional** — a revoked link must stop working everywhere.
-3. **Availability:** a node must remain fully usable for its own users while partitioned.
-   This rules out routing all writes through a leader.
-4. **Durability:** the cluster should be able to state a replication factor per blob and
-   prove it before deleting anything.
-5. **Node loss:** losing one node must not lose data that existed on it, given a
-   configured replication factor ≥ 2.
-
-If (3) is actually negotiable — if you'd accept "the cluster is read-only when the leader
-is unreachable" — Option C in Part 6 becomes dramatically simpler than anything else here.
+**Revised note:** a leader *is* wanted after all (Part 4, D-1/D-8) — but for quota and
+write ordering, which are jobs `election.ts` never did. The critique above stands
+unchanged: what is being deleted is the *election*, not the leader. §5.3 replaces 536
+lines of voting, epochs and quorum with a deterministic function over an agreed membership
+snapshot, and §5.5 replaces automatic failover with a human decision, because guessing
+whether the master died or you were partitioned is the failure mode, not the fix.
 
 ---
 
-## Part 5 — Proposed architecture
+## Part 4 — Decisions
 
-### 5.1 Globally unique row identity
+These were open questions in the first draft. They are now answered, and the answers
+changed the shape of the proposal substantially — most of all by **reinstating a leader**,
+which the first draft recommended deleting.
 
-Add a `uid TEXT` column to every replicated table, unique, populated with a ULID
-(lexicographically sortable, embeds creation time, 26 chars). Local `INTEGER PRIMARY KEY`
-stays for local joins and FKs — nothing in the existing query surface changes.
-**`uid` becomes the replication identity**; `id` is never sent over the wire.
+| # | Question | Decision |
+|---|---|---|
+| D-1 | Partitioned node keeps accepting writes? | **No.** Quota is master-authoritative; no master ⇒ no writes. |
+| D-2 | Master loss behaviour | **5-minute restart grace**, requests held not failed; then hard degrade to local-only. **No automatic failover.** |
+| D-3 | Region assignment | **Explicit (`NODE_REGION`) with RTT-clustering fallback** when unset. |
+| D-4 | Leader score | **Greatest `disk_total_bytes`** (total capacity), ties broken by node id. |
+| D-5 | Re-tiering trigger | **Manual, or `trunc(n/3)` status changes, n = whole cluster.** |
+| D-6 | Down-replication | **Metadata to every node; bytes on demand**, and a region that pulls bytes **retains them as cache**. |
+| D-7 | Cache eviction | **LRU**, with used-bytes surfaced in the UI and a configurable cap. |
+| D-8 | Conflict resolution | **Master serializes; the losing edit is recorded and surfaced in the admin panel.** |
+| D-9 | Deployment shape | **2–10 nodes, one region today.** Region tier is designed in but dormant. |
+| D-10 | Chunk splitting | **Yes — reuse the chunked-upload blobbing.** Chunks are content-addressed like blobs. |
+| D-11 | Chunk durability | **Replicate each chunk**, factor configurable. |
+| D-12 | Identity replication | **Everything replicates except `password_hash`**, which is fetched/verified on demand at login. |
+| D-13 | Permission staleness | **Grants lazy, revocations synchronous** to every reachable node. |
+| D-14 | Live data | **Single node with real data.** Backfills must be live-safe; no wire-compat window needed. |
 
-Foreign keys crossing nodes are carried as the parent's `uid` and resolved to the local
-`id` on apply. Rows arriving whose parent `uid` is unknown are parked in a pending buffer
-and retried when the parent lands, which also removes the need for `collectFileRows`'s
-ancestor-chain shipping (`replication.ts:302`).
+### 4.1 What these decisions cost, stated plainly
 
-Backfill fits the project's no-migrations rule: `ensureColumn` adds the column, a one-shot
-boot pass fills `uid` for existing rows.
+Three of them buy correctness with availability, and the doc should say so before Part 5
+makes them sound free:
 
-**This deletes:** `/reserve`, `identityHash`, `localIdentity`, the conflict path, and the
-entire reason `rebaseFromMaster` exists.
+- **D-1 + D-2 mean the cluster has no write path while the master is down, and no
+  automatic recovery.** Mean time to repair is human-bounded. This is deliberate: a node
+  cannot distinguish "the master died" from "I am the one who got cut off", and promoting
+  on the second reading is precisely the split brain that `election.ts` spends 536 lines
+  failing to prevent (B6, B7, B8). Choosing not to guess is cheaper and safer than
+  guessing badly. The mitigation is operational, not algorithmic — a loud alert and a
+  one-click promote (§5.5).
+- **D-12 means a user cannot log in on a node that cannot reach the master**, unless that
+  node already holds their password material. Existing sessions are node-local and
+  unaffected, so this bites new logins during an outage only.
+- **D-5 with n = 3 gives a threshold of 1**, so a single flapping node would re-tier the
+  whole cluster. §5.4 adds a hold-down window and a floor to stop that.
 
-### 5.2 A durable, ordered change log
+### 4.2 What is unchanged from the first draft
 
-New table, node-local, append-only:
+The identity and change-log work (§5.1 of the old draft, §5.6–5.7 here) survives intact.
+Reinstating a master does **not** remove the need for globally unique row ids: two nodes
+can still mint `files.id = 42` for two concurrent uploads that the master both approved,
+because the master approves *quota*, not primary keys. Root causes (1) and (2) from Part 3
+are untouched by the leadership decision.
+
+---
+
+## Part 5 — Target architecture
+
+### 5.1 Topology: three tiers, hierarchical control plane
 
 ```
-replication_log(
-  seq         INTEGER PRIMARY KEY AUTOINCREMENT,   -- this node's monotonic stream
-  table_name  TEXT,
-  row_uid     TEXT,
-  op          TEXT,        -- 'upsert' | 'delete'
-  payload     TEXT,        -- JSON row (null for delete)
-  rev         INTEGER,     -- see 5.3
-  origin_node TEXT,
-  ts          TEXT
-)
+                        ┌──────────────────┐
+                        │      MASTER      │   tier 0 — exactly one
+                        │  quota authority │   canonical write order
+                        │  write ordering  │   full replica, all bytes
+                        └────────┬─────────┘
+                 ┌───────────────┴───────────────┐
+        ┌────────┴────────┐             ┌────────┴────────┐
+        │ REGION LEADER A │             │ REGION LEADER B │   tier 1 — one per region
+        │ relay + cache   │             │ relay + cache   │
+        └────────┬────────┘             └────────┬────────┘
+          ┌──────┼──────┐                  ┌─────┴─────┐
+        node   node   node                node       node       tier 2 — followers
+```
+
+- **Control plane is strictly hierarchical.** A follower talks to its region leader; a
+  region leader talks to the master. This is what "replicated up until it reaches the
+  master, then replicates down" means concretely.
+- **Data plane is not.** Chunk transfer may go node-to-node directly, chosen by the
+  location registry (§5.11) and measured RTT. Forcing bytes through the hierarchy would
+  make the region leader a bandwidth bottleneck for no correctness benefit.
+- **A follower may reach the master directly** when its region leader is down. The region
+  leader is a relay and a cache, not an authority — losing it degrades latency, not
+  capability.
+- **Single-region case (D-9, today):** the master *is* the region leader for the only
+  region and tier 1 collapses. The code path is the same; the region set has one member.
+
+### 5.2 Region assignment
+
+New columns on `cluster_nodes` (all via `ensureColumn`, per the no-migrations rule):
+
+```
+region          TEXT                     -- region name, e.g. 'eu-west'
+region_source   TEXT DEFAULT 'inferred'  -- 'configured' | 'inferred'
+rtt_ms          INTEGER                  -- median heartbeat round-trip to this peer
+throughput_bps  INTEGER                  -- observed bytes/sec from chunk transfers
+```
+
+- `NODE_REGION` (env or admin panel) sets `region` with `region_source = 'configured'`
+  and always wins.
+- Unset ⇒ inferred by clustering the RTT matrix: nodes within a threshold of each other
+  (default 30 ms median, configurable) form a region. `heartbeatJob` already round-trips
+  every peer, so the measurement is free — it just isn't recorded today.
+- `throughput_bps` is sampled from real chunk transfers rather than a synthetic probe. It
+  feeds **placement and read source selection** (§5.11), not leader choice — D-4 made
+  capacity the leader score outright.
+- **Inference runs only at a re-tiering event, never continuously.** Otherwise region
+  membership flaps with network weather, and everything downstream flaps with it.
+
+### 5.3 Leader selection is a pure function, not an election
+
+```
+regionLeader(r) = argmax over eligible nodes in r   of (disk_total_bytes, then node_id ASC)
+master          = argmax over region leaders        of (disk_total_bytes, then node_id ASC)
+```
+
+`disk_total_bytes` is already a `cluster_nodes` column, populated by `heartbeatJob`.
+Ineligible: `REPLICATION_MODE=cache` nodes, nodes an operator has flagged ineligible, and
+nodes outside the liveness window. An explicit operator pin overrides the computation
+entirely.
+
+Ties break lexically on `node_id` so every node computes the same winner from the same
+input. **That is the whole trick:** the thing needing agreement is no longer *who leads*
+but *what the membership snapshot is*. So the snapshot becomes the replicated artefact:
+
+```sql
+CREATE TABLE IF NOT EXISTS cluster_tiering (
+  generation     INTEGER PRIMARY KEY,   -- monotonic, minted by the master only
+  computed_at    TEXT NOT NULL,
+  reason         TEXT NOT NULL,         -- 'manual' | 'drift' | 'promotion'
+  master_node_id TEXT NOT NULL,
+  snapshot       TEXT NOT NULL,         -- JSON: nodes, regions, capacities, rtt matrix
+  regions        TEXT NOT NULL          -- JSON: region -> {leader, members[]}
+);
+```
+
+A node applies the highest `generation` it has seen and derives its own role from it.
+Only the master mints a generation; during a master outage none can be minted, which is
+exactly the degraded mode in §5.5 rather than a separate failure to handle.
+
+**This deletes:** `election.ts` in full (536 lines) — `runElection`, `handleVoteRequest`,
+`/vote-request`, `/master-assumed`, `lastAppliedVector`, `vectorAtLeast`,
+`knownClusterPeers`, `adoptEpochIfHigher`, the `epoch` and `voted_for`/`voted_epoch`
+columns, `cluster_self_state`, and the `cluster_election_liveness` job. With them go
+**B6, B7, B8, D3, D5 and S4** — there is no epoch to poison, no quorum computed over a
+disagreed set, no terminal `candidate` state, and no unauthenticated role field, because
+role is derived rather than asserted.
+
+### 5.4 When tiering changes
+
+Exactly three triggers.
+
+**1. Manual.** An operator re-tiers from the admin panel or `POST /api/cluster/retier`.
+Always available, always wins.
+
+**2. Structural drift.** The master counts node status changes since the current
+generation's snapshot. When the count reaches the threshold it mints a new generation.
+
+- A *status change* is: joined, left, became unreachable, became reachable again, or
+  changed capacity class. A node leaving and being replaced is **2** changes, as specified.
+- Threshold is `max(2, trunc(n/3))` over the **whole cluster** (D-5). The floor matters:
+  at n = 3, `trunc(3/3) = 1`, so without it a single node bouncing re-tiers everything.
+- A change only counts once the node has **held** its new status for a hold-down window
+  (default 5 minutes, same as the master grace). A restart is not drift.
+
+**3. Master promotion**, which is manual by construction — see below.
+
+**Region-leader loss is drift like anything else.** It counts toward the threshold and does
+not by itself trigger a re-tier, because its followers can reach the master directly in the
+meantime (§5.1).
+
+### 5.5 Master loss: grace, then degrade
+
+**There is no automatic failover.** This is the single most consequential decision in the
+document (D-2) and it is deliberate — see §4.1.
+
+| Time | Behaviour |
+|---|---|
+| t+0 | Master unreachable. Requests needing it are **held**, not failed: quota reservations, tiering, permission revocations. |
+| t+0 → t+5min | Restart grace. A master returning inside the window drains the held requests; the only user-visible effect is latency. |
+| t+5min | Grace expires. Held requests fail with a distinct error naming the cause. Cluster enters **degraded mode**. |
+
+Degraded mode, per node, working from local information only:
+
+| Still works | Refused |
+|---|---|
+| All reads — listings, downloads, previews, thumbnails | Uploads (browser, API, dropbox, remote, torrent) — quota unverifiable |
+| Public share links and folder links | Renames, moves, deletes — no ordering authority |
+| Media streaming and play keys (node-local already) | Permission and quota changes |
+| Existing sessions (node-local, 24 h) | New logins for users this node holds no password material for (§5.10) |
+| Cached and locally-held chunk serving | New link creation, encryption changes, sealing |
+
+Recovery is either the master returning, or an operator promoting a node — a typed
+confirmation in the admin panel, which mints generation *g+1* with `reason='promotion'`.
+The panel shows a persistent banner naming the reason, the elapsed time, and which nodes
+are reachable, because promotion is a judgement only a human with out-of-band knowledge of
+the network can make safely.
+
+### 5.6 Globally unique row identity
+
+Unchanged from the first draft, and still required (§4.2). `uid TEXT` ULID on every
+replicated table, unique; local `INTEGER PRIMARY KEY` stays for joins and FKs. `uid` is the
+replication identity and `id` is never sent over the wire. Cross-node foreign keys travel
+as the parent's `uid`, resolved on apply; rows whose parent `uid` hasn't landed park in a
+pending buffer.
+
+Backfill is `ensureColumn` plus a one-shot boot pass. D-14 (live data on one node) means
+that pass must be safe on a populated database but needs no protocol compatibility window.
+
+**This deletes:** `/reserve`, `identityHash`, `localIdentity`, the conflict path, and the
+reason `rebaseFromMaster` exists — removing **D1**.
+
+### 5.7 The change log, shipped hierarchically
+
+```sql
+CREATE TABLE IF NOT EXISTS replication_log (
+  seq         INTEGER PRIMARY KEY AUTOINCREMENT,  -- this node's local stream
+  master_seq  INTEGER,                            -- assigned when the master commits it
+  table_name  TEXT NOT NULL,
+  row_uid     TEXT NOT NULL,
+  op          TEXT NOT NULL,                      -- 'upsert' | 'delete'
+  payload     TEXT,                               -- JSON row; NULL for delete
+  base_master_seq INTEGER,                        -- what the writer last saw (§5.8)
+  origin_node TEXT NOT NULL,
+  ts          TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS replication_cursors (
+  peer_node_id TEXT NOT NULL,
+  direction    TEXT NOT NULL,   -- 'up' | 'down'
+  seq          INTEGER NOT NULL,
+  PRIMARY KEY (peer_node_id, direction)
+);
 ```
 
 Every mutation to a replicated table appends here **inside the same transaction as the
-write**. Enforced at the DB adapter layer (`db/sqlite.ts`), not left to call sites — that
-is the fix for root cause (2). A write that isn't logged should be impossible rather than
-merely discouraged.
+write**, enforced at the DB adapter layer (`db/sqlite.ts`) rather than at call sites. That
+is the fix for root cause (2): a write that isn't logged should be impossible, not merely
+discouraged.
 
-Peers pull: `GET /api/cluster/changes?after=<seq>&limit=N`, apply idempotently by `uid`,
-and persist a per-source cursor in a `replication_cursors(source_node_id, seq)` table.
-Restart-safe, outage-safe, backpressure-free.
+**Up:** follower → region leader → master, via `GET /api/cluster/changes?after=<seq>`.
+Each hop forwards entries it has not yet forwarded, preserving origin.
+**Down:** master → region leaders → followers, the same endpoint in the other direction.
+The master's stream is canonical order; `master_seq` is assigned on commit there.
 
-**This gives us, for free:** delete propagation, rename/move propagation, permission and
-password changes, link revocation, lifecycle transitions, media publishes — every entry in
-B5's table, without touching a single route handler. It also gives a real answer to "am I
-in sync": compare cursors against each peer's head sequence.
+A locally-written row is **provisional** until it comes back down carrying a `master_seq`.
+The UI need not show that distinction for ordinary work, but it is what lets §5.8 detect
+conflicts and what makes "am I in sync" answerable: compare cursors against each peer's
+head.
 
-**This deletes:** `replicateFile`, `collectFileRows`, `exportAll`, `applyRows`,
-`rebaseFromMaster`, `/replicate`, `/export`, and the `void …catch()` call sites.
+**Delay is expected and acceptable.** Budget one pull interval per hop — default 1 s
+intra-region, 5 s cross-region, so a cross-region follower-to-follower propagation is
+~4 intervals worst case.
 
-### 5.3 Conflict resolution: per-row LWW with an actual revision
+**This gives, without touching a single route handler:** delete propagation, rename and
+move propagation, permission and password changes, link revocation, lifecycle transitions,
+media publishes — the entire B5 table. **It deletes:** `replicateFile`, `collectFileRows`,
+`exportAll`, `applyRows`, `rebaseFromMaster`, `/replicate`, `/export`, and the
+`void …catch()` call sites, removing **B4, B5, D4**.
 
-Add `rev INTEGER` and `rev_node TEXT` to replicated tables. Every local write bumps
-`rev = max(local_rev, seen_rev) + 1` and stamps `rev_node`. Apply rule:
+### 5.8 Conflicts: the master serializes, and losers are visible
 
-```
-accept incoming iff (incoming.rev, incoming.rev_node) > (local.rev, local.rev_node)
-```
+The master gates *quota*, not every mutation. A rename, a move, a permission edit and a
+link revocation consume no quota, so two nodes can still both accept an edit to the same
+row. Resolution is optimistic concurrency control keyed on `master_seq` (D-8):
 
-Deterministic, commutative, order-independent, needs no leader, and converges regardless
-of delivery order. `rev_node` breaks ties by lexical node id so all nodes pick the same
-winner.
+On apply at the master, for an incoming entry on row `uid`:
 
-Deletes are **tombstones** — a `delete` log entry with a `rev`, and the row's `uid`
-retained in a `tombstones(uid, table_name, rev, ts)` table so a late-arriving stale upsert
-can't resurrect it. Tombstones are pruned only after every known peer's cursor has passed
-the entry (the same reasoning as `pruneOauth` only deleting rows past `expires_at`).
+- `incoming.base_master_seq == row.master_seq` → **accept**, assign the next `master_seq`,
+  ship down.
+- otherwise → **reject**, and write:
 
-**This replaces:** the undocumented "whoever pushes last wins" behaviour (D2), and removes
-the need for a master to break ties (D3).
-
-### 5.4 Delete the election
-
-With globally-unique ids (5.1), a per-node ordered log (5.2), and deterministic LWW (5.3),
-there is nothing left that requires a single writer. Proposal: **remove `election.ts`
-entirely**, along with epoch fencing in `membership.ts`, `replication.ts`,
-`routes/cluster.ts`, the `cluster_self_state` table, `/vote-request`, `/master-assumed`,
-the `cluster_election_liveness` job, and the split-brain cross-check in `digest.ts`.
-
-That is ~700 lines and B6, B7, B8, D3, D5 and S4 removed together.
-
-`MASTER_URL` / `MASTER_TOKEN` survive purely as **bootstrap seed coordinates** — "here is
-a node that can introduce you to the cluster" — with no ongoing authority. `NODE_ROLE`
-goes away.
-
-The one thing genuinely needing coordination is cluster-wide admin actions (global quota,
-bulk deletes). Those are rare, operator-initiated, and can be handled by making them
-ordinary replicated rows subject to the same LWW rule rather than by standing up a
-consensus protocol.
-
-### 5.5 Blob placement becomes explicit
-
-New replicated table:
-
-```
-blob_locations(blob_uid, node_id, state, size_bytes, updated_at)
-   state ∈ 'present' | 'wanted' | 'evicted'
+```sql
+CREATE TABLE IF NOT EXISTS replication_conflicts (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  table_name     TEXT NOT NULL,
+  row_uid        TEXT NOT NULL,
+  losing_payload TEXT NOT NULL,
+  winning_master_seq INTEGER NOT NULL,
+  origin_node    TEXT NOT NULL,
+  detected_at    TEXT NOT NULL,
+  dismissed_at   TEXT
+);
 ```
 
-Because it replicates through the same log, every node knows where every blob is.
+The conflict row ships down like any other row, so the node whose edit lost learns about
+it. Followers apply the master's stream unconditionally — the losing row is overwritten on
+the way back down.
 
-- **Read failover** (`blobs.ts`) queries the table instead of walking all peers with a 30s
-  timeout each. Fixes D6's worst case.
-- **Push replication:** a `blob_replication` job on each node compares
-  `count(state='present')` against a configured `REPLICATION_FACTOR` and pushes bytes to
-  under-replicated targets, choosing by free disk. **This is the missing capability that
-  makes `REPLICATION_MODE=cache` real** — bytes now reach `full` nodes without waiting for
-  someone to download them (fixes B10).
-- **Eviction** becomes a table lookup plus one confirming HEAD, not an N-peer walk.
-- **Node loss** becomes recoverable: rows with `state='present'` on a dead node are
-  re-queued for replication elsewhere.
-- Archive-only-on-`ARCHIVE_ENABLED`-nodes stays expressible as a placement policy.
+The admin panel gets a **Conflicts** view: what was attempted, what won, on which node,
+with *dismiss* and *re-apply* (re-apply = a fresh edit on top of the winner, not a replay).
+No round-trip on the write path, and nothing is silently lost — which is the difference
+between this and today's undocumented "whoever pushed last wins" (**D2**).
 
-### 5.6 Fix the event pipeline
+### 5.9 Quota is synchronous; permissions are not
 
-Three changes, small and independent of everything above:
+Two different rules for two different risks.
+
+**Quota — master-authoritative, on the write path (D-1).**
+
+```
+POST /api/cluster/quota/reserve   { user_uid, bytes }  →  { reservation_uid, expires_at }
+POST /api/cluster/quota/commit    { reservation_uid, actual_bytes }
+POST /api/cluster/quota/release   { reservation_uid }
+```
+
+- Called from `POST /files/init`, chunked-upload init, torrent add, and remote-upload
+  submit — i.e. before bytes are accepted, not after.
+- Reservations live in a durable master-side table so an in-flight upload counts against
+  quota before its bytes exist. Committed at `finalizeStoredFile`, released on abort,
+  expired by a sweep (TTL matched to `CHUNK_SESSION_TTL`, 12 h).
+- The same call covers the **global storage cap** and the **free-disk check**
+  (`storage/accounting.ts`), both of which are cluster-wide facts now rather than local
+  ones.
+- Per-user quota still uses the logical `SUM(size_bytes)` number, and the global cap the
+  post-dedup `SUM(stored_size_bytes)` number — that distinction survives unchanged, it
+  just gets computed on the master.
+
+**Permissions — local read, asymmetric write (D-13).**
+
+- **Read path always uses the local `permissions` row.** Zero round-trips, so `requirePermission`
+  stays as cheap as it is today.
+- **Grants are lazy** — they flow down the log like any other row and take effect within
+  replication lag.
+- **Revocations are synchronous.** Removing a boolean flag, lowering a quota, disabling an
+  account, deleting an API key, revoking a share link: the admin call does not return until
+  every *reachable* node has acknowledged. The response names any node that lagged.
+- Unreachable nodes pick it up from the log on reconnect. Residual exposure is a stale
+  grant on a **read** only — such a node cannot reach the master, so it cannot accept
+  writes anyway (§5.5).
+
+The asymmetry is the point: a stale grant is a security hole, a stale denial is an
+inconvenience. It is also why `POST /files/:id/seal`, link revocation and encryption
+changes ride the revocation path rather than the ordinary one.
+
+### 5.10 Identity: everything replicates except the password hash
+
+**Replicated to every node:** `users` (minus `password_hash`), `permissions`, avatar,
+`webauthn_user_handle`, MFA flags. Every node can therefore *authorize* every user without
+a round-trip, which is what §5.9's local permission read depends on.
+
+**Not replicated:** `password_hash`, and TOTP seeds. On a login for a user whose hash this
+node does not hold:
+
+```
+POST /api/cluster/identity/verify  { username, password }  →  { ok, must_change, mfa_required, methods }
+```
+
+forwarded up the tier to a holder. **Argon2id verification happens on the holder**, so the
+hash never crosses the wire in either direction — the request carries the candidate
+password over the already-authenticated node-to-node channel and gets back a boolean plus
+the ceremony metadata `routes/auth.ts` needs.
+
+The verifying node caches the *outcome* for the session lifetime, never the hash. A
+password change publishes an invalidation down the log.
+
+Consequences, both intended:
+
+- `GET /api/cluster/export` — the credential dump in **S1** — is closed by construction:
+  after §5.7 the endpoint is gone, and even the change log carries no hash.
+- In degraded mode a user cannot log in on a node that can't reach a holder. Existing
+  sessions are node-local and 24 h, so this affects new logins during an outage only.
+
+### 5.11 Blobs: chunking, placement, and the region cache
+
+**Chunking reuses the upload path's blobbing (D-10).** Every stored blob becomes a manifest
+over N content-addressed chunks. Chunk size is `chunkUploadSize()` — 16 MiB, overridable
+via `FILEUPLOAD_CHUNK_SIZE` (`routes/files.ts:95`) — which is already a whole multiple of
+the AEAD container's 2 MiB plaintext frame (`crypto/aead.ts:14`), so **a chunk boundary
+never bisects a GCM frame**. Chunking is over the **stored** bytes (post-transform), since
+that is what is on disk and what `attachBlob` keys on.
+
+```sql
+CREATE TABLE IF NOT EXISTS blob_chunks (
+  blob_uid     TEXT NOT NULL,
+  idx          INTEGER NOT NULL,
+  chunk_sha256 TEXT NOT NULL,
+  size_bytes   INTEGER NOT NULL,
+  PRIMARY KEY (blob_uid, idx)
+);
+CREATE TABLE IF NOT EXISTS chunk_locations (
+  chunk_sha256 TEXT NOT NULL,
+  node_id      TEXT NOT NULL,
+  state        TEXT NOT NULL,   -- 'present' | 'wanted' | 'evicted'
+  size_bytes   INTEGER NOT NULL,
+  pinned       INTEGER NOT NULL DEFAULT 0,
+  last_read_at TEXT,
+  updated_at   TEXT NOT NULL,
+  PRIMARY KEY (chunk_sha256, node_id)
+);
+```
+
+Both replicate through the log, so **every node knows where every chunk is** — replacing
+`fetchBlobFromPeers`' sequential 30-s-per-peer walk and its 30N-second worst case (**D6**).
+
+**Limited-drive-space nodes.** This is the point of chunking, not a side effect. A 40 GiB
+file is 2,560 chunks, and any node with 16 MiB free can hold one — so a small node
+contributes real capacity toward files far larger than its disk, instead of being unable to
+participate at all. Chunk-level accounting also means a node's contribution degrades
+smoothly as it fills rather than falling off a cliff at "largest file it can hold".
+
+Dedup improves as a side effect: chunks are keyed on their own `stored_sha256` and
+ref-counted exactly like blobs today, so two files sharing a prefix share chunks.
+
+**Placement (D-11).**
+
+- `REPLICATION_FACTOR` (default 2) chunk copies cluster-wide. A `chunk_replication` job on
+  each node finds under-replicated chunks it holds and pushes to the emptiest eligible
+  target, preferring high `throughput_bps` and, for the second copy, a *different region*.
+- **The master always holds a full copy.** It is the largest node by construction (§5.3),
+  and this is what makes "everything replicates up to the master" true of bytes as well as
+  rows. It also gives the durability check a node that is always a valid witness.
+- Node loss becomes recoverable: `state='present'` rows for a dead node are re-queued for
+  replication elsewhere, per chunk rather than per file.
+
+**Region cache (D-6, D-7).**
+
+- A node reading a chunk it doesn't hold picks a source from `chunk_locations`,
+  nearest-first by measured RTT, and **retains** it (`state='present'`, `pinned=0`).
+- Eviction is **LRU on `last_read_at`**. `pinned=1` chunks — the durability copies placed
+  by the replication factor — are exempt: they are not cache and must never be evicted to
+  make room for cache.
+- `CACHE_MAX_BYTES` caps the **unpinned** bytes only; `0`/unset = uncapped.
+- **The admin panel must show cache usage and let it be capped.** Per node: pinned bytes
+  (durability), cached bytes (opportunistic), the cap, and headroom — as distinct numbers.
+  Today's UI conflates the two, which is part of why `REPLICATION_MODE=cache` is hard to
+  reason about.
+- A chunk is evicted only once `chunk_locations` shows ≥ `REPLICATION_FACTOR` other
+  `present` copies, verified with **one** confirming HEAD rather than an N-peer walk.
+
+Together with push replication this is what finally makes cache mode work: bytes now reach
+durable nodes without waiting for someone to download them (**B10**), and the eviction pass
+is a table lookup rather than 10k×N sequential round-trips (**D6**).
+
+**Read path.** `storage/streaming.ts` gathers chunks — local first, then nearest peer, in
+parallel with a small look-ahead. For an untransformed file a Range request maps directly
+onto a chunk range, so `Accept-Ranges: bytes` and seeking are preserved. Encrypted,
+compressed and archived files still reproduce from byte zero and stream 200-only, exactly
+as documented today; `entries[].seekable` keeps meaning what it means.
+
+### 5.12 Event pipeline fixes
+
+Unchanged from the first draft, and still the thing to do **first** — they are pure bug
+fixes, independent of everything above, and they are what makes the rest debuggable.
 
 1. Seed `EventBus.seq` from `SELECT MAX(origin_seq) FROM cluster_events WHERE
-   origin_node_id = <self>` at startup (fixes B1). Restore the Python `seed_seq` behaviour.
-2. Serve `/admin/cluster/events` from the `cluster_events` **table**, ordered ascending by
-   `origin_seq`, not from the ring buffer (fixes B2 and B3 together — the table has no
-   capacity limit and ascending order is natural). The ring buffer stays for the live
-   websocket only.
+   origin_node_id = <self>` at startup (**B1**).
+2. Serve `/admin/cluster/events` from the `cluster_events` **table**, ascending by
+   `origin_seq`, not from the 5,000-entry ring buffer (**B2** and **B3**). The buffer stays
+   for the live websocket only.
 3. Persist locally-originated events synchronously in the publishing transaction rather
-   than via the 250ms drain (`eventStore.ts:63`), so an event can never be published,
-   observed by a peer, and then lost on crash.
+   than via the 250 ms drain, so an event cannot be published, observed by a peer, and then
+   lost to a crash.
 
-These are worth doing **first and separately** — they are pure bug fixes, they don't
-depend on the redesign, and they're what makes the system observable enough to debug the
-rest.
+### 5.13 Security
 
-### 5.7 Security
+- **Per-node credentials.** Replace the single shared `CLUSTER_TOKEN` with a short-lived,
+  one-use, operator-generated enrolment token that mints a **per-node-pair** credential.
+  Peer credentials are stored hashed where they are verified, and no response body ever
+  contains another node's token (fixes **S1**, **S2**).
+- **Rotation propagates.** A node announces its new credential over the log before the old
+  one stops being accepted, with an overlap window (fixes **S3**).
+- **`/export` is deleted** by §5.7, and §5.10 means no endpoint returns a password hash at
+  all — the credential-dump surface is gone rather than merely gated.
+- **Role and tiering are derived, not asserted.** With `election.ts` gone there is no
+  `epoch` or `role` field in a request body to forge; a node's tier comes from the
+  master-minted `cluster_tiering` generation, and only the master can mint one (fixes
+  **S4**).
+- **Node-to-node routes move to their own router** with their own auth, separate from the
+  session-authenticated admin surface — ending the two-auth-models-in-one-625-line-file
+  problem.
 
-- **Per-node credentials.** Replace the single `CLUSTER_TOKEN` with an enrolment token
-  (short-lived, operator-generated, one use) that mints a **per-node-pair** credential.
-  Store peer credentials hashed where they're verified, and never return another node's
-  token in any response body (fixes S1, S2).
-- **Rotation propagates**: a node rotating its credential announces the new one to peers
-  over the log before the old one stops being accepted, with an overlap window (fixes S3).
-- **`/export` is deleted** (5.2 replaces it), removing the credential-dump endpoint.
-  The change-log endpoint is cursor-scoped and carries the same data, but incrementally
-  and only to enrolled peers — worth deciding whether `password_hash` and `enc_key_blob`
-  should replicate at all, or whether identity should stay node-local like sessions,
-  OAuth and play keys already do. **See open question Q3.**
-- Node-to-node routes move to their own router file with their own auth, separate from the
-  session-authenticated admin surface.
-
-### 5.8 Resulting module shape
+### 5.14 Resulting module shape
 
 ```
 cluster/
   identity.ts      ULID minting, uid↔id resolution, pending-parent buffer
-  changelog.ts     append (in-transaction), read by cursor, apply with LWW + tombstones
-  sync.ts          per-peer pull loop, cursor persistence, backpressure
-  membership.ts    enrol / heartbeat / peer table  (no election, no epochs)
-  placement.ts     blob_locations, replication factor, push targets, eviction policy
-  blobs.ts         fetch/serve bytes  (registry-driven, unchanged interface)
+  changelog.ts     append (in-transaction), read by cursor, apply, conflict detection
+  sync.ts          up/down pull loops per peer, cursor persistence, backpressure
+  tiering.ts       membership snapshot, region inference, deterministic leader function,
+                   generation minting, drift counter + hold-down
+  membership.ts    enrol / heartbeat / peer table, RTT + throughput sampling
+                   (no election, no epochs, no votes)
+  quota.ts         master-side reservations; client side of reserve/commit/release
+  degraded.ts      master-reachability state machine, 5-min grace, held-request queue
+  placement.ts     blob_chunks, chunk_locations, replication factor, push targets,
+                   LRU eviction with pinned exemption and cache caps
+  blobs.ts         fetch/serve chunk bytes (registry-driven)
   halt.ts          unchanged
-  events.ts        eventBus + durable store, merged and fixed (5.6)
+  events.ts        eventBus + durable store, merged and fixed (§5.12)
 routes/
   cluster.ts       session-authenticated admin surface only
   clusterNode.ts   node-to-node surface, separate auth
 ```
 
-Roughly 3,352 → an estimated ~1,800 lines, with election, the announce protocol, the
-rebase path and the digest check all gone.
+`election.ts`, `replication.ts` and `digest.ts` are gone. The line count is roughly flat
+against today's 3,352 rather than the ~1,800 the first draft projected — chunking (§5.11),
+quota reservations (§5.9) and degraded mode (§5.5) are new capability, not just
+replacement. The complexity that *leaves* is the load-bearing kind: epochs, quorum, vote
+grants, the announce protocol and the rebase sledgehammer.
 
 ---
 
-## Part 6 — Alternatives considered
+## Part 6 — Alternatives, revisited
 
-**Option A — the above: log-shipping, leaderless, LWW.** *(recommended)*
-Fits the project's constraints: no ORM, no migrations, SQLite per node, nodes independently
-usable when partitioned. Trade-off: eventual consistency with LWW means a concurrent edit
-to the same row on two nodes silently loses one side. For this workload (files are
-uploaded once, rarely edited concurrently by two users on two nodes) that is an acceptable
-and honest trade. Largest cost is the `uid` backfill touching every replicated table.
+**Option A — leaderless log-shipping with LWW.** *(was recommended; now rejected)*
+Rejected by D-1 and D-8: quota must be exact, which needs one authority, and a lost edit
+must be attributable, which LWW cannot do. Its machinery survives — the uid scheme and the
+change log are §5.6 and §5.7 — but its leaderless conclusion does not.
 
-**Option B — real consensus (Raft) over a replicated log.**
-Correct in the strong sense, and would make cluster-wide operations trivially safe.
-Rejected: implementing Raft properly (log compaction, snapshot transfer, membership
-changes, the corner cases that make Raft papers long) is a large multi-week effort, it
-requires routing all writes through a leader — violating requirement (3) — and at 2–10
-operator-run nodes it is not proportionate. The existing `election.ts` is what a
-half-implemented Raft looks like, and that's the thing being replaced.
+**Option B — real consensus (Raft).** Still rejected, and worth naming why the proposal is
+not simply a worse Raft. What §5.3–5.5 describe is *single-writer without the consensus
+machinery*: correctness comes from having exactly one authority, and the price is that
+electing a replacement is a human decision rather than an automatic one. Raft's entire
+value is automating that one step, at the cost of log compaction, snapshot transfer,
+joint-consensus membership changes and the corner cases that make the papers long. At 2–10
+operator-run nodes (D-9) with a human on call, that trade is not worth taking. The existing
+`election.ts` is what a half-implemented Raft looks like, and it is the thing being deleted.
 
-**Option C — externalize the metadata store.**
-Point every node at one shared Postgres; keep only blobs distributed (5.5). This deletes
-the entire replication problem — no log, no uid, no LWW, no tombstones, no conflicts.
-Nodes become stateless-ish frontends over shared metadata plus local blob caches.
-Trade-off: it's a hard operational dependency the project deliberately avoided
-(`bun:sqlite`, no migrations, `data/app.db`), it makes a partitioned node read-only or
-dead, and it introduces a single point of failure unless you also run Postgres HA.
-**Genuinely the simplest correct answer if requirement (3) is negotiable** — worth an
-explicit decision rather than dismissal.
+**Option C — externalize the metadata store (shared Postgres).**
+Now genuinely competitive, because D-1 dropped the requirement that made it a non-starter.
+It deletes the log, the uid scheme, conflicts and cursors outright. The remaining
+difference is read locality: Postgres makes *every* metadata read a network call, whereas
+this design keeps all reads local and sends only the small authoritative decisions (quota,
+ordering, revocation) to the master. For geographically spread nodes on slow links that
+gap is the whole argument. It also adds a hard operational dependency the project
+deliberately avoided. **Keep it as the named fallback**: if the master-gated write path
+turns out to be most of the complexity anyway, Option C is the cheaper way to get it.
 
-**Option D — patch what's there.**
-Fix B1–B3 and B6–B8, add delete propagation, add an updated_at comparison. Rejected as a
-target state: D1 (colliding integer ids) can't be patched without the `uid` change, and
-without D1 the announce/rebase machinery has to stay. You'd spend most of the effort and
-keep most of the complexity. The event-pipeline fixes (5.6) *are* worth taking as patches
-immediately, which is why they're staged first.
+**Option D — patch what's there.** Unchanged: D1's colliding integer ids can't be patched
+without the uid change, and without that the announce/rebase machinery has to stay. The
+event-pipeline fixes (§5.12) *are* worth taking as patches immediately, which is why they
+are staged first.
 
 ---
 
-## Part 7 — Suggested phasing
+## Part 7 — Phasing
 
-Each phase is independently shippable and leaves the system no worse than before.
+Each phase is independently shippable and leaves the system no worse than before. D-14
+(real data, single node) means every backfill must be live-safe, but no phase needs a
+wire-protocol compatibility window.
 
-| Phase | Work | Removes |
+| Phase | Work | Removes / adds |
 |---|---|---|
-| **0** | Cluster test harness — multi-node in-memory, extending `tests/harness.ts` | the reason all this shipped green |
-| **1** | Event pipeline fixes (5.6) — seed seq, serve from table, ascending slice | B1, B2, B3 |
-| **2** | `uid` column + backfill on replicated tables; uid-based apply alongside the existing path | D1 |
-| **3** | `replication_log` + in-transaction append at the adapter layer; peer pull loop + cursors. Delete `replicateFile`, `/reserve`, `/replicate`, `/export`, `rebaseFromMaster` | B4, B5, D4, S1 |
-| **4** | `rev`/`rev_node` LWW + tombstones | D2 |
-| **5** | Delete `election.ts`, epochs, `cluster_self_state`, digest split-brain check | B6, B7, B8, B9, D3, D5, S4 |
-| **6** | `blob_locations` + push replication + registry-driven failover and eviction | B10, D6 |
-| **7** | Per-node credentials, rotation-with-overlap, router split | S2, S3 |
+| **0** | Cluster test harness — multi-node in-memory, extending `tests/harness.ts` | the reason all of this shipped green |
+| **1** | Event pipeline fixes (§5.12) | B1, B2, B3 |
+| **2** | `uid` column + live-safe backfill on replicated tables | D1 |
+| **3** | `replication_log` + in-transaction append at the adapter layer; hierarchical up/down pull + cursors. Delete `replicateFile`, `/reserve`, `/replicate`, `/export`, `rebaseFromMaster` | B4, B5, D4, S1 |
+| **4** | `cluster_tiering`, region columns, RTT sampling, deterministic leader function, drift counter. **Delete `election.ts`**, epochs, `cluster_self_state`, `digest.ts`'s split-brain check | B6, B7, B8, B9, D3, D5, S4 |
+| **5** | Master-gated quota reservations; degraded mode + 5-minute grace + held-request queue; admin promote + banner | D-1, D-2 |
+| **6** | `replication_conflicts` + admin Conflicts view; synchronous revocation path | D2, D-13 |
+| **7** | Identity split — `password_hash` stays home, `/cluster/identity/verify` | D-12, closes S1 fully |
+| **8** | Chunking: `blob_chunks`, `chunk_locations`, replication factor, push replication, LRU + pinned exemption, cache caps and admin UI | B10, D6, D-10, D-11 |
+| **9** | Per-node credentials, rotation with overlap, node-to-node router split | S2, S3 |
 
-Phases 1 and 2 are safe to land against the current design. Phase 3 is the one-way door.
+Phases 1 and 2 are safe against the current design. **Phase 3 is the one-way door.**
+Phase 4 is the point at which the topology in this document actually exists. Phase 8 is
+separable and can slip without blocking anything above it — chunking is capability, not
+correctness.
 
 ---
 
-## Part 8 — Open questions
+## Part 8 — Residual questions
 
-**Q1 — Is requirement (3) real?** Must a partitioned node keep accepting writes? If not,
-Option C (shared Postgres) is far less work than Option A and eliminates this whole
-subsystem. This single answer changes everything downstream.
+None of these block Phase 0–3. Each carries a recommendation, so silence is a valid answer.
 
-**Q2 — What is the actual deployment?** Number of nodes, same datacenter or geographically
-spread, and what a node is expected to survive. The doc assumes 2–10 operator-run nodes.
-Geo-distribution would change the sync interval, the replication factor defaults, and
-whether pull-based catch-up is fast enough.
+**R-1 — WebAuthn credentials and TOTP seeds.** §5.10 keeps `password_hash` home, but
+WebAuthn verification needs the credential's *public* key locally and a passkey is
+phishing-resistant, so the risk profile is very different. *Recommend:* replicate WebAuthn
+public keys, keep TOTP seeds home alongside the password hash.
 
-**Q3 — Should identity replicate at all?** `users`, `permissions` and `password_hash`
-currently replicate, while sessions, OAuth clients/tokens and media play keys deliberately
-do not. Replicating credentials is what makes `/export` a credential dump (S1). The
-alternative — identity stays node-local, and cross-node access is delegated (the OAuth
-model already in the codebase) — is a bigger product change but a much smaller attack
-surface. Worth deciding deliberately rather than inheriting.
+**R-2 — Legacy blobs at the chunking cutover.** Rechunk existing blobs in place, or record
+them as single-chunk manifests and only chunk new writes? *Recommend:* single-chunk
+manifests, with an optional background rechunk job — it makes Phase 8 non-disruptive.
 
-**Q4 — What replication factor, and is `cache` mode still wanted?** 5.5 makes it work
-properly, but it's the most complex part of the proposal. If every node is expected to be
-a full replica, `blob_locations` gets much simpler and `cacheEviction.ts` can be deleted
-outright.
+**R-3 — What counts as a "capacity class change"** for the drift counter (§5.4)? Any change
+to `disk_total_bytes` would make routine disk growth look like churn. *Recommend:* only a
+change that would alter the computed leader, plus crossing an eligibility boundary.
 
-**Q5 — Is there production data in a live cluster right now?** Determines whether Phase 2's
-`uid` backfill needs to be online-safe, and whether the existing node-to-node wire protocol
-needs a compatibility window or can be cut over.
+**R-4 — Quota reservation TTL.** 12 h matches `CHUNK_SESSION_TTL` so a resumable chunked
+upload never outlives its reservation. Confirm that's the right ceiling for very large
+torrent imports, which can legitimately run longer.
+
+**R-5 — Does `POST /d/:slug/save` need a quota reservation?** It creates a file row and
+attaches an existing blob, so logical bytes grow while physical bytes may not. *Recommend:*
+yes — per-user quota is the logical number, so it must reserve.
