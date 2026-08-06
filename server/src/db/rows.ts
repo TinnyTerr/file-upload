@@ -312,7 +312,9 @@ export interface TorrentJobRow {
 	debrid_status: string | null;
 	/** Why the job landed on qBittorrent while Real-Debrid was configured. */
 	fallback_reason: string | null;
-	/** queued | downloading | fetching | importing | completed | failed | cancelled */
+	/** pending | queued | downloading | fetching | importing | seeding |
+	 * completed | failed. `pending` has not been sent to any backend yet;
+	 * `seeding` has already imported and is only still uploading. */
 	status: string;
 	progress: number;
 	size_bytes: number;
@@ -322,6 +324,12 @@ export interface TorrentJobRow {
 	imported_file_count: number;
 	error: string | null;
 	created_at: string;
+	/** When the job reached a backend. NULL while pending, and NULL on rows
+	 * that predate the queue (they were dispatched at creation). */
+	started_at: string | null;
+	/** Mirrored from qBittorrent while seeding. */
+	seed_ratio: number | null;
+	seed_seconds: number | null;
 	updated_at: string;
 	completed_at: string | null;
 }

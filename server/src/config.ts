@@ -40,6 +40,18 @@ export interface Settings {
 	/** The same directory as *this server* sees it -- differs when qBittorrent
 	 * runs in a container with a different mount point. Defaults to the save path. */
 	torrentContentPath: string;
+	/** Keep a qBittorrent torrent seeding after its files have been imported.
+	 * The importer *copies* into blob storage rather than moving, so a seeding
+	 * torrent is a second full copy on disk until the share limits below retire
+	 * it -- which is why those limits exist and why 0/0 is a disk leak. */
+	qbittorrentSeeding: boolean;
+	/** Share ratio at which a seeding torrent is stopped, removed from
+	 * qBittorrent and its downloaded copy deleted. 0 = no ratio limit. */
+	qbittorrentSeedRatio: number;
+	/** Minutes of seeding after which the same happens. 0 = no time limit.
+	 * Whichever limit is reached first wins; with both at 0 a seeding torrent
+	 * is never retired on its own. */
+	qbittorrentSeedMinutes: number;
 	/** Real-Debrid API token (https://real-debrid.com/apitoken). Empty = every
 	 * torrent goes straight to qBittorrent. Set from the admin panel, which
 	 * rewrites data/app.env and mutates this field in place. */
@@ -94,6 +106,12 @@ function generateFile(path: string): void {
 		["QBITTORRENT_USERNAME", ""],
 		["QBITTORRENT_PASSWORD", ""],
 		["QBITTORRENT_SAVE_PATH", ""],
+		// Seeding is on by default, bounded by a share ratio and a seeding-time
+		// backstop -- an unpopular torrent may never reach ratio 1.0, and without
+		// the time limit its downloaded copy would sit on disk forever.
+		["QBITTORRENT_SEEDING", "true"],
+		["QBITTORRENT_SEED_RATIO", "1.0"],
+		["QBITTORRENT_SEED_MINUTES", "10080"],
 		// Real-Debrid is the preferred torrent backend when a token is present;
 		// qBittorrent is only the fallback. Set from the admin panel.
 		["REALDEBRID_API_KEY", ""],
@@ -117,6 +135,15 @@ export function setEnvValue(path: string, key: string, value: string): void {
 
 function truthy(value: string | undefined): boolean {
 	return (value ?? "").toLowerCase() === "true";
+}
+
+/** A non-negative number, or the fallback when the key is absent, blank or
+ * unparseable. An explicit `0` survives -- it is how a seed limit is disabled,
+ * so it must not be mistaken for "unset" and replaced by the default. */
+function positiveNumber(value: string | undefined, fallback: number): number {
+	if (value === undefined || value.trim() === "") return fallback;
+	const n = Number(value);
+	return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 /** Mirrors app/config.py::get_master_key. */
@@ -187,6 +214,17 @@ export function loadSettings(configPathArg?: string): Settings {
 		qbittorrentSavePath: map.get("QBITTORRENT_SAVE_PATH") || "",
 		torrentContentPath:
 			map.get("TORRENT_CONTENT_PATH") || map.get("QBITTORRENT_SAVE_PATH") || "",
+		// Absent means "on", matching REALDEBRID_ENABLED: an existing config that
+		// predates these keys starts seeding on upgrade, with the ratio and time
+		// backstops below applied so it cannot fill the disk unattended.
+		qbittorrentSeeding: map.get("QBITTORRENT_SEEDING")
+			? truthy(map.get("QBITTORRENT_SEEDING"))
+			: true,
+		qbittorrentSeedRatio: positiveNumber(map.get("QBITTORRENT_SEED_RATIO"), 1),
+		qbittorrentSeedMinutes: positiveNumber(
+			map.get("QBITTORRENT_SEED_MINUTES"),
+			10080,
+		),
 		realDebridApiKey: (map.get("REALDEBRID_API_KEY") || "").trim(),
 		// Absent means "on" so an admin who only pastes a token gets debrid.
 		realDebridEnabled: map.get("REALDEBRID_ENABLED")

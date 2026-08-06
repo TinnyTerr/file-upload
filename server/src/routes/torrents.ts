@@ -22,13 +22,20 @@ import {
 } from "../middleware/deps.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import {
+	clearStashedSource,
 	dispatchTorrent,
 	errText,
 	releaseDebridJob,
+	stashSource,
 	type TorrentSource,
 } from "../torrents/debrid.ts";
 import { cleanupJobDir } from "../torrents/importer.ts";
-import { IN_FLIGHT_STATUSES, retryJob } from "../torrents/poller.ts";
+import {
+	IN_FLIGHT_STATUSES,
+	MAX_ACTIVE_PER_USER,
+	MAX_QUEUED_PER_USER,
+	retryJob,
+} from "../torrents/poller.ts";
 import {
 	appVersion,
 	deleteTorrent,
@@ -41,9 +48,6 @@ const log = getLogger("app.routes.torrents");
 
 /** Max accepted .torrent metainfo file (base64-decoded). */
 const MAX_TORRENT_FILE_BYTES = 2 * 1024 * 1024;
-/** Concurrent in-flight torrents per user -- keeps one account from occupying
- * the whole host qBittorrent instance or the shared Real-Debrid slot budget. */
-const MAX_ACTIVE_PER_USER = 5;
 
 const IN_FLIGHT_SQL = IN_FLIGHT_STATUSES.map((s) => `'${s}'`).join(", ");
 
@@ -85,12 +89,21 @@ function maskKey(key: string): string | null {
 function serializeJob(
 	job: TorrentJobRow,
 	ownerUsername?: string,
+	queuePosition?: number,
 ): Record<string, unknown> {
 	return {
 		id: job.id,
 		name: job.name,
 		status: job.status,
-		provider: job.provider,
+		// A pending job has not been dispatched, so which backend it will land on
+		// is not decided yet -- the column still holds its schema default, and
+		// reporting that as fact would show "qBittorrent" for a job about to go
+		// to Real-Debrid.
+		provider: job.status === "pending" ? null : job.provider,
+		queue_position: queuePosition ?? null,
+		seed_ratio: job.seed_ratio,
+		seed_seconds: job.seed_seconds,
+		started_at: job.started_at,
 		debrid_status: job.debrid_status,
 		fallback_reason: job.fallback_reason,
 		progress: job.progress,
@@ -110,6 +123,23 @@ function serializeJob(
 			? { owner_username: ownerUsername, owner_id: job.owner_id }
 			: {}),
 	};
+}
+
+/** 1-based place in the queue for every pending job in `jobs`, per owner.
+ * Derived from the rows already fetched -- a position is only meaningful
+ * relative to the same owner's other pending jobs, which is exactly the
+ * ordering `promotePendingJobs` starts them in. */
+function queuePositions(jobs: TorrentJobRow[]): Map<number, number> {
+	const out = new Map<number, number>();
+	const perOwner = new Map<number, number>();
+	for (const job of [...jobs]
+		.filter((j) => j.status === "pending")
+		.sort((a, b) => a.id - b.id)) {
+		const next = (perOwner.get(job.owner_id) ?? 0) + 1;
+		perOwner.set(job.owner_id, next);
+		out.set(job.id, next);
+	}
+	return out;
 }
 
 function loadOwnJob(
@@ -149,6 +179,10 @@ export function torrentsRouter(state: AppState): Router {
 			qbittorrent_configured: isConfigured(settings),
 			save_path: settings.qbittorrentSavePath,
 			max_active_per_user: MAX_ACTIVE_PER_USER,
+			max_queued_per_user: MAX_QUEUED_PER_USER,
+			seeding: settings.qbittorrentSeeding && isConfigured(settings),
+			seed_ratio: settings.qbittorrentSeedRatio,
+			seed_minutes: settings.qbittorrentSeedMinutes,
 		});
 	});
 
@@ -268,16 +302,23 @@ export function torrentsRouter(state: AppState): Router {
 					targetDirectoryId = target.id;
 				}
 
-				const active = db.get<{ n: number }>(
-					`SELECT COUNT(*) as n FROM torrent_jobs WHERE owner_id = $id AND status IN (${IN_FLIGHT_SQL})`,
+				// Over the concurrency limit the submission is *queued*, not refused:
+				// the poller starts it as soon as one of this owner's slots frees.
+				// The queue itself is bounded, and that bound is a real refusal.
+				const counts = db.get<{ active: number; pending: number }>(
+					`SELECT
+             COUNT(*) FILTER (WHERE status IN (${IN_FLIGHT_SQL})) AS active,
+             COUNT(*) FILTER (WHERE status = 'pending')            AS pending
+           FROM torrent_jobs WHERE owner_id = $id`,
 					{ $id: user.id },
-				)!.n;
-				if (active >= MAX_ACTIVE_PER_USER) {
+				)!;
+				if (counts.pending >= MAX_QUEUED_PER_USER) {
 					res.status(429).json({
-						detail: `you already have ${MAX_ACTIVE_PER_USER} torrents in flight`,
+						detail: `you already have ${MAX_QUEUED_PER_USER} torrents waiting in the queue`,
 					});
 					return;
 				}
+				const startNow = counts.active < MAX_ACTIVE_PER_USER;
 
 				const tag = `fu-${randomBytes(8).toString("hex")}`;
 				const source: TorrentSource = {
@@ -291,27 +332,40 @@ export function torrentsRouter(state: AppState): Router {
 						: torrentFile!.filename.replace(/\.torrent$/i, "")) ||
 					"torrent";
 
-				const dispatch = await dispatchTorrent(state, source, tag);
+				// The request body is the only copy of an uploaded .torrent, and a
+				// queued job needs it again minutes or hours from now. Stash before
+				// dispatching so the two paths can't diverge.
+				if (torrentFile) stashSource(tag, torrentFile.bytes);
+
+				const dispatch = startNow
+					? await dispatchTorrent(state, source, tag)
+					: null;
+				const now = nowIso();
 
 				db.run(
 					`INSERT INTO torrent_jobs (owner_id, target_directory_id, name, source, info_hash, tag,
-           save_path, provider, debrid_id, fallback_reason, status, created_at, updated_at)
+           save_path, provider, debrid_id, fallback_reason, status, created_at, started_at, updated_at)
          VALUES ($ownerId, $targetDir, $name, $source, $hash, $tag, $savePath, $provider, $debridId,
-           $fallbackReason, 'queued', $now, $now)`,
+           $fallbackReason, $status, $now, $startedAt, $now)`,
 					{
 						$ownerId: user.id,
 						$targetDir: targetDirectoryId,
 						$name: name,
-						$source: magnet
-							? magnet.slice(0, 2048)
-							: `file:${torrentFile!.filename}`,
+						// Stored whole, not truncated: this is the only record of the
+						// magnet, and both the queue and the Real-Debrid→qBittorrent
+						// fallback re-dispatch from it. A clipped magnet is a dead one.
+						$source: magnet || `file:${torrentFile!.filename}`,
 						$hash: magnet ? infoHashFromMagnet(magnet) : null,
 						$tag: tag,
-						$savePath: dispatch.savePath,
-						$provider: dispatch.provider,
-						$debridId: dispatch.debridId,
-						$fallbackReason: dispatch.fallbackReason,
-						$now: nowIso(),
+						// A pending job has no backend yet, so it has no save path and
+						// its provider column is the schema default until dispatch.
+						$savePath: dispatch?.savePath ?? "",
+						$provider: dispatch?.provider ?? "qbittorrent",
+						$debridId: dispatch?.debridId ?? null,
+						$fallbackReason: dispatch?.fallbackReason ?? null,
+						$status: startNow ? "queued" : "pending",
+						$startedAt: startNow ? now : null,
+						$now: now,
 					},
 				);
 				const job = db.get<TorrentJobRow>(
@@ -324,12 +378,20 @@ export function torrentsRouter(state: AppState): Router {
 					ip: clientIp(state, req),
 				});
 				log.info(
-					`torrent added job_id=${job.id} owner_id=${user.id} tag=${tag} provider=${dispatch.provider}` +
-						(dispatch.fallbackReason
-							? ` fallback=${dispatch.fallbackReason}`
-							: ""),
+					dispatch
+						? `torrent added job_id=${job.id} owner_id=${user.id} tag=${tag} provider=${dispatch.provider}` +
+								(dispatch.fallbackReason
+									? ` fallback=${dispatch.fallbackReason}`
+									: "")
+						: `torrent queued job_id=${job.id} owner_id=${user.id} tag=${tag} ahead=${counts.pending}`,
 				);
-				res.json(serializeJob(job));
+				res.json(
+					serializeJob(
+						job,
+						undefined,
+						startNow ? undefined : counts.pending + 1,
+					),
+				);
 			} catch (err) {
 				respondError(res, err);
 			}
@@ -344,8 +406,11 @@ export function torrentsRouter(state: AppState): Router {
 				$id: user.id,
 			},
 		);
+		const positions = queuePositions(jobs);
 		res.json({
-			torrents: jobs.map((j) => serializeJob(j)),
+			torrents: jobs.map((j) =>
+				serializeJob(j, undefined, positions.get(j.id)),
+			),
 			configured: torrentingAvailable(state),
 		});
 	});
@@ -411,9 +476,18 @@ export function torrentsRouter(state: AppState): Router {
 			try {
 				const user = req.currentUser!;
 				const job = loadOwnJob(state, user, req.params.jobId!);
-				if (job.provider === "debrid") {
+				// A pending job was never dispatched: there is nothing at either
+				// backend and nothing on disk. Its info_hash is parsed from the
+				// magnet rather than owned by us, so handing it to qBittorrent's
+				// delete would risk removing a torrent some other job is running.
+				if (job.status === "pending") {
+					clearStashedSource(job.tag);
+				} else if (job.provider === "debrid") {
 					await releaseDebridJob(state, job);
 				} else {
+					// 'seeding' counts as live here: its torrent is still in
+					// qBittorrent and its downloaded copy is still on disk, even
+					// though the files were imported long ago.
 					if (
 						isConfigured(settings) &&
 						job.info_hash &&
@@ -422,6 +496,7 @@ export function torrentsRouter(state: AppState): Router {
 						await deleteTorrent(settings, job.info_hash, true);
 					}
 					if (job.status !== "completed") cleanupJobDir(state, job);
+					clearStashedSource(job.tag);
 				}
 				db.run("DELETE FROM torrent_jobs WHERE id = $id", { $id: job.id });
 				recordAudit(db, {
@@ -441,6 +516,22 @@ export function torrentsRouter(state: AppState): Router {
 	);
 
 	return router;
+}
+
+/** Seeding policy as the admin panel shows it. `active` is the honest answer to
+ * "is anything actually seeding": seeding needs qBittorrent, and a Real-Debrid
+ * job has no local torrent to seed from. */
+function seedingStatus(state: AppState): Record<string, unknown> {
+	const { settings, db } = state;
+	return {
+		enabled: settings.qbittorrentSeeding,
+		active: settings.qbittorrentSeeding && isConfigured(settings),
+		ratio: settings.qbittorrentSeedRatio,
+		minutes: settings.qbittorrentSeedMinutes,
+		seeding_count: db.get<{ n: number }>(
+			"SELECT COUNT(*) AS n FROM torrent_jobs WHERE status = 'seeding'",
+		)!.n,
+	};
 }
 
 /** Real-Debrid account probe for the admin status card. Never throws. */
@@ -504,6 +595,7 @@ export function adminTorrentsRouter(state: AppState): Router {
 					save_path: settings.qbittorrentSavePath,
 					url: settings.qbittorrentUrl,
 					debrid,
+					seeding: seedingStatus(state),
 				});
 				return;
 			}
@@ -517,6 +609,7 @@ export function adminTorrentsRouter(state: AppState): Router {
 					save_path: settings.qbittorrentSavePath,
 					content_path: settings.torrentContentPath,
 					debrid,
+					seeding: seedingStatus(state),
 				});
 			} catch (err) {
 				res.json({
@@ -532,6 +625,7 @@ export function adminTorrentsRouter(state: AppState): Router {
 					save_path: settings.qbittorrentSavePath,
 					content_path: settings.torrentContentPath,
 					debrid,
+					seeding: seedingStatus(state),
 				});
 			}
 		}),
@@ -615,6 +709,58 @@ export function adminTorrentsRouter(state: AppState): Router {
 		}),
 	);
 
+	// Seeding policy. Node-local config like the Real-Debrid token: written to
+	// data/app.env and applied in-process, never replicated. Lowering a limit
+	// takes effect on the next poll for torrents already seeding, because the
+	// poller re-evaluates them against the live settings every tick.
+	router.put(
+		"/seeding",
+		requireSession(state),
+		requireCsrf,
+		requireMaster(state),
+		asyncHandler(async (req, res) => {
+			try {
+				const body = req.body ?? {};
+				const actor = req.currentUser!.username;
+
+				if (typeof body.enabled === "boolean") {
+					settings.qbittorrentSeeding = body.enabled;
+					setEnvValue(
+						settings.configPath,
+						"QBITTORRENT_SEEDING",
+						body.enabled ? "true" : "false",
+					);
+				}
+				for (const [key, envKey, field] of [
+					["ratio", "QBITTORRENT_SEED_RATIO", "qbittorrentSeedRatio"],
+					["minutes", "QBITTORRENT_SEED_MINUTES", "qbittorrentSeedMinutes"],
+				] as const) {
+					if (body[key] === undefined) continue;
+					const value = Number(body[key]);
+					// 0 is meaningful (that limit is off); negative is not.
+					if (!Number.isFinite(value) || value < 0) {
+						throw new HttpError(400, `${key} must be a non-negative number`);
+					}
+					settings[field] = value;
+					setEnvValue(settings.configPath, envKey, String(value));
+				}
+
+				recordAudit(db, {
+					actor,
+					action: "torrent.seeding_configured",
+					target: `seeding:${settings.qbittorrentSeeding ? "on" : "off"}`,
+					ip: clientIp(state, req),
+				});
+				log.info(
+					`seeding policy set by ${actor} enabled=${settings.qbittorrentSeeding} ratio=${settings.qbittorrentSeedRatio} minutes=${settings.qbittorrentSeedMinutes}`,
+				);
+				res.json(seedingStatus(state));
+			} catch (err) {
+				respondError(res, err);
+			}
+		}),
+	);
+
 	router.get("/", requireMaster(state), (_req, res) => {
 		const jobs = db.all<TorrentJobRow>(
 			"SELECT * FROM torrent_jobs ORDER BY id DESC LIMIT 500",
@@ -622,9 +768,14 @@ export function adminTorrentsRouter(state: AppState): Router {
 		const usernames = new Map<number, string>();
 		for (const u of db.all<UserRow>("SELECT id, username FROM users"))
 			usernames.set(u.id, u.username);
+		const positions = queuePositions(jobs);
 		res.json({
 			torrents: jobs.map((j) =>
-				serializeJob(j, usernames.get(j.owner_id) ?? "unknown"),
+				serializeJob(
+					j,
+					usernames.get(j.owner_id) ?? "unknown",
+					positions.get(j.id),
+				),
 			),
 		});
 	});

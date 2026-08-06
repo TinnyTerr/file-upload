@@ -230,6 +230,13 @@ export function createSqliteDb(path: string): Db {
 		"fallback_reason",
 		"fallback_reason TEXT",
 	);
+	// Queueing + seeding. All three are nullable on purpose: an existing job was
+	// dispatched the moment it was created, so `started_at` is unknown rather
+	// than equal to `created_at`, and the poller falls back to `created_at` for
+	// exactly those rows. No job predating this can be in 'seeding'.
+	ensureColumn(sqlite, "torrent_jobs", "started_at", "started_at TEXT");
+	ensureColumn(sqlite, "torrent_jobs", "seed_ratio", "seed_ratio REAL");
+	ensureColumn(sqlite, "torrent_jobs", "seed_seconds", "seed_seconds INTEGER");
 	// Cluster-wide row identity. Nullable because it has to be -- an existing
 	// row has no uid until the backfill below mints it, and there is no default
 	// expression that could produce a distinct one per row. The UNIQUE indexes

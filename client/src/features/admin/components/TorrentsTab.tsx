@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CloudDownload, Download, Trash2, User } from "lucide-react";
+import { CloudDownload, Download, Trash2, Upload, User } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -21,13 +21,22 @@ import { errorMessage } from "@/config/api";
 import type {
 	DebridSettingsInput,
 	DebridStatus,
+	SeedingSettingsInput,
+	SeedingStatus,
 } from "@/features/torrents/types";
 import { formatBytes } from "@/lib/bytes";
 import { relativeTime } from "@/lib/time";
 import { useDialogs } from "@/providers/DialogProvider";
 import { adminService } from "../services/adminService";
 
-const BUSY = new Set(["queued", "downloading", "fetching", "importing"]);
+const BUSY = new Set([
+	"pending",
+	"queued",
+	"downloading",
+	"fetching",
+	"importing",
+	"seeding",
+]);
 const STATUS_QUERY = ["admin", "torrent-status"] as const;
 
 function premiumLeft(seconds: number | undefined): string | null {
@@ -202,6 +211,155 @@ function DebridCard({
 	);
 }
 
+/** Seeding applies to qBittorrent only — a Real-Debrid job has no local torrent
+ * to seed from, only files pulled over HTTPS. The limits matter because the
+ * importer *copies* into blob storage, so a seeding torrent is a second full
+ * copy on disk until one of them retires it. */
+function SeedingCard({
+	status,
+	qbitConfigured,
+	loading,
+}: {
+	status: SeedingStatus | undefined;
+	qbitConfigured: boolean;
+	loading: boolean;
+}) {
+	const qc = useQueryClient();
+	const [ratio, setRatio] = useState("");
+	const [minutes, setMinutes] = useState("");
+
+	const save = useMutation({
+		mutationFn: (body: SeedingSettingsInput) => adminService.setSeeding(body),
+		onSuccess: (_result, body) => {
+			toast.success(
+				body.enabled === undefined
+					? "Seeding limits saved"
+					: body.enabled
+						? "Seeding enabled"
+						: "Seeding disabled",
+			);
+			setRatio("");
+			setMinutes("");
+			void qc.invalidateQueries({ queryKey: STATUS_QUERY });
+			void qc.invalidateQueries({ queryKey: ["torrents", "config"] });
+		},
+		onError: (err) =>
+			toast.error("Couldn't update seeding", {
+				description: errorMessage(err),
+			}),
+	});
+
+	const describeLimit = (value: number, unit: string) =>
+		value > 0 ? `${value} ${unit}` : "no limit";
+
+	return (
+		<Card>
+			<CardHeader>
+				<CardTitle>Seeding</CardTitle>
+				<CardDescription>
+					Keep finished qBittorrent torrents uploading after their files have
+					been imported. The downloaded copy stays on disk while seeding — on
+					top of the copy in blob storage — so the limits below are what stop it
+					growing without bound. Whichever limit is reached first removes the
+					torrent and deletes that copy; imported files are never touched.
+				</CardDescription>
+			</CardHeader>
+			<CardContent className="space-y-4 text-sm">
+				{loading ? (
+					<Skeleton className="h-16 w-full" />
+				) : (
+					<>
+						<div className="flex flex-wrap items-center gap-2">
+							{status?.active ? (
+								<Badge variant="success">seeding</Badge>
+							) : status?.enabled ? (
+								<Badge variant="secondary">needs qBittorrent</Badge>
+							) : (
+								<Badge variant="secondary">off</Badge>
+							)}
+							<span className="text-muted-foreground">
+								{status?.enabled && !qbitConfigured
+									? "Seeding is on, but qBittorrent isn't configured — nothing can seed."
+									: `${status?.seeding_count ?? 0} torrent${
+											status?.seeding_count === 1 ? "" : "s"
+										} seeding · stops at ${describeLimit(
+											status?.ratio ?? 0,
+											"ratio",
+										)} or ${describeLimit(status?.minutes ?? 0, "minutes")}`}
+							</span>
+						</div>
+
+						<div className="flex items-center justify-between gap-4">
+							<Label htmlFor="seeding-enabled" className="font-normal">
+								Seed finished torrents
+							</Label>
+							<Switch
+								id="seeding-enabled"
+								checked={!!status?.enabled}
+								disabled={save.isPending}
+								onCheckedChange={(checked) => save.mutate({ enabled: checked })}
+							/>
+						</div>
+
+						<form
+							className="space-y-2"
+							onSubmit={(e) => {
+								e.preventDefault();
+								const body: SeedingSettingsInput = {};
+								if (ratio.trim() !== "") body.ratio = Number(ratio);
+								if (minutes.trim() !== "") body.minutes = Number(minutes);
+								if (Object.keys(body).length) save.mutate(body);
+							}}
+						>
+							<div className="grid gap-2 sm:grid-cols-2">
+								<div className="space-y-1">
+									<Label htmlFor="seed-ratio">Stop at share ratio</Label>
+									<Input
+										id="seed-ratio"
+										type="number"
+										min="0"
+										step="0.1"
+										value={ratio}
+										onChange={(e) => setRatio(e.target.value)}
+										placeholder={String(status?.ratio ?? 0)}
+										disabled={save.isPending}
+									/>
+								</div>
+								<div className="space-y-1">
+									<Label htmlFor="seed-minutes">Stop after (minutes)</Label>
+									<Input
+										id="seed-minutes"
+										type="number"
+										min="0"
+										step="1"
+										value={minutes}
+										onChange={(e) => setMinutes(e.target.value)}
+										placeholder={String(status?.minutes ?? 0)}
+										disabled={save.isPending}
+									/>
+								</div>
+							</div>
+							<div className="flex items-center gap-2">
+								<Button
+									type="submit"
+									loading={save.isPending}
+									disabled={ratio.trim() === "" && minutes.trim() === ""}
+								>
+									<Upload /> Save limits
+								</Button>
+								<p className="text-xs text-muted-foreground">
+									0 disables that limit. A lowered limit applies to torrents
+									already seeding on the next poll.
+								</p>
+							</div>
+						</form>
+					</>
+				)}
+			</CardContent>
+		</Card>
+	);
+}
+
 export function TorrentsTab() {
 	const status = useQuery({
 		queryKey: STATUS_QUERY,
@@ -218,6 +376,12 @@ export function TorrentsTab() {
 	return (
 		<div className="space-y-4">
 			<DebridCard status={status.data?.debrid} loading={status.isLoading} />
+
+			<SeedingCard
+				status={status.data?.seeding}
+				qbitConfigured={!!status.data?.configured}
+				loading={status.isLoading}
+			/>
 
 			<Card>
 				<CardHeader>

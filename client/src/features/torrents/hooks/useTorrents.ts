@@ -11,10 +11,15 @@ const CONFIG_QUERY = ["torrents", "config"] as const;
  * 5000ms tracks the server's torrent_poll scheduler cadence (jobs/scheduler.ts)
  * -- polling faster just fires requests between server-side updates. */
 const BUSY: ReadonlySet<TorrentJob["status"]> = new Set([
+	// `pending` polls too: its whole state is "am I still waiting", which only
+	// changes server-side. `seeding` polls because the ratio ticks up and the
+	// job retires itself when it hits the limit.
+	"pending",
 	"queued",
 	"downloading",
 	"fetching",
 	"importing",
+	"seeding",
 ]);
 
 function refetchInterval(torrents: TorrentJob[] | undefined): number | false {

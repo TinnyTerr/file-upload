@@ -94,6 +94,9 @@ Config lives in `./data/app.env`, auto-generated on first run (mode `0600`). Env
 | `REALDEBRID_ENABLED` | Admin kill switch (default `true`). `false` routes torrents to qBittorrent without discarding the saved token. |
 | `QBITTORRENT_URL` / `_USERNAME` / `_PASSWORD` | Host qBittorrent WebUI (e.g. `http://127.0.0.1:8080`). The fallback backend; empty *and* no Real-Debrid token = torrenting disabled everywhere. |
 | `QBITTORRENT_SAVE_PATH` | Download location, as **qBittorrent** sees it |
+| `QBITTORRENT_SEEDING` | Keep finished torrents seeding after import (default `true`). Admin-managed from the Torrents tab. qBittorrent only — a Real-Debrid job has no local torrent to seed. |
+| `QBITTORRENT_SEED_RATIO` | Share ratio at which a seeding torrent is removed and its downloaded copy deleted. Default `1.0`; `0` = no ratio limit. |
+| `QBITTORRENT_SEED_MINUTES` | Same, by seeding time. Default `10080` (7 days); `0` = no time limit. Whichever limit hits first wins. |
 | `TORRENT_CONTENT_PATH` | The same directory as **this server** sees it; only needed when qBittorrent is containerized separately (defaults to `QBITTORRENT_SAVE_PATH`) |
 | `LOG_LEVEL` | Python-style level name (`DEBUG`/`INFO`/`WARNING`/…), default `INFO` |
 | `FILEUPLOAD_CONFIG` | Override the config file path (default `./data/app.env`) |
@@ -432,6 +435,51 @@ Two backends, chosen per job. **Real-Debrid is preferred and qBittorrent is the 
 
 `POST /api/torrents` (needs `can_use_torrents`) accepts a magnet or an uploaded `.torrent` and calls `debrid.ts::dispatchTorrent`, which decides the backend. Each job gets a unique tag (`fu-<hex>`) — for qBittorrent the tag (not the info hash) is how the poller finds the torrent again; for both providers it names the per-job download directory.
 
+**Concurrency is a queue, not a refusal.** `MAX_ACTIVE_PER_USER = 5` (in
+`torrents/poller.ts`) caps how many of one user's torrents run at once; a sixth
+is accepted and parked in status `pending` with **nothing dispatched to any
+backend**, and `promotePendingJobs` starts it from the `torrent_poll` tick as
+soon as one of that user's slots frees. Per user, not global — one account
+filling its own queue must not stall everyone else's. The only hard refusal is
+`MAX_QUEUED_PER_USER = 50` (429), which bounds the backlog itself.
+
+- **A pending job has no provider.** Which backend it lands on is decided at
+  dispatch, minutes or hours later, so `provider` still holds its schema default
+  and the route serializes it as `null` rather than reporting a guess.
+- **Re-dispatch needs the source to survive the request.** A magnet is stored
+  whole in `torrent_jobs.source` (**not truncated** — a clipped magnet is a dead
+  one, and the Real-Debrid→qBittorrent fallback re-dispatches from this column
+  too); an uploaded `.torrent`'s bytes go to the on-disk stash
+  (`debrid.ts::stashSource`) at accept time, because the request body is the only
+  copy and it is long gone by the time the queue gets there.
+- **`started_at`, not `created_at`, is the poller's clock.** `MISSING_GRACE_MS`
+  ("qBittorrent has never heard of this tag") runs from dispatch — measured from
+  submission, an hour in the queue would blow the 3-minute grace the instant the
+  job started. NULL on rows predating the queue, which fall back to `created_at`.
+
+**Seeding (qBittorrent only).** With `QBITTORRENT_SEEDING` on, a finished
+qBittorrent job moves to status `seeding` instead of `completed`: the import
+already **copied** the files into blob storage, so the download is still on disk
+and the torrent keeps uploading from it. `completed_at`, `imported_file_count`
+and `progress` are all set at import time — the owner's wait is over either way.
+
+- **A seeding job holds no concurrency slot.** It is absent from
+  `IN_FLIGHT_STATUSES` on purpose: its files are imported, and a popular torrent
+  must not block that user's next download for days.
+- **The poller enforces the limits, qBittorrent only stops uploading.**
+  `setShareLimits` is applied per torrent so it stops on its own if the poller
+  never runs again, but qBittorrent's *share-limit action* is a global setting we
+  don't control — so `pollSeedingJob` compares ratio/seeding-time itself and
+  `finishSeeding` is what deletes the torrent, deletes the downloaded copy and
+  settles the row to `completed`.
+- **A missing torrent settles a seeding job, it does not fail it.** Removed by
+  the operator or retired by qBittorrent's own action, the outcome is the same:
+  the files were imported before seeding ever began.
+- Seeding costs **no extra requests**: downloading and seeding jobs are both
+  resolved out of the one `allTorrents` list already fetched per tick.
+- Turning seeding off, or unconfiguring qBittorrent, retires every seeding job on
+  the next tick rather than stranding it there with its download on disk.
+
 **Real-Debrid path** (`torrents/realdebrid.ts` + `torrents/debrid.ts`):
 
 1. `POST /torrents/addMagnet` or `PUT /torrents/addTorrent` (raw metainfo body), then `POST /torrents/selectFiles/{id}` with `files=all` — a freshly added torrent parks in `waiting_files_selection` and will never start without it. A magnet rejects the call until `magnet_conversion` finishes, so the poller retries it.
@@ -544,7 +592,11 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - Don't run migrations — add nullable columns (or columns with a SQLite `DEFAULT`) plus an `ensureColumn` backfill
 - Don't write an `async` Express handler without `asyncHandler`
 - Don't scale this server to multiple processes without redesigning `cluster/eventBus.ts` sequencing
-- Don't poll qBittorrent once per job — one list fetch per tick, grouped by tag
+- Don't poll qBittorrent once per job — one list fetch per tick, grouped by tag, covering downloading *and* seeding jobs
+- Don't refuse a torrent for being over the concurrency limit — park it in `pending` and let `promotePendingJobs` start it
+- Don't count `pending` toward `IN_FLIGHT_STATUSES` — that is the status a job sits in *because* it has no slot, so counting it deadlocks the queue
+- Don't truncate a stored magnet — the queue and the qBittorrent fallback both re-dispatch from `torrent_jobs.source`
+- Don't `cleanupJobDir` a seeding job — those bytes are what qBittorrent is uploading
 - Don't gate Real-Debrid on `instantAvailability` — uncached torrents are supposed to go through it too
 - Don't `await` a Real-Debrid transfer inside the `torrent_poll` tick — it runs detached (`startDebridFetch`)
 - Don't write API reference content into `ApiDocsPage.tsx` — it renders `docs/api.md`; edit the markdown
@@ -567,7 +619,7 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - `routes/remoteUpload.ts` — resolves DNS, rejects private/local addresses, and connects to the *pinned* validated IP to close the rebinding window; re-validates every redirect hop; caps bytes mid-stream and decodes chunked transfer-encoding.
 - `storage/zip.ts` — `safeArcname()` flattens paths and de-duplicates collisions; `memberSource()` resolves a row to plaintext bytes and is the file that has to know the transform-order rule.
 - `torrents/debrid.ts` — `planFiles()` pairs `info.links[]` with the *selected* entries of `info.files[]` positionally; when the counts disagree (Real-Debrid splits very large torrents into RAR volumes, which are links with no matching file entry) it gives up on the mapping and names each download from its own unrestrict response instead. The transfer's only timeout is a **stall** timer — a legitimate multi-GB pull runs for hours, so idleness is what gets policed, not duration.
-- `torrents/poller.ts` — `pollDebrid` uses the row's own `updated_at` as its last-polled clock rather than a side map, so there is no in-memory registry to prune. `startDebridFetch` guards against overlapping transfers with a module-level `Set` of job ids.
+- `torrents/poller.ts` — `pollDebrid` uses the row's own `updated_at` as its last-polled clock rather than a side map, so there is no in-memory registry to prune. `startDebridFetch` guards against overlapping transfers with a module-level `Set` of job ids. `promotePendingJobs` reads every owner's slot usage in **one** grouped query, not a `COUNT` per candidate, and increments its in-memory tally *before* awaiting dispatch — the same owner's next pending job is decided in that same loop. `seedLimitReached` compares against a strictly positive limit because qBittorrent reports `ratio` as `-1` before anything has been uploaded.
 - `security/sessions.ts` — the cookie carries only a signed opaque sid; `resolve()` refreshes `last_seen_at` at most once a minute.
 - `client/src/components/layout/UserMenu.tsx` — the collapsed sidebar trigger is a plain `Button`; wrapping it in a `Tooltip` breaks Radix DropdownMenu clicks.
 - `client/src/features/files/components/Dropzone.tsx` — uses `bg-brand-gradient` and `text-white` for the reasons in "What NOT to do".
