@@ -52,6 +52,8 @@ export interface Harness {
 	app: Express;
 	db: Db;
 	state: ReturnType<typeof createAppState>;
+	/** `http://127.0.0.1:<ephemeral port>` — what a peer would dial. */
+	baseUrl: string;
 	/** Signs a user in without going through the login ceremony. */
 	signIn(user: UserRow): { cookie: string; csrf: string };
 	/** fetch-alike bound to the app, over a real ephemeral port. */
@@ -79,6 +81,7 @@ export async function makeHarness(
 		app,
 		db,
 		state,
+		baseUrl: base,
 		signIn(user) {
 			const { cookieValue, csrfToken } = state.sessionManager.create(
 				db,

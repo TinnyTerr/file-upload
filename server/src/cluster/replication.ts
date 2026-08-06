@@ -28,6 +28,7 @@ type ReplicatedTable = (typeof REPLICATED_TABLES)[number];
 const TABLE_COLUMNS: Record<ReplicatedTable, string[]> = {
 	users: [
 		"id",
+		"uid",
 		"username",
 		"password_hash",
 		"role",
@@ -40,6 +41,7 @@ const TABLE_COLUMNS: Record<ReplicatedTable, string[]> = {
 	],
 	permissions: [
 		"id",
+		"uid",
 		"user_id",
 		"can_upload",
 		"can_upload_client_encrypted",
@@ -65,6 +67,7 @@ const TABLE_COLUMNS: Record<ReplicatedTable, string[]> = {
 	],
 	content_blobs: [
 		"id",
+		"uid",
 		"storage_path",
 		"content_type",
 		"size_bytes",
@@ -84,6 +87,7 @@ const TABLE_COLUMNS: Record<ReplicatedTable, string[]> = {
 	],
 	directories: [
 		"id",
+		"uid",
 		"owner_id",
 		"slug",
 		"title",
@@ -109,6 +113,7 @@ const TABLE_COLUMNS: Record<ReplicatedTable, string[]> = {
 	],
 	directory_links: [
 		"id",
+		"uid",
 		"directory_id",
 		"slug",
 		"max_uses",
@@ -120,6 +125,7 @@ const TABLE_COLUMNS: Record<ReplicatedTable, string[]> = {
 	],
 	files: [
 		"id",
+		"uid",
 		"owner_id",
 		"blob_id",
 		"directory_id",
@@ -153,6 +159,7 @@ const TABLE_COLUMNS: Record<ReplicatedTable, string[]> = {
 	],
 	links: [
 		"id",
+		"uid",
 		"file_id",
 		"slug",
 		"max_uses",
@@ -176,6 +183,14 @@ const VOLATILE = new Set([
 	"last_heartbeat_at",
 	"use_count",
 	"ref_count",
+	// `uid` ships (so peers converge on one cluster-wide identity) but is
+	// excluded from the fingerprint. A row replicated before uids existed was
+	// given a locally-minted uid by each node's boot backfill, so during the
+	// transition the same logical row legitimately differs here -- and this
+	// hash's question is "same logical row?", which a uid mismatch of that kind
+	// answers wrongly. Moot once §5.7's change log replaces this file: there
+	// uid IS the identity and there is no fingerprint.
+	"uid",
 ]);
 
 const log = getLogger("app.cluster.replication");

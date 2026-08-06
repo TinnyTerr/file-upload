@@ -49,6 +49,47 @@ function rowFromEvent(event: ClusterEvent): EventRow | null {
 	};
 }
 
+/** This node's own events, durably, oldest first — what a peer's firehose
+ * cursor walks.
+ *
+ * Scoped to `origin_node_id = self` on purpose: the cursor a peer sends is
+ * *this node's* `origin_seq`, so mixing in events mirrored from third nodes
+ * would make it meaningless. The mesh is full, so every node is polled
+ * directly and nothing needs relaying.
+ *
+ * Reading the table rather than EventBus' 5,000-entry ring buffer is what
+ * makes a restart survivable: the buffer is empty after a reboot, so a peer
+ * that was behind would never see the events it missed. */
+export function readOwnEvents(
+	db: Db,
+	nodeId: string,
+	opts: { after?: number; limit?: number } = {},
+): ClusterEvent[] {
+	const rows = db.all<EventRow>(
+		`SELECT origin_node_id, origin_seq, origin_node_name, ts, kind, action, actor, target, ip
+       FROM cluster_events
+      WHERE origin_node_id = $nodeId AND origin_seq > $after
+      ORDER BY origin_seq ASC
+      LIMIT $limit`,
+		{
+			$nodeId: nodeId,
+			$after: opts.after ?? 0,
+			$limit: opts.limit ?? 200,
+		},
+	);
+	return rows.map((row) => ({
+		id: row.origin_seq,
+		node_id: row.origin_node_id,
+		node_name: row.origin_node_name ?? "",
+		ts: row.ts,
+		kind: row.kind,
+		action: row.action,
+		actor: row.actor,
+		target: row.target,
+		ip: row.ip,
+	}));
+}
+
 export class ClusterEventWriter {
 	private db: Db;
 	private queue: EventRow[] = [];
@@ -70,6 +111,28 @@ export class ClusterEventWriter {
 		this.drain();
 	}
 
+	/** Persist one event immediately, in the caller's transaction if there is
+	 * one. This is the path locally-originated events take (wired as the
+	 * EventBus persist hook in appState.ts): an event that has been published
+	 * to live subscribers and pulled by a peer must already be durable, and a
+	 * 250 ms drain window is a window in which a crash loses it while a peer
+	 * has it. Peer-ingested events keep using `submit()` — they are already
+	 * durable at their origin, so batching them is free.
+	 *
+	 * Best-effort: never throws, because a publish is a side effect of some
+	 * other request and must not fail it. */
+	write(event: ClusterEvent): void {
+		const row = rowFromEvent(event);
+		if (!row) return;
+		try {
+			this.insert(row);
+		} catch (err) {
+			log.error(
+				`cluster event write failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+
 	/** Enqueue an event for persistence. Best-effort: never throws. */
 	submit(event: ClusterEvent): void {
 		const row = rowFromEvent(event);
@@ -81,30 +144,32 @@ export class ClusterEventWriter {
 		this.queue.push(row);
 	}
 
+	private insert(row: EventRow): void {
+		this.db.run(
+			`INSERT OR IGNORE INTO cluster_events
+         (origin_node_id, origin_seq, origin_node_name, ts, kind, action, actor, target, ip, created_at)
+       VALUES ($originNodeId, $originSeq, $originNodeName, $ts, $kind, $action, $actor, $target, $ip, $createdAt)`,
+			{
+				$originNodeId: row.origin_node_id,
+				$originSeq: row.origin_seq,
+				$originNodeName: row.origin_node_name,
+				$ts: row.ts,
+				$kind: row.kind,
+				$action: row.action,
+				$actor: row.actor,
+				$target: row.target,
+				$ip: row.ip,
+				$createdAt: nowIso(),
+			},
+		);
+	}
+
 	private drain(): void {
 		if (this.queue.length === 0) return;
 		const batch = this.queue.splice(0, MAX_BATCH);
 		try {
 			this.db.transaction(() => {
-				for (const row of batch) {
-					this.db.run(
-						`INSERT OR IGNORE INTO cluster_events
-               (origin_node_id, origin_seq, origin_node_name, ts, kind, action, actor, target, ip, created_at)
-             VALUES ($originNodeId, $originSeq, $originNodeName, $ts, $kind, $action, $actor, $target, $ip, $createdAt)`,
-						{
-							$originNodeId: row.origin_node_id,
-							$originSeq: row.origin_seq,
-							$originNodeName: row.origin_node_name,
-							$ts: row.ts,
-							$kind: row.kind,
-							$action: row.action,
-							$actor: row.actor,
-							$target: row.target,
-							$ip: row.ip,
-							$createdAt: nowIso(),
-						},
-					);
-				}
+				for (const row of batch) this.insert(row);
 			});
 		} catch (err) {
 			log.error(

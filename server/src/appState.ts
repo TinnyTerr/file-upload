@@ -32,7 +32,17 @@ export function createAppState(settings: Settings, db: Db): AppState {
 	const secure = settings.appEnv !== "dev";
 	const eventBus = new EventBus(settings);
 	const eventWriter = new ClusterEventWriter(db);
-	eventBus.setPersistHook((event) => eventWriter.submit(event));
+	// Locally-originated events persist synchronously (see eventWriter.write):
+	// once an event is visible to a subscriber or a polling peer it must
+	// already be durable, and it must not re-use a sequence number this node
+	// emitted before its last restart.
+	eventBus.setPersistHook((event) => eventWriter.write(event));
+	eventBus.seedSeq(
+		db.get<{ max_seq: number | null }>(
+			"SELECT MAX(origin_seq) AS max_seq FROM cluster_events WHERE origin_node_id = $nodeId",
+			{ $nodeId: settings.nodeId },
+		)?.max_seq ?? 0,
+	);
 	return {
 		settings,
 		db,

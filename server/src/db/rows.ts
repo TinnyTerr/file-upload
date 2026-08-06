@@ -4,6 +4,9 @@
 
 export interface UserRow {
 	id: number;
+	/** Cluster-wide identity (cluster/identity.ts). NULL only on a row that
+	 * predates the boot backfill. */
+	uid: string | null;
 	username: string;
 	password_hash: string;
 	role: string;
@@ -31,6 +34,9 @@ export interface CredentialRow {
 
 export interface PermissionRow {
 	id: number;
+	/** Cluster-wide identity (cluster/identity.ts). NULL only on a row that
+	 * predates the boot backfill. */
+	uid: string | null;
 	user_id: number;
 	can_upload: number;
 	can_upload_client_encrypted: number;
@@ -57,6 +63,9 @@ export interface PermissionRow {
 
 export interface ContentBlobRow {
 	id: number;
+	/** Cluster-wide identity (cluster/identity.ts). NULL only on a row that
+	 * predates the boot backfill. */
+	uid: string | null;
 	storage_path: string;
 	content_type: string;
 	size_bytes: number;
@@ -77,6 +86,9 @@ export interface ContentBlobRow {
 
 export interface FileRow {
 	id: number;
+	/** Cluster-wide identity (cluster/identity.ts). NULL only on a row that
+	 * predates the boot backfill. */
+	uid: string | null;
 	owner_id: number;
 	blob_id: number | null;
 	directory_id: number | null;
@@ -111,6 +123,9 @@ export interface FileRow {
 
 export interface DirectoryRow {
 	id: number;
+	/** Cluster-wide identity (cluster/identity.ts). NULL only on a row that
+	 * predates the boot backfill. */
+	uid: string | null;
 	owner_id: number;
 	slug: string;
 	title: string;
@@ -152,6 +167,9 @@ export interface MediaPlayKeyRow {
 
 export interface LinkRow {
 	id: number;
+	/** Cluster-wide identity (cluster/identity.ts). NULL only on a row that
+	 * predates the boot backfill. */
+	uid: string | null;
 	file_id: number;
 	slug: string;
 	max_uses: number | null;
@@ -164,6 +182,9 @@ export interface LinkRow {
 
 export interface DirectoryLinkRow {
 	id: number;
+	/** Cluster-wide identity (cluster/identity.ts). NULL only on a row that
+	 * predates the boot backfill. */
+	uid: string | null;
 	directory_id: number;
 	slug: string;
 	max_uses: number | null;

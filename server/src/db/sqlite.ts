@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { backfillUids, UID_TABLES } from "../cluster/identity.ts";
 import { ensureColumn } from "./backfill.ts";
 import type { Db, Row, SqlParams } from "./types.ts";
 
@@ -229,10 +230,17 @@ export function createSqliteDb(path: string): Db {
 		"fallback_reason",
 		"fallback_reason TEXT",
 	);
+	// Cluster-wide row identity. Nullable because it has to be -- an existing
+	// row has no uid until the backfill below mints it, and there is no default
+	// expression that could produce a distinct one per row. The UNIQUE indexes
+	// live in schema.sql and are created immediately after this block.
+	for (const table of UID_TABLES) {
+		ensureColumn(sqlite, table, "uid", "uid TEXT");
+	}
 
 	sqlite.exec(indexes);
 
-	return {
+	const db: Db = {
 		run(sql: string, params: SqlParams = {}) {
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			sqlite.query(sql).run(params as any);
@@ -256,4 +264,13 @@ export function createSqliteDb(path: string): Db {
 			sqlite.close();
 		},
 	};
+
+	// One-shot, idempotent, live-safe: mints uids for rows that predate the
+	// column, in small transactions. Runs here rather than at a call site in
+	// index.ts so that every database this process opens is converted, tests
+	// included -- a half-converted database is exactly the state the change log
+	// must never see.
+	backfillUids(db);
+
+	return db;
 }

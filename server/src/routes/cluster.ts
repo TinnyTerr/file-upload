@@ -12,6 +12,7 @@ import {
 	handleVoteRequest,
 	resolveMaster,
 } from "../cluster/election.ts";
+import { readOwnEvents } from "../cluster/eventStore.ts";
 import * as clusterHttp from "../cluster/http.ts";
 import { ClusterHTTPError } from "../cluster/http.ts";
 import { enrollWithMaster, upsertPeer } from "../cluster/membership.ts";
@@ -616,7 +617,12 @@ export function adminClusterRouter(state: AppState): Router {
 			1,
 			Math.min(Number.isFinite(limitRaw) ? limitRaw : 200, 1000),
 		);
-		const events = state.eventBus.recent({ afterId: after, limit });
+		// Served from the durable `cluster_events` table, not EventBus' ring
+		// buffer: this is the peer poll path, and a restart empties the buffer.
+		const events = readOwnEvents(state.db, state.settings.nodeId, {
+			after,
+			limit,
+		});
 		const lastId = events.length > 0 ? events[events.length - 1]!.id : after;
 		res.json({ events, last_id: lastId, count: events.length });
 	});

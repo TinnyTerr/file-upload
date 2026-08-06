@@ -4,6 +4,10 @@
 
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- Cluster-wide row identity (ULID, cluster/identity.ts). Replication ships
+  -- `uid`; `id` is node-local and never goes on the wire. NULL only until the
+  -- boot backfill has run over a database created before this column existed.
+  uid TEXT,
   username TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'user',
@@ -17,6 +21,10 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS permissions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- Cluster-wide row identity (ULID, cluster/identity.ts). Replication ships
+  -- `uid`; `id` is node-local and never goes on the wire. NULL only until the
+  -- boot backfill has run over a database created before this column existed.
+  uid TEXT,
   user_id INTEGER NOT NULL UNIQUE REFERENCES users(id),
   can_upload INTEGER NOT NULL DEFAULT 1,
   can_upload_client_encrypted INTEGER NOT NULL DEFAULT 0,
@@ -72,6 +80,10 @@ CREATE TABLE IF NOT EXISTS login_attempts (
 
 CREATE TABLE IF NOT EXISTS content_blobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- Cluster-wide row identity (ULID, cluster/identity.ts). Replication ships
+  -- `uid`; `id` is node-local and never goes on the wire. NULL only until the
+  -- boot backfill has run over a database created before this column existed.
+  uid TEXT,
   storage_path TEXT NOT NULL UNIQUE,
   content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
   size_bytes INTEGER NOT NULL DEFAULT 0,
@@ -93,6 +105,10 @@ CREATE INDEX IF NOT EXISTS ix_content_blobs_sha256 ON content_blobs(sha256);
 
 CREATE TABLE IF NOT EXISTS directories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- Cluster-wide row identity (ULID, cluster/identity.ts). Replication ships
+  -- `uid`; `id` is node-local and never goes on the wire. NULL only until the
+  -- boot backfill has run over a database created before this column existed.
+  uid TEXT,
   owner_id INTEGER NOT NULL REFERENCES users(id),
   slug TEXT NOT NULL UNIQUE,
   title TEXT NOT NULL DEFAULT 'Untitled folder',
@@ -144,6 +160,10 @@ CREATE INDEX IF NOT EXISTS ix_directories_owner_id ON directories(owner_id);
 
 CREATE TABLE IF NOT EXISTS files (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- Cluster-wide row identity (ULID, cluster/identity.ts). Replication ships
+  -- `uid`; `id` is node-local and never goes on the wire. NULL only until the
+  -- boot backfill has run over a database created before this column existed.
+  uid TEXT,
   owner_id INTEGER NOT NULL REFERENCES users(id),
   blob_id INTEGER REFERENCES content_blobs(id),
   directory_id INTEGER REFERENCES directories(id),
@@ -189,6 +209,10 @@ CREATE INDEX IF NOT EXISTS ix_files_owner_id ON files(owner_id);
 
 CREATE TABLE IF NOT EXISTS links (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- Cluster-wide row identity (ULID, cluster/identity.ts). Replication ships
+  -- `uid`; `id` is node-local and never goes on the wire. NULL only until the
+  -- boot backfill has run over a database created before this column existed.
+  uid TEXT,
   file_id INTEGER NOT NULL REFERENCES files(id),
   slug TEXT NOT NULL UNIQUE,
   max_uses INTEGER,
@@ -203,6 +227,10 @@ CREATE INDEX IF NOT EXISTS ix_links_file_id ON links(file_id);
 
 CREATE TABLE IF NOT EXISTS directory_links (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- Cluster-wide row identity (ULID, cluster/identity.ts). Replication ships
+  -- `uid`; `id` is node-local and never goes on the wire. NULL only until the
+  -- boot backfill has run over a database created before this column existed.
+  uid TEXT,
   directory_id INTEGER NOT NULL REFERENCES directories(id),
   slug TEXT NOT NULL UNIQUE,
   max_uses INTEGER,
@@ -495,3 +523,16 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
 CREATE INDEX IF NOT EXISTS ix_oauth_tokens_token_hash ON oauth_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS ix_oauth_tokens_grant_id ON oauth_tokens(grant_id);
 CREATE INDEX IF NOT EXISTS ix_oauth_tokens_user_id ON oauth_tokens(user_id);
+
+-- Cluster-wide row identity (cluster/identity.ts, redesign §5.6). UNIQUE and
+-- nullable together: SQLite permits any number of NULLs in a unique index, so
+-- these are safe to create before the boot backfill has minted uids for a
+-- database that predates the column -- while still making a duplicate uid
+-- impossible from the moment it exists.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_users_uid ON users(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_permissions_uid ON permissions(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_content_blobs_uid ON content_blobs(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_directories_uid ON directories(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_directory_links_uid ON directory_links(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_files_uid ON files(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_links_uid ON links(uid);

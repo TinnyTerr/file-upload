@@ -64,6 +64,19 @@ export class EventBus {
 		return this.seq;
 	}
 
+	/** Resume this node's sequence above the highest one it has already
+	 * durably emitted (appState.ts reads it out of `cluster_events`).
+	 *
+	 * Without this the counter restarts at 0 on every boot and the next
+	 * events re-use `origin_seq` 1, 2, 3… — which `cluster_events`'
+	 * UNIQUE(origin_node_id, origin_seq) then silently swallows via INSERT OR
+	 * IGNORE, while peers whose firehose cursor is already past those numbers
+	 * receive nothing from this node until it climbs back over its pre-restart
+	 * maximum. Only ever moves forward. */
+	seedSeq(seq: number): void {
+		if (Number.isFinite(seq) && seq > this.seq) this.seq = Math.floor(seq);
+	}
+
 	/** Publish a locally-originated event: assigns this node's next sequence
 	 * id, stamps identity + timestamp, buffers it, notifies live subscribers,
 	 * and (if wired) durably persists it. */
@@ -92,8 +105,13 @@ export class EventBus {
 		return event;
 	}
 
-	/** Buffered events with id > afterId, optionally filtered. Used for both
-	 * websocket replay-on-connect and the HTTP long-poll fallback. */
+	/** Buffered events with id > afterId, oldest first, optionally filtered.
+	 * Used for websocket replay-on-connect.
+	 *
+	 * `limit` truncates from the *front*: a consumer advances its cursor to the
+	 * highest id it received, so returning the newest `limit` matches would
+	 * skip everything older and the skipped events would never be requested
+	 * again. Truncating the tail leaves them to be picked up on the next call. */
 	recent(
 		opts: { afterId?: number; limit?: number; predicate?: EventPredicate } = {},
 	): ClusterEvent[] {
@@ -101,7 +119,7 @@ export class EventBus {
 		const predicate = opts.predicate ?? (() => true);
 		const matches = this.buffer.filter((e) => e.id > afterId && predicate(e));
 		const limit = opts.limit ?? matches.length;
-		return matches.slice(Math.max(0, matches.length - limit));
+		return matches.slice(0, Math.max(0, limit));
 	}
 
 	/** Register a live listener; returns an unsubscribe function. */
