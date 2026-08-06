@@ -21,10 +21,12 @@ const STATUS_BADGE: Record<
 	TorrentStatus,
 	{ label: string; variant: "success" | "accent" | "secondary" | "destructive" }
 > = {
+	pending: { label: "waiting", variant: "secondary" },
 	queued: { label: "queued", variant: "secondary" },
 	downloading: { label: "downloading", variant: "accent" },
 	fetching: { label: "transferring", variant: "accent" },
 	importing: { label: "importing", variant: "accent" },
+	seeding: { label: "seeding", variant: "success" },
 	completed: { label: "completed", variant: "success" },
 	failed: { label: "failed", variant: "destructive" },
 };
@@ -50,11 +52,32 @@ function transferLine(t: TorrentJob): string {
 	return `${formatBytes(t.downloaded_bytes)} of ${formatBytes(t.size_bytes)} · ${rate}`;
 }
 
+function formatDuration(seconds: number | null): string {
+	if (!seconds || seconds <= 0) return "0m";
+	if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+	if (seconds < 86400) return `${Math.round(seconds / 3600)}h`;
+	return `${Math.round(seconds / 86400)}d`;
+}
+
+function importedLine(t: TorrentJob): string {
+	const files = `${t.imported_file_count} file${t.imported_file_count === 1 ? "" : "s"}`;
+	return `${files} · ${formatBytes(t.size_bytes)} · imported ${relativeTime(t.completed_at)}`;
+}
+
 function subtitle(t: TorrentJob): string {
-	if (t.status === "completed") {
-		const files = `${t.imported_file_count} file${t.imported_file_count === 1 ? "" : "s"}`;
-		return `${files} · ${formatBytes(t.size_bytes)} · imported ${relativeTime(t.completed_at)}`;
+	// Waiting for a slot: nothing has been sent anywhere yet, so there is no
+	// progress to report — only where it sits in the queue.
+	if (t.status === "pending") {
+		return t.queue_position
+			? `waiting for a free slot · #${t.queue_position} in your queue`
+			: "waiting for a free slot…";
 	}
+	// The files are already in the owner's storage; this is the upload tail.
+	if (t.status === "seeding") {
+		const ratio = `ratio ${(t.seed_ratio ?? 0) < 0 ? 0 : (t.seed_ratio ?? 0).toFixed(2)}`;
+		return `${importedLine(t)} · seeding ${formatDuration(t.seed_seconds)} · ${ratio}`;
+	}
+	if (t.status === "completed") return importedLine(t);
 	if (t.status === "failed") return t.error ?? "failed";
 	if (t.status === "importing") return "moving files into your storage…";
 	// The debrid transfer leg: the torrent is already done remotely and these
@@ -113,6 +136,9 @@ export function TorrentList({
 					t.status === "downloading" ||
 					t.status === "fetching" ||
 					t.status === "importing";
+				// A seeding job's data is still on disk and still in qBittorrent, so
+				// removing it destroys something — unlike a settled row.
+				const destructiveRemove = inFlight || t.status === "seeding";
 				const viaDebrid = t.provider === "debrid";
 				return (
 					<ListRow
@@ -126,20 +152,21 @@ export function TorrentList({
 						}
 						trailing={
 							<>
-								{t.status === "completed" && t.directory_id !== null && (
-									<Tooltip content="Open folder">
-										<Button
-											variant="ghost"
-											size="icon"
-											asChild
-											aria-label={`Open folder for ${t.name}`}
-										>
-											<Link to="/files">
-												<FolderOpen />
-											</Link>
-										</Button>
-									</Tooltip>
-								)}
+								{(t.status === "completed" || t.status === "seeding") &&
+									t.directory_id !== null && (
+										<Tooltip content="Open folder">
+											<Button
+												variant="ghost"
+												size="icon"
+												asChild
+												aria-label={`Open folder for ${t.name}`}
+											>
+												<Link to="/files">
+													<FolderOpen />
+												</Link>
+											</Button>
+										</Tooltip>
+									)}
 								{t.status === "failed" && (
 									<Tooltip content="Retry import">
 										<Button
@@ -153,7 +180,13 @@ export function TorrentList({
 									</Tooltip>
 								)}
 								<Tooltip
-									content={inFlight ? "Cancel and delete" : "Remove from list"}
+									content={
+										t.status === "seeding"
+											? "Stop seeding and remove (your imported files are kept)"
+											: destructiveRemove
+												? "Cancel and delete"
+												: "Remove from list"
+									}
 								>
 									<Button
 										variant="ghost"
@@ -171,19 +204,23 @@ export function TorrentList({
 						<div className="flex items-center gap-2">
 							<span className="truncate text-sm font-medium">{t.name}</span>
 							<Badge variant={badge.variant}>{badge.label}</Badge>
-							<Tooltip
-								content={
-									viaDebrid
-										? "Downloaded by Real-Debrid, then transferred to this server"
-										: t.fallback_reason
-											? `Real-Debrid couldn't take this one: ${t.fallback_reason}`
-											: "Downloaded by qBittorrent on this host"
-								}
-							>
-								<Badge variant="secondary">
-									{viaDebrid ? "Real-Debrid" : "qBittorrent"}
-								</Badge>
-							</Tooltip>
+							{/* Null while pending: the backend is chosen at dispatch, so
+							    naming one here would be a guess. */}
+							{t.provider && (
+								<Tooltip
+									content={
+										viaDebrid
+											? "Downloaded by Real-Debrid, then transferred to this server"
+											: t.fallback_reason
+												? `Real-Debrid couldn't take this one: ${t.fallback_reason}`
+												: "Downloaded by qBittorrent on this host"
+									}
+								>
+									<Badge variant="secondary">
+										{viaDebrid ? "Real-Debrid" : "qBittorrent"}
+									</Badge>
+								</Tooltip>
+							)}
 						</div>
 						<p className="mt-0.5 truncate text-xs text-muted-foreground">
 							{subtitle(t)}

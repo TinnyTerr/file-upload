@@ -78,7 +78,10 @@ export function isTransferComplete(tag: string): boolean {
 	}
 }
 
-function stashSource(tag: string, bytes: Buffer): void {
+/** Persists an uploaded .torrent's bytes next to the job, because the request
+ * that carried them is long gone by the time they are needed again -- by the
+ * Real-Debrid→qBittorrent fallback, or by a job that sat in the queue. */
+export function stashSource(tag: string, bytes: Buffer): void {
 	try {
 		const path = sourceStashPath(tag);
 		mkdirSync(dirname(path), { recursive: true });
@@ -90,7 +93,7 @@ function stashSource(tag: string, bytes: Buffer): void {
 	}
 }
 
-function readStashedSource(tag: string): Buffer | null {
+export function readStashedSource(tag: string): Buffer | null {
 	try {
 		return readFileSync(sourceStashPath(tag));
 	} catch {

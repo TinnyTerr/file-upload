@@ -23,14 +23,33 @@ export function TorrentsPage() {
 			t.status === "downloading" ||
 			t.status === "fetching" ||
 			t.status === "importing";
+		const title =
+			t.status === "pending"
+				? "Remove from the queue?"
+				: t.status === "seeding"
+					? "Stop seeding?"
+					: inFlight
+						? "Cancel this torrent?"
+						: "Remove from the list?";
+		const description =
+			t.status === "pending"
+				? "It hasn't started yet, so nothing has been downloaded."
+				: t.status === "seeding"
+					? "The torrent is removed from qBittorrent and its downloaded copy is deleted from the host. Your imported files are kept."
+					: inFlight
+						? t.provider === "debrid"
+							? "The transfer stops, and the torrent and any partial data are removed from Real-Debrid."
+							: "The download stops and the partially downloaded data is deleted from the host."
+						: "Files already imported into your storage are kept — delete those from the files page.";
 		const ok = await confirm({
-			title: inFlight ? "Cancel this torrent?" : "Remove from the list?",
-			description: inFlight
-				? t.provider === "debrid"
-					? "The transfer stops, and the torrent and any partial data are removed from Real-Debrid."
-					: "The download stops and the partially downloaded data is deleted from the host."
-				: "Files already imported into your storage are kept — delete those from the files page.",
-			confirmText: inFlight ? "Cancel torrent" : "Remove",
+			title,
+			description,
+			confirmText:
+				t.status === "seeding"
+					? "Stop seeding"
+					: inFlight
+						? "Cancel torrent"
+						: "Remove",
 			destructive: true,
 		});
 		if (ok) remove.mutate(t.id);

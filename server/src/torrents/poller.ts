@@ -6,12 +6,15 @@ import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
 import {
 	cleanupDebridDir,
+	dispatchTorrent,
 	errText,
 	fallbackToQbittorrent,
 	fetchDebridFiles,
 	isTransferComplete,
 	pollDebridJob,
+	readStashedSource,
 	releaseDebridJob,
+	type TorrentSource,
 } from "./debrid.ts";
 import {
 	cleanupJobDir,
@@ -26,6 +29,7 @@ import {
 	isDoneState,
 	isErrorState,
 	type QbitTorrent,
+	setShareLimits,
 } from "./qbittorrent.ts";
 import {
 	isConfigured as debridConfigured,
@@ -46,13 +50,31 @@ const DEBRID_POLL_MS = 10 * 1000;
 
 export const ACTIVE_STATUSES = ["queued", "downloading", "fetching"] as const;
 
-/** Job statuses that hold a slot against MAX_ACTIVE_PER_USER. */
+/** Job statuses that hold a slot against `MAX_ACTIVE_PER_USER`.
+ *
+ * `pending` is deliberately absent — it is what a job sits in *because* it
+ * could not get a slot, so counting it would deadlock the queue. `seeding` is
+ * absent too: its files are already imported and the owner is done waiting on
+ * it, so a popular torrent must not block the next download for days. */
 export const IN_FLIGHT_STATUSES = [
 	"queued",
 	"downloading",
 	"fetching",
 	"importing",
 ] as const;
+
+const IN_FLIGHT_SQL = IN_FLIGHT_STATUSES.map((s) => `'${s}'`).join(", ");
+
+/** Concurrent in-flight torrents per user. Beyond this a submission is
+ * accepted and parked in `pending` rather than refused, and the poller starts
+ * it as soon as one of that user's slots frees up. Per user, not global: one
+ * account filling its own queue must not stall everyone else's. */
+export const MAX_ACTIVE_PER_USER = 5;
+
+/** Depth of a single user's waiting queue. This one *is* a hard refusal — the
+ * queue exists so a burst of submissions is absorbed rather than rejected, not
+ * so an unbounded backlog can be built up. */
+export const MAX_QUEUED_PER_USER = 50;
 
 function fail(db: Db, job: TorrentJobRow, detail: string): void {
 	db.run(
@@ -104,11 +126,21 @@ export async function importJob(
 	);
 	try {
 		const result = await importCompletedTorrent(state, job);
+		// Seeding only exists on qBittorrent: a Real-Debrid job has no local
+		// torrent to seed from, only files we pulled over HTTP.
+		const willSeed =
+			job.provider !== "debrid" &&
+			state.settings.qbittorrentSeeding &&
+			isConfigured(state.settings) &&
+			!!job.info_hash;
 		db.run(
-			`UPDATE torrent_jobs SET status = 'completed', error = NULL, progress = 1, dl_speed = 0, eta_seconds = NULL,
+			`UPDATE torrent_jobs SET status = $status, error = NULL, progress = 1, dl_speed = 0, eta_seconds = NULL,
          directory_id = $dirId, imported_file_count = $count, size_bytes = $size, updated_at = $now, completed_at = $now
        WHERE id = $id`,
 			{
+				// completed_at is set either way: the owner's files are in their
+				// storage now, and whether we keep uploading is not their wait.
+				$status: willSeed ? "seeding" : "completed",
 				$dirId: result.directoryId,
 				$count: result.fileCount,
 				$size: result.totalBytes,
@@ -119,13 +151,20 @@ export async function importJob(
 		if (job.provider === "debrid") {
 			// Drops the torrent from the Real-Debrid account and clears staging.
 			await releaseDebridJob(state, job);
+		} else if (willSeed) {
+			// The import *copied* into blob storage, so the downloaded files are
+			// still on disk and qBittorrent can keep serving them untouched.
+			await setShareLimits(state.settings, job.info_hash!, {
+				ratio: state.settings.qbittorrentSeedRatio,
+				minutes: state.settings.qbittorrentSeedMinutes,
+			});
 		} else {
 			if (job.info_hash)
 				await deleteTorrent(state.settings, job.info_hash, true);
 			cleanupJobDir(state, job);
 		}
 		log.info(
-			`torrent job completed job_id=${job.id} owner_id=${job.owner_id} files=${result.fileCount}`,
+			`torrent job ${willSeed ? "imported, now seeding" : "completed"} job_id=${job.id} owner_id=${job.owner_id} files=${result.fileCount}`,
 		);
 	} catch (err) {
 		// The downloaded data is deliberately left on disk so the owner can free up
@@ -172,6 +211,176 @@ export async function retryJob(
 		return;
 	}
 	await importJob(state, job);
+}
+
+// ── the waiting queue ──────────────────────────────────────────────────────
+
+/** Whether any backend can accept a torrent right now. Promoting into a
+ * configuration with nowhere to send the job would fail the whole queue on the
+ * next tick rather than leaving it waiting for the admin to finish setup. */
+function anyBackendConfigured(state: AppState): boolean {
+	return debridConfigured(state.settings) || isConfigured(state.settings);
+}
+
+/** Rebuilds the dispatch input for a job that was accepted but never sent.
+ * A magnet is stored whole in `source`; an uploaded .torrent lives in the
+ * on-disk stash, because the request that carried its bytes is long gone. */
+function pendingSource(job: TorrentJobRow): TorrentSource | null {
+	if (job.source.startsWith("magnet:")) return { magnet: job.source };
+	const bytes = readStashedSource(job.tag);
+	if (!bytes) return null;
+	return { file: { filename: `${job.tag}.torrent`, bytes } };
+}
+
+/** Hands one pending job to a backend and moves it into the normal lifecycle.
+ * Failure here settles the row rather than throwing: nobody is waiting on an
+ * HTTP response, so the only way to report it is on the job itself. */
+async function startPendingJob(
+	state: AppState,
+	job: TorrentJobRow,
+): Promise<void> {
+	const source = pendingSource(job);
+	if (!source) {
+		fail(state.db, job, "the queued .torrent file is no longer available");
+		return;
+	}
+	let dispatch: Awaited<ReturnType<typeof dispatchTorrent>>;
+	try {
+		dispatch = await dispatchTorrent(state, source, job.tag);
+	} catch (err) {
+		fail(state.db, job, errText(err));
+		return;
+	}
+	state.db.run(
+		`UPDATE torrent_jobs SET status = 'queued', provider = $provider, save_path = $savePath,
+       debrid_id = $debridId, fallback_reason = $fallbackReason, error = NULL,
+       started_at = $now, updated_at = $now
+     WHERE id = $id AND status = 'pending'`,
+		{
+			$provider: dispatch.provider,
+			$savePath: dispatch.savePath,
+			$debridId: dispatch.debridId,
+			$fallbackReason: dispatch.fallbackReason,
+			$now: nowIso(),
+			$id: job.id,
+		},
+	);
+	log.info(
+		`queued torrent started job_id=${job.id} owner_id=${job.owner_id} provider=${dispatch.provider}` +
+			(dispatch.fallbackReason ? ` fallback=${dispatch.fallbackReason}` : ""),
+	);
+}
+
+/** Starts as many pending jobs as there are free slots, oldest first within
+ * each owner. Runs before polling so a slot freed by the previous tick's
+ * import is reused immediately. */
+export async function promotePendingJobs(state: AppState): Promise<void> {
+	const { db } = state;
+	const pending = db.all<TorrentJobRow>(
+		"SELECT * FROM torrent_jobs WHERE status = 'pending' ORDER BY id ASC",
+	);
+	if (!pending.length || !anyBackendConfigured(state)) return;
+
+	// One grouped read for every owner's slot usage, not a COUNT per candidate.
+	const active = new Map<number, number>();
+	for (const row of db.all<{ owner_id: number; n: number }>(
+		`SELECT owner_id, COUNT(*) AS n FROM torrent_jobs
+       WHERE status IN (${IN_FLIGHT_SQL}) GROUP BY owner_id`,
+	)) {
+		active.set(row.owner_id, row.n);
+	}
+
+	for (const job of pending) {
+		const running = active.get(job.owner_id) ?? 0;
+		if (running >= MAX_ACTIVE_PER_USER) continue;
+		// Counted before the await: dispatch is slow, and the same owner's next
+		// pending job is decided in this same loop.
+		active.set(job.owner_id, running + 1);
+		try {
+			await startPendingJob(state, job);
+		} catch (err) {
+			log.warning(
+				`promoting queued torrent failed job_id=${job.id}: ${errText(err)}`,
+			);
+		}
+	}
+}
+
+// ── seeding ────────────────────────────────────────────────────────────────
+
+/** Whether a seeding torrent has served its share. qBittorrent reports
+ * `ratio` as -1 before it has uploaded anything, which must not read as
+ * "limit reached" — comparing against a strictly positive limit handles it. */
+function seedLimitReached(state: AppState, t: QbitTorrent): boolean {
+	const { qbittorrentSeedRatio, qbittorrentSeedMinutes } = state.settings;
+	if (qbittorrentSeedRatio > 0 && (t.ratio ?? 0) >= qbittorrentSeedRatio)
+		return true;
+	if (
+		qbittorrentSeedMinutes > 0 &&
+		(t.seeding_time ?? 0) >= qbittorrentSeedMinutes * 60
+	)
+		return true;
+	return false;
+}
+
+/** Retires a seeding torrent: out of qBittorrent, its downloaded copy off
+ * disk, row settled. The imported files are untouched — they are ordinary
+ * files in the owner's storage by now. */
+async function finishSeeding(
+	state: AppState,
+	job: TorrentJobRow,
+	reason: string,
+): Promise<void> {
+	if (job.info_hash && isConfigured(state.settings)) {
+		await deleteTorrent(state.settings, job.info_hash, true);
+	}
+	cleanupJobDir(state, job);
+	state.db.run(
+		`UPDATE torrent_jobs SET status = 'completed', dl_speed = 0, updated_at = $now WHERE id = $id`,
+		{ $now: nowIso(), $id: job.id },
+	);
+	log.info(
+		`torrent seeding finished job_id=${job.id} owner_id=${job.owner_id} reason=${reason}`,
+	);
+}
+
+async function pollSeedingJob(
+	state: AppState,
+	job: TorrentJobRow,
+	torrent: QbitTorrent | undefined,
+): Promise<void> {
+	// Gone from qBittorrent — retired by its own share-limit action, or removed
+	// by the operator. Either way the job is done, not failed: its files were
+	// imported before seeding ever started.
+	if (!torrent) {
+		await finishSeeding(state, job, "no longer in qBittorrent");
+		return;
+	}
+	state.db.run(
+		`UPDATE torrent_jobs SET seed_ratio = $ratio, seed_seconds = $seconds, dl_speed = 0, updated_at = $now
+     WHERE id = $id`,
+		{
+			$ratio: torrent.ratio ?? 0,
+			$seconds: torrent.seeding_time ?? 0,
+			$now: nowIso(),
+			$id: job.id,
+		},
+	);
+	if (!state.settings.qbittorrentSeeding) {
+		await finishSeeding(
+			state,
+			{ ...job, info_hash: torrent.hash },
+			"seeding disabled",
+		);
+		return;
+	}
+	if (seedLimitReached(state, torrent)) {
+		await finishSeeding(
+			state,
+			{ ...job, info_hash: torrent.hash },
+			`share limit reached (ratio ${(torrent.ratio ?? 0).toFixed(2)})`,
+		);
+	}
 }
 
 // ── Real-Debrid transfer tasks ─────────────────────────────────────────────
@@ -260,7 +469,11 @@ async function pollQbitJob(
 	const { db } = state;
 
 	if (!torrent) {
-		if (Date.now() - new Date(job.created_at).getTime() > MISSING_GRACE_MS) {
+		// From when the job was *dispatched*, not when it was submitted: a job
+		// that waited an hour in the queue would otherwise blow this grace the
+		// instant it started. Rows predating the queue have no started_at.
+		const since = new Date(job.started_at ?? job.created_at).getTime();
+		if (Date.now() - since > MISSING_GRACE_MS) {
 			fail(db, job, "torrent is no longer present in qBittorrent");
 		}
 		return;
@@ -339,13 +552,19 @@ export async function torrentPollJob(state: AppState): Promise<void> {
 	if (running) return;
 	running = true;
 	try {
+		// Before polling, so a slot freed by the previous tick's import is handed
+		// to the next waiting job without idling a whole interval.
+		await promotePendingJobs(state);
+
 		const jobs = state.db.all<TorrentJobRow>(
-			"SELECT * FROM torrent_jobs WHERE status IN ('queued', 'downloading') ORDER BY id ASC",
+			"SELECT * FROM torrent_jobs WHERE status IN ('queued', 'downloading', 'seeding') ORDER BY id ASC",
 		);
 		if (jobs.length === 0) return;
 
-		const debridJobs = jobs.filter((j) => j.provider === "debrid");
-		const qbitJobs = jobs.filter((j) => j.provider !== "debrid");
+		const seedingJobs = jobs.filter((j) => j.status === "seeding");
+		const live = jobs.filter((j) => j.status !== "seeding");
+		const debridJobs = live.filter((j) => j.provider === "debrid");
+		const qbitJobs = live.filter((j) => j.provider !== "debrid");
 
 		if (debridJobs.length && debridConfigured(state.settings)) {
 			for (const job of debridJobs) {
@@ -357,7 +576,10 @@ export async function torrentPollJob(state: AppState): Promise<void> {
 			}
 		}
 
-		if (qbitJobs.length && isConfigured(state.settings)) {
+		if (
+			(qbitJobs.length || seedingJobs.length) &&
+			isConfigured(state.settings)
+		) {
 			let torrents: QbitTorrent[];
 			try {
 				torrents = await allTorrents(state.settings);
@@ -367,6 +589,8 @@ export async function torrentPollJob(state: AppState): Promise<void> {
 				);
 				return;
 			}
+			// Still exactly one request per tick: downloading and seeding jobs are
+			// both resolved out of this one list.
 			const byTagMap = byTag(torrents);
 
 			for (const job of qbitJobs) {
@@ -377,6 +601,22 @@ export async function torrentPollJob(state: AppState): Promise<void> {
 						`torrent poll failed job_id=${job.id}: ${err instanceof Error ? err.message : String(err)}`,
 					);
 				}
+			}
+			for (const job of seedingJobs) {
+				try {
+					await pollSeedingJob(state, job, byTagMap.get(job.tag));
+				} catch (err) {
+					log.warning(
+						`seeding poll failed job_id=${job.id}: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+			}
+		} else if (seedingJobs.length) {
+			// qBittorrent was unconfigured underneath these rows. Nothing can be
+			// seeding any more, and leaving them in 'seeding' would strand them
+			// there forever with their downloads still on disk.
+			for (const job of seedingJobs) {
+				await finishSeeding(state, job, "qBittorrent is no longer configured");
 			}
 		}
 	} finally {

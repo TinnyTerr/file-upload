@@ -6,6 +6,8 @@ import type {
 	AdminTorrentJob,
 	DebridSettingsInput,
 	DebridStatus,
+	SeedingSettingsInput,
+	SeedingStatus,
 	TorrentHostStatus,
 } from "@/features/torrents/types";
 import type {
@@ -113,6 +115,10 @@ export const adminService = {
 	// persists it, so a rejected token surfaces here as a 400.
 	setDebrid: (body: DebridSettingsInput) =>
 		api.put<DebridStatus>("/admin/torrents/debrid", { json: body }),
+	// Seeding policy for finished qBittorrent torrents. Node-local config, like
+	// the Real-Debrid token -- it is not replicated to peers.
+	setSeeding: (body: SeedingSettingsInput) =>
+		api.put<SeedingStatus>("/admin/torrents/seeding", { json: body }),
 
 	// Bulk
 	bulkPreview: (action: BulkAction, ids: number[]) =>

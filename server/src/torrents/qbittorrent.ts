@@ -23,6 +23,13 @@ export interface QbitTorrent {
 	content_path: string;
 	save_path: string;
 	tags: string;
+	/** Share ratio, and seconds spent seeding. Both drive seed retirement
+	 * (poller.ts::pollSeedingJob); qBittorrent reports `ratio` as -1 when it has
+	 * uploaded nothing yet, which must not read as "limit reached". */
+	ratio: number;
+	seeding_time: number;
+	upspeed: number;
+	uploaded: number;
 }
 
 /** qBittorrent states that mean "all wanted data is on disk". */
@@ -217,6 +224,44 @@ export function byTag(torrents: QbitTorrent[]): Map<string, QbitTorrent> {
 		}
 	}
 	return out;
+}
+
+/** qBittorrent's sentinel for "no limit" on both share-limit fields. (`-2` is
+ * "use the global limit", which is deliberately not what we want -- the point
+ * of setting these per torrent is that the job owns its own retirement.) */
+const NO_LIMIT = -1;
+
+/** Applies this job's seeding limits to one torrent, so qBittorrent stops
+ * uploading on its own even if the poller never runs again.
+ *
+ * The poller enforces the same thresholds independently and is what actually
+ * deletes the torrent and its data -- qBittorrent's own share-limit *action* is
+ * a global setting we don't control, so it may be "pause" or "remove" or
+ * nothing. Setting the limit here only guarantees the upload stops. */
+export async function setShareLimits(
+	settings: Settings,
+	hash: string,
+	opts: { ratio: number; minutes: number },
+): Promise<void> {
+	const body = new URLSearchParams({
+		hashes: hash,
+		ratioLimit: String(opts.ratio > 0 ? opts.ratio : NO_LIMIT),
+		seedingTimeLimit: String(opts.minutes > 0 ? opts.minutes : NO_LIMIT),
+		// Required by qBittorrent >= 4.6 and ignored by older builds, which parse
+		// only the fields they know.
+		inactiveSeedingTimeLimit: String(NO_LIMIT),
+	});
+	await call(settings, "/api/v2/torrents/setShareLimits", {
+		method: "POST",
+		headers: { "Content-Type": "application/x-www-form-urlencoded" },
+		body,
+	}).catch((err) => {
+		// Best-effort: the poller enforces the same limits, so a build that
+		// rejects this call still retires the torrent on schedule.
+		log.warning(
+			`qBittorrent setShareLimits failed hash=${hash}: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	});
 }
 
 export async function deleteTorrent(

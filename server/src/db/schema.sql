@@ -335,6 +335,11 @@ CREATE TABLE IF NOT EXISTS torrent_jobs (
   debrid_status TEXT,
   -- Why this job is on qBittorrent despite Real-Debrid being configured.
   fallback_reason TEXT,
+  -- 'pending' (accepted, waiting for one of the owner's MAX_ACTIVE_PER_USER
+  -- slots -- nothing has been sent to a backend yet) | 'queued' (dispatched,
+  -- backend has not reported progress yet) | 'downloading' | 'fetching'
+  -- (Real-Debrid transfer leg) | 'importing' | 'seeding' (files imported, the
+  -- qBittorrent torrent is still uploading) | 'completed' | 'failed'.
   status TEXT NOT NULL DEFAULT 'queued',
   progress REAL NOT NULL DEFAULT 0,
   size_bytes INTEGER NOT NULL DEFAULT 0,
@@ -344,6 +349,16 @@ CREATE TABLE IF NOT EXISTS torrent_jobs (
   imported_file_count INTEGER NOT NULL DEFAULT 0,
   error TEXT,
   created_at TEXT NOT NULL,
+  -- When the job was actually handed to a backend, which is later than
+  -- `created_at` for anything that waited in the queue. The poller's
+  -- "qBittorrent has never heard of this tag" grace period runs from here --
+  -- measured from created_at, an hour in the queue would blow the 3-minute
+  -- grace the instant the job started. NULL while pending.
+  started_at TEXT,
+  -- Live seeding counters, mirrored from qBittorrent while status = 'seeding'
+  -- so the UI can show progress toward the retirement limits.
+  seed_ratio REAL,
+  seed_seconds INTEGER,
   updated_at TEXT NOT NULL,
   completed_at TEXT
 );
