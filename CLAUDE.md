@@ -16,6 +16,7 @@ Multi-node replication lives in `server/src/cluster/*.ts`:
 - `identity.ts` — ULID row identity (`uid`) for replicated tables + the live-safe boot backfill. `UID_TABLES` is the canonical list of replicated tables: `users`, `permissions`, `content_blobs`, `directories`, `directory_links`, `files`, `links` — nothing else replicates
 - `changelog.ts` — the `replication_log`: trigger-generated, appended **inside the writing transaction**, and the only mechanism by which metadata leaves a node. Owns `CHANGELOG_TABLES` (= `UID_TABLES`), `TABLE_COLUMNS`, `BLOB_COLUMNS`, `FOREIGN_KEYS`, `installChangeLog`, `setNodeIdentity`, `seedChangeLog`, `readChanges`, `applyChanges`, and the cursor accessors
 - `replication.ts` — hierarchical pull of that log (`GET /api/cluster/changes`) + per-peer, per-direction cursors
+- `topology.ts` — the replication graph the cluster dashboard draws: every node this one knows of, its derived role, and its upstream. Built from the same `upstreamOf()` over the same generation that `pullTargets` uses, with the same liveness observation, so the picture cannot disagree with the pulls. `GET /api/cluster/topology`
 - `blobs.ts` — content-addressed blob fetch-on-miss from peers (read-time failover for `routes/public.ts`'s raw/preview handlers)
 - `cacheEviction.ts` — LRU eviction for `REPLICATION_MODE=cache` nodes; verifies durability on a full-replica peer before deleting anything
 - `halt.ts` — in-memory TTL'd upload halt registry (user-scope + global), gossiped over the event firehose
@@ -51,7 +52,7 @@ Multi-node replication lives in `server/src/cluster/*.ts`:
 - `middleware/degradedMode.ts` gates **by method with a short allowlist**, mounted once in `app.ts`, rather than enumerating write routes — so it fails closed and a route added later is refused unless deliberately allowlisted. `/api/cluster` is on that list because promotion is the only way out and gating it would make degraded mode unrecoverable.
 - Reads never gate. Every read here is local by construction, which is what makes a degraded node useful rather than merely up.
 
-`routes/cluster.ts` exports `clusterRouter` (mounted at `/api/cluster`: session-authenticated management endpoints — `/token`, `/token/rotate`, `/self`, `/nodes` (GET/POST/PATCH/DELETE), `/retier`, enroll/unlink — **plus** cluster-token-authenticated node-to-node endpoints — `/join`, `/heartbeat`, `/ping`, `/blobs/:storedSha256`, `/digest`, `/changes`, `/tiering`) and `adminClusterRouter` (mounted at `/api/admin/cluster`: `/node-logs` + `/events`, the HTTP long-poll fallback for the websocket firehose). `server/src/ws.ts` attaches the websocket firehose directly to the `http.Server` returned by `app.listen()` in `index.ts`, since Express has no native websocket support.
+`routes/cluster.ts` exports `clusterRouter` (mounted at `/api/cluster`: session-authenticated management endpoints — `/token`, `/token/rotate`, `/self`, `/topology`, `/nodes` (GET/POST/PATCH/DELETE), `/retier`, enroll/unlink — **plus** cluster-token-authenticated node-to-node endpoints — `/join`, `/heartbeat`, `/ping`, `/blobs/:storedSha256`, `/digest`, `/changes`, `/tiering`) and `adminClusterRouter` (mounted at `/api/admin/cluster`: `/node-logs` + `/events`, the HTTP long-poll fallback for the websocket firehose). `server/src/ws.ts` attaches the websocket firehose directly to the `http.Server` returned by `app.listen()` in `index.ts`, since Express has no native websocket support.
 
 **Invariant:** the in-memory event sequence counter in `eventBus.ts` assumes **one process per node** (this server makes a single `app.listen()` call and never forks workers). Colliding `origin_seq` values across workers is the exact bug class that broke logins under `uvicorn --workers=4` in the old deployment — see `cluster_events`' `UNIQUE(origin_node_id, origin_seq)`. Don't introduce multi-process scaling without redesigning event sequencing.
 
@@ -310,7 +311,9 @@ client/src/
     apikeys/               # API key management UI
     torrents/              # Torrents page (add magnet/.torrent, live progress)
     cluster/               # Cluster dashboard (tier + region + generation + drift,
-                           #   nodes, token, halts, manual re-tier)
+                           #   nodes, token, halts, manual re-tier) + the topology
+                           #   diagram, whose graph comes from the server and whose
+                           #   lib/topologyLayout.ts only positions it
     admin/                 # Admin panel (users, files, keys, audit, storage, logs, torrents)
     media/                 # Media library: poster grid, player, publish + play-key UI
     oauth/                 # OAuth app management + the /oauth/authorize consent page
@@ -744,6 +747,7 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - Don't add a second state-transfer mechanism alongside `seedChangeLog` — Phase 3 deleted `/cluster/export` specifically so there is exactly one, and two that can disagree is the failure mode it was deleted to prevent
 - Don't reintroduce an election, an epoch, or a `candidate` role — leadership is computed from a snapshot, and the only thing that travels between nodes is the generation
 - Don't write a peer's claimed `role` into `cluster_nodes` — derive it from the tiering generation
+- Don't recompute the replication topology in the client — `upstreamOf()` is the whole rule, and a second copy of it can disagree with the pulls the cluster is actually doing. `cluster/topology.ts` ships the graph; the client only lays it out
 - Don't count a brand-new node against the drift hold-down — until it is in a snapshot it has no upstream and replicates with nobody
 - Don't add a write path that creates a `files` row without a quota reservation — go through `finalizeStoredFile`, or reserve explicitly like save/copy do
 - Don't check quota by reading `SUM(files.size_bytes)` locally — that's the read two nodes can both pass, and it is the bug reservations exist to close

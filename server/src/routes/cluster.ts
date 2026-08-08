@@ -22,13 +22,14 @@ import {
 	currentTiering,
 	isMaster,
 	measureDrift,
+	promoteSelf,
 	regionOf,
 	retier,
-	promoteSelf,
 	retierForNewMember,
 	selfRole,
 	type Tiering,
 } from "../cluster/tiering.ts";
+import { buildTopology } from "../cluster/topology.ts";
 import { setEnvValue } from "../config.ts";
 import { type ClusterNodeRow, nowIso } from "../db/rows.ts";
 import { getLogger, queryBackendLogs } from "../logging.ts";
@@ -248,6 +249,13 @@ export function clusterRouter(state: AppState): Router {
 				? outstandingReservations(db).length
 				: null,
 		});
+	});
+
+	// The replication graph the dashboard draws. Derived server-side from the
+	// same `upstreamOf()` the pull job follows -- see cluster/topology.ts for why
+	// it is not computed in the client.
+	router.get("/topology", requireCluster, (_req, res) => {
+		res.json(buildTopology(state));
 	});
 
 	router.get("/nodes", requireCluster, (_req, res) => {
@@ -700,7 +708,12 @@ export function clusterRouter(state: AppState): Router {
 			actual_bytes?: number;
 		};
 		if (body?.reservation_uid) {
-			settleReservation(db, body.reservation_uid, "committed", body.actual_bytes);
+			settleReservation(
+				db,
+				body.reservation_uid,
+				"committed",
+				body.actual_bytes,
+			);
 		}
 		res.json({ status: "ok" });
 	});

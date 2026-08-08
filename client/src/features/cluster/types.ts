@@ -58,6 +58,45 @@ export interface LinkedClusterNode extends ClusterNode {
 	enroll?: EnrollResult;
 }
 
+/** One node in the replication graph, as the server this page is talking to
+ * sees it. Roles and edges are computed there, from the same `upstreamOf()` the
+ * pull job follows — the client only lays them out. */
+export interface TopologyNode {
+	node_id: string;
+	name: string;
+	base_url: string;
+	/** Null when the node is not in the current generation's snapshot — untiered,
+	 * with no upstream, replicating with nobody. */
+	role: NodeRole | null;
+	region: string | null;
+	in_generation: boolean;
+	/** The reporting node's own heartbeat observation. */
+	reachable: boolean;
+	eligible: boolean | null;
+	pinned: boolean;
+	is_self: boolean;
+	/** Who this node pulls its change log down from; null on the master. */
+	upstream: string | null;
+	/** The edge is the fallback to the master, taken because the region leader is
+	 * unreachable — not the planned one. */
+	fell_back: boolean;
+	rtt_ms: number | null;
+	replication_mode: string;
+	disk_total_bytes: number;
+	disk_free_bytes: number;
+	used_bytes: number;
+	last_heartbeat_at: string | null;
+}
+
+export interface ClusterTopology {
+	generation: number;
+	computed_at: string | null;
+	reason: string | null;
+	master_node_id: string | null;
+	self_node_id: string;
+	nodes: TopologyNode[];
+}
+
 export interface ClusterHalt {
 	scope: string;
 	until: number;

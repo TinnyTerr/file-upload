@@ -3,6 +3,7 @@ import type {
 	ClusterNode,
 	ClusterNodeUpdate,
 	ClusterSelf,
+	ClusterTopology,
 	LinkedClusterNode,
 	NewClusterNode,
 } from "../types";
@@ -15,6 +16,11 @@ export const clusterService = {
 		api.post<{ token: string }>("/cluster/token/rotate").then((r) => r.token),
 
 	self: () => api.get<ClusterSelf>("/cluster/self"),
+
+	/** The replication graph. Derived server-side on purpose: `upstreamOf()` is
+	 * the whole topology rule, and a second copy here could disagree with the
+	 * pulls the cluster is actually doing. */
+	topology: () => api.get<ClusterTopology>("/cluster/topology"),
 
 	listNodes: () =>
 		api.get<{ nodes: ClusterNode[] }>("/cluster/nodes").then((r) => r.nodes),

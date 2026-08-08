@@ -6,6 +6,7 @@ import type { ClusterNodeUpdate, NewClusterNode } from "../types";
 
 const NODES_QUERY = ["cluster", "nodes"] as const;
 const SELF_QUERY = ["cluster", "self"] as const;
+const TOPOLOGY_QUERY = ["cluster", "topology"] as const;
 
 export function useClusterSelf() {
 	// Poll so node capacity + active halts stay reasonably fresh on the dashboard.
@@ -16,9 +17,24 @@ export function useClusterSelf() {
 	});
 }
 
+/** The replication graph. Same cadence as the node list — an edge only moves
+ * when a generation is minted or a peer's liveness flips, and both of those
+ * show up here within a heartbeat. */
+export function useClusterTopology() {
+	return useQuery({
+		queryKey: TOPOLOGY_QUERY,
+		queryFn: clusterService.topology,
+		refetchInterval: 15000,
+	});
+}
+
 export function useClusterNodes() {
 	const qc = useQueryClient();
-	const invalidate = () => qc.invalidateQueries({ queryKey: NODES_QUERY });
+	const invalidate = () => {
+		qc.invalidateQueries({ queryKey: NODES_QUERY });
+		// Linking, unlinking or flagging a node changes who is in the picture.
+		qc.invalidateQueries({ queryKey: TOPOLOGY_QUERY });
+	};
 
 	const list = useQuery({
 		queryKey: NODES_QUERY,
@@ -92,6 +108,7 @@ export function useRetier() {
 			);
 			qc.invalidateQueries({ queryKey: NODES_QUERY });
 			qc.invalidateQueries({ queryKey: SELF_QUERY });
+			qc.invalidateQueries({ queryKey: TOPOLOGY_QUERY });
 		},
 		onError: (err) =>
 			toast.error("Couldn't re-tier", { description: errorMessage(err) }),
@@ -111,6 +128,7 @@ export function usePromote() {
 			);
 			qc.invalidateQueries({ queryKey: NODES_QUERY });
 			qc.invalidateQueries({ queryKey: SELF_QUERY });
+			qc.invalidateQueries({ queryKey: TOPOLOGY_QUERY });
 		},
 		onError: (err) =>
 			toast.error("Couldn't promote", { description: errorMessage(err) }),

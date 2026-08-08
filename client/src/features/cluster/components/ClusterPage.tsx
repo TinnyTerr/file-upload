@@ -44,6 +44,7 @@ import {
 	useRetier,
 } from "../hooks/useCluster";
 import type { ClusterHalt, NodeRole } from "../types";
+import { TopologyCard } from "./TopologyCard";
 
 function haltLabel(scope: string): string {
 	if (scope === "global") return "All uploads halted";
@@ -631,6 +632,7 @@ export function ClusterPage() {
 
 			<MasterStatusBanner />
 			<ThisServerCard />
+			<TopologyCard />
 			<LocalTokenCard />
 			<LinkedNodesCard />
 			<ConnectingInfoCard />
