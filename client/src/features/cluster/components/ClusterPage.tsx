@@ -400,8 +400,11 @@ function ConnectingInfoCard() {
 						Streams every event on the remote server. Pass the cluster token as{" "}
 						<code>?token=</code> or a Bearer header.
 					</p>
+					{/* The `/api` prefix is load-bearing: ws.ts matches the upgrade on
+					    the exact path `/api/admin/cluster/firehose` and destroys the
+					    socket otherwise, which a proxy surfaces as a bare 502. */}
 					<CodeLine
-						value={`${wsOrigin}/admin/cluster/firehose?token=<cluster-token>`}
+						value={`${wsOrigin}/api/admin/cluster/firehose?token=<cluster-token>`}
 					/>
 				</div>
 				<div className="space-y-1.5">
@@ -410,7 +413,9 @@ function ConnectingInfoCard() {
 						A websocket-free alternative. Pass the highest <code>id</code> seen
 						as <code>?after=</code> to replay only what you missed.
 					</p>
-					<CodeLine value={`${origin}/admin/cluster/events?after=0`} />
+					{/* Same prefix rule: adminClusterRouter is mounted at
+					    /api/admin/cluster, like every other data endpoint. */}
+					<CodeLine value={`${origin}/api/admin/cluster/events?after=0`} />
 				</div>
 			</CardContent>
 		</Card>
