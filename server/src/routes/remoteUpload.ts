@@ -369,15 +369,13 @@ export function remoteUploadRouter(state: AppState): Router {
 				// covers that too, belt-and-suspenders).
 				validatePublicHttpUrl(url);
 				const meta = await downloadRemoteUrl(url, work, perm.max_file_bytes);
-				const usedBytes =
-					db.get<{ total: number | null }>(
-						"SELECT SUM(size_bytes) as total FROM files WHERE owner_id = $id",
-						{ $id: user.id },
-					)?.total ?? 0;
-				if (usedBytes + meta.sizeBytes > perm.quota_bytes) {
-					throw new HttpError(413, "remote upload would exceed your quota");
-				}
-
+				// No local quota check and no pre-reservation: a remote URL's true
+				// length is only known once the transfer finishes (the server may
+				// send no Content-Length, or lie about it), so there is nothing to
+				// reserve against beforehand. `finalizeStoredFile` takes the
+				// reservation from the master with the real figure -- the transfer is
+				// already over by then, so the reservation is short-lived rather than
+				// held across it.
 				const result = await finalizeStoredFile({
 					state,
 					req,

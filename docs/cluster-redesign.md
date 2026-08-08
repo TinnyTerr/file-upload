@@ -964,9 +964,10 @@ Phase 4 is the point at which the topology in this document actually exists. Pha
 separable and can slip without blocking anything above it — chunking is capability, not
 correctness.
 
-### Built so far (2026-08-06)
+### Built so far (2026-08-08)
 
-Phases **0, 1, 2 and 3** are implemented and green — the door is walked through.
+Phases **0, 1, 2, 3 and 4** are implemented and green — the door is walked through, and
+the topology in this document now actually exists.
 
 | Phase | Landed as |
 |---|---|
@@ -974,8 +975,11 @@ Phases **0, 1, 2 and 3** are implemented and green — the door is walked throug
 | 1 | `eventBus.seedSeq` + front-truncated `recent()`; `/admin/cluster/events` serves the durable table; local events persist synchronously |
 | 2 | `cluster/identity.ts` — ULID `uid` on all seven replicated tables, unique, backfilled at database open |
 | 3 | `cluster/changelog.ts` (triggers + apply + cursors + seed), `cluster/replication.ts` rewritten as the pull, `GET /api/cluster/changes`, `cluster_replication_pull` job |
+| 4 | `cluster/tiering.ts` — `cluster_tiering` + `cluster_drift`, the deterministic leader function, region inference, generation minting and the hold-down drift counter. **`cluster/election.ts` deleted in full**, with epochs, votes, `cluster_self_state`, `/vote-request`, `/master-assumed`, `cluster_election_liveness` and `digest.ts`'s split-brain check |
+| 5 | `cluster/quota.ts` — the `quota_reservations` ledger, `/cluster/quota/{reserve,renew,commit,release}`, sliding TTL + sweep. `cluster/degraded.ts` + `middleware/degradedMode.ts` — reachability state machine, 5-minute grace, held-request queue, write gate. `promoteSelf` + `POST /cluster/promote` + the admin banner |
 
-Tests: `clusterEvents`, `clusterIdentity`, `clusterChangelog`, `clusterReplication`.
+Tests: `clusterEvents`, `clusterIdentity`, `clusterChangelog`, `clusterReplication`,
+`clusterTiering`, `clusterQuota`.
 
 Three implementation decisions worth recording, because the text above does not predict
 them:
@@ -994,6 +998,64 @@ them:
   `upsert` entry per existing row the first time a populated database meets an empty log,
   so a joining node gets the whole corpus from cursor 0 through the ordinary pull. One
   mechanism for state transfer instead of two that can disagree.
+
+And five more from Phase 4:
+
+- **The generation rides on the handshakes that already exist.** §5.3 says the snapshot
+  becomes the replicated artefact but not how it travels. It travels whole, on every
+  `/join` and `/heartbeat` payload in both directions, and is adopted on strictly-higher
+  generation. At 2–10 nodes (D-9) the record is small enough that membership gossip needs
+  no protocol of its own — a peer either learns nothing new or adopts a newer generation
+  in a round-trip it was already making. `GET /api/cluster/tiering` exists for a node that
+  wants it sooner.
+- **Enrolling adopts by force, not by height.** Joining a cluster means taking its answer:
+  a standalone node that bootstrapped itself as master at generation 1 must not keep
+  believing that afterwards, and both sides start at generation 1 so a
+  highest-wins rule would never fire. That is the one adoption that is not
+  monotonic, and it is the same shape as the old `learnMasterPointer` bootstrap problem.
+- **A join re-tiers immediately; everything else waits out the hold-down.** §5.4's
+  hold-down exists so a restart is not drift, but applying it to a *new* node id would
+  leave that node with no upstream — and therefore replicating with nobody — for five
+  minutes. A node the current generation has never seen (`settled_status IS NULL`) counts
+  as a change straight away, which is what makes `/join` usable in seconds.
+- **The drift status is a composite, `<liveness>:<role-it-would-get>`.** That is R-3's
+  answer wired in rather than left as a recommendation: raw `disk_total_bytes` moves on
+  every write, so folding the *prospective* role into the status is what makes "a capacity
+  change that would alter the computed leader" the only capacity change that counts —
+  and it gets the same hold-down as any other.
+- **Liveness is read from two places on purpose.** The snapshot's `active` flag is the
+  master's view at mint time, which is the right input to the leader computation. Whether
+  a node can talk to its leader *right now* is its own observation, and that is what
+  `pullTargets` passes into `upstreamOf` so a follower cut off from its relay falls back
+  to the master (§5.1) without waiting for a generation that is not coming.
+
+And four from Phase 5:
+
+- **`finalizeStoredFile` reserves for itself when the caller didn't.** §5.9 lists the
+  paths that must reserve; enumerating them in code would mean every future upload path
+  has to remember, which is exactly how the pre-Phase-3 replication scheme shipped two of
+  forty call sites. Instead the one funnel every write already passes through takes a
+  reservation if none was handed down, so "every path that creates a `files` row reserves"
+  holds by construction. Callers that can reserve *earlier* still do — refusing a 40 GB
+  upload after 40 GB have crossed the wire is not much of a refusal.
+- **You cannot reserve against a size you do not know.** §5.9 lists torrent add and
+  remote-upload submit among the reserve-up-front paths. Neither can be: a magnet is a
+  promise, and a remote URL may send no `Content-Length` or lie about one. Both reserve at
+  the moment their true size first exists — the importer, and `finalizeStoredFile`
+  respectively — and `debrid.ts` keeps a *local, explicitly advisory* pre-check so a user
+  who obviously cannot fit the torrent hears about it in seconds. The chunked-upload path
+  is the one that genuinely declares its size up front, so it is the one that holds a
+  reservation across the transfer and renews it from chunk commits.
+- **Degraded mode gates by method with an allowlist, not by enumerating write routes.**
+  It fails closed: a route added later is refused while degraded unless someone
+  deliberately allowlists it. The allowlist is five prefixes and each has a reason
+  recorded next to it — most importantly `/api/cluster`, without which promotion (the only
+  way out) would itself be gated and degraded mode would be unrecoverable.
+- **Free disk stayed local while the global cap moved to the master.** They look like the
+  same check and are not: the cap is a cluster-wide budget, but free space is a fact about
+  the node that will physically hold the bytes, and the master's spare gigabytes say
+  nothing about a follower's. Moving both would have made a full follower accept writes it
+  cannot store.
 
 ---
 

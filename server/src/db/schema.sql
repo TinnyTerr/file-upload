@@ -430,26 +430,69 @@ CREATE TABLE IF NOT EXISTS cluster_nodes (
   created_at TEXT NOT NULL,
   last_seen_at TEXT,
   last_heartbeat_at TEXT,
-  role TEXT NOT NULL DEFAULT 'follower',
-  epoch INTEGER NOT NULL DEFAULT 0
-);
-
--- Singleton row (id=1) holding THIS node's own election state: elected,
--- epoch-versioned leadership layered under the existing full-mesh
--- reserve/replicate/export protocol. `role`/`epoch` are this node's live
--- view of itself; `voted_epoch`/`voted_for` enforce "one vote per epoch"
--- durably (must survive a crash between granting a vote and a restart, or a
--- rejoin could double-vote and produce two masters at the same epoch).
-CREATE TABLE IF NOT EXISTS cluster_self_state (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
+  -- Derived from the tiering snapshot, not asserted by the peer itself
+  -- (S4): 'master' | 'leader' | 'follower'. `epoch` is vestigial -- elections
+  -- are gone and nothing reads it; the column survives because SQLite cannot
+  -- drop one in place.
   role TEXT NOT NULL DEFAULT 'follower',
   epoch INTEGER NOT NULL DEFAULT 0,
-  voted_epoch INTEGER NOT NULL DEFAULT 0,
-  voted_for TEXT,
-  current_master_id TEXT,
-  current_master_url TEXT,
-  last_master_contact_at TEXT,
-  updated_at TEXT NOT NULL
+  -- Region membership (§5.2). `region_source` is 'configured' when NODE_REGION
+  -- or an operator set it -- which always wins -- and 'inferred' when it came
+  -- from RTT clustering.
+  region TEXT,
+  region_source TEXT NOT NULL DEFAULT 'inferred',
+  -- Median heartbeat round-trip to this peer, and observed transfer rate.
+  -- rtt_ms feeds region inference; throughput_bps feeds placement and read
+  -- source selection (§5.11), never leader choice -- capacity is the leader
+  -- score outright (D-4).
+  rtt_ms INTEGER,
+  throughput_bps INTEGER,
+  -- Operator switches. `ineligible` removes a node from leader candidacy
+  -- without unlinking it; `pinned_master` overrides the computation entirely.
+  ineligible INTEGER NOT NULL DEFAULT 0,
+  pinned_master INTEGER NOT NULL DEFAULT 0
+);
+
+-- ── tiering (cluster/tiering.ts, redesign §5.3-5.4) ────────────────────────
+--
+-- `cluster_self_state` used to live here: this node's elected role, its epoch,
+-- and the durable one-vote-per-epoch record. All of it is gone. Leadership is
+-- no longer voted on; it is a pure function of the membership snapshot below,
+-- so every node computes the same answer from the same input and there is no
+-- epoch to poison, no quorum over a disagreed set, and no self-asserted role
+-- for a peer to lie about. An upgraded database keeps the old table -- SQLite
+-- cannot drop it in place and nothing reads it.
+
+CREATE TABLE IF NOT EXISTS cluster_tiering (
+  -- Monotonic, and minted by the MASTER only. During a master outage none can
+  -- be minted, which is the degraded mode of §5.5 rather than a separate
+  -- failure mode to handle.
+  generation     INTEGER PRIMARY KEY,
+  computed_at    TEXT NOT NULL,
+  reason         TEXT NOT NULL,   -- 'bootstrap' | 'manual' | 'drift' | 'promotion'
+  master_node_id TEXT NOT NULL,
+  snapshot       TEXT NOT NULL,   -- JSON: the node list the computation ran over
+  regions        TEXT NOT NULL    -- JSON: region -> { leader, members[] }
+);
+
+-- The drift counter (§5.4). One row per node the master has an opinion about,
+-- holding what it currently observes and what was last folded into a
+-- generation. A re-tier happens when enough of those disagree -- but only
+-- after the new status has been HELD for the hold-down window, because a
+-- restart is not drift.
+CREATE TABLE IF NOT EXISTS cluster_drift (
+  node_id                TEXT PRIMARY KEY,
+  -- '<up|down|absent>:<master|leader|follower>'. The role half is R-3's answer
+  -- to "what counts as a capacity class change": raw disk_total_bytes moves on
+  -- every write, so only a capacity change that would alter who leads shows up
+  -- as a status change at all.
+  status                 TEXT NOT NULL,
+  observed_at            TEXT NOT NULL,   -- when this status was first seen (hold-down clock)
+  -- What the current generation was computed against. NULL means this node has
+  -- never been in a snapshot, which counts as a change immediately -- a join is
+  -- not flapping, and an unadmitted node has no upstream.
+  settled_status         TEXT,
+  settled_at             TEXT
 );
 
 -- Local-only cache bookkeeping for REPLICATION_MODE=cache nodes. Deliberately
@@ -548,8 +591,59 @@ CREATE TABLE IF NOT EXISTS replication_cursors (
 CREATE TABLE IF NOT EXISTS replication_control (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   node_id TEXT NOT NULL DEFAULT '',
-  suppressed INTEGER NOT NULL DEFAULT 0
+  suppressed INTEGER NOT NULL DEFAULT 0,
+  -- Whether this node is the master, mirrored here by cluster/tiering.ts on
+  -- every generation change. It lives in this table rather than being looked
+  -- up because the log-fixup trigger needs it, and a trigger cannot reach
+  -- application state -- only other tables.
+  is_master INTEGER NOT NULL DEFAULT 0
 );
+
+-- ── quota reservations (cluster/quota.ts, redesign §5.9) ───────────────────
+--
+-- The master's ledger of writes that have been ADMITTED but whose file rows do
+-- not exist yet. Without it, two nodes each read SUM(files.size_bytes) = 0,
+-- each admit a 10 GB upload against a 15 GB quota, and the change log honestly
+-- converges on 20 GB: quota is the one number that cannot be reconciled after
+-- the fact, which is why D-1 makes it master-authoritative and synchronous.
+--
+-- The unit is LOGICAL quota bytes (D-17) -- SUM(files.size_bytes) against
+-- permissions.quota_bytes -- so every path that creates a files row reserves,
+-- including the ones that create no new bytes at all (save, copy). Dedup
+-- savings are the system's, not the user's.
+--
+-- `user_uid`, not a local user id: ids are node-local and never cross the wire.
+--
+-- Node-local and deliberately absent from CHANGELOG_TABLES. It is the master's
+-- own working state, not cluster state -- a follower has no use for it, and
+-- replicating it would put a write on the master's hot path for every
+-- reservation. The cost is that a leadership handover drops whatever is
+-- outstanding, so the new master can over-admit by at most the in-flight set
+-- for one window; a handover is a deliberate, rare, operator-visible act and
+-- that is a better trade than replicating a table that changes this often.
+CREATE TABLE IF NOT EXISTS quota_reservations (
+  uid            TEXT PRIMARY KEY,
+  user_uid       TEXT NOT NULL,
+  bytes          INTEGER NOT NULL,
+  -- Which node asked, for the admin view and for releasing a dead node's
+  -- reservations wholesale.
+  node_id        TEXT NOT NULL,
+  kind           TEXT NOT NULL,   -- 'upload' | 'save' | 'copy' | 'torrent' | 'remote'
+  state          TEXT NOT NULL,   -- 'open' | 'committed' | 'released' | 'expired'
+  created_at     TEXT NOT NULL,
+  -- The sliding-TTL clock (D-16). `expires_at` is an INACTIVITY window, not a
+  -- ceiling on how long a transfer may take: a chunk commit, the idle
+  -- keepalive, or the periodic tick all push it forward. Expiry therefore means
+  -- "nobody has touched this for a full window", which is the only condition
+  -- under which releasing the bytes is safe.
+  renewed_at     TEXT NOT NULL,
+  expires_at     TEXT NOT NULL,
+  committed_bytes INTEGER
+);
+CREATE INDEX IF NOT EXISTS ix_quota_reservations_user
+  ON quota_reservations(user_uid, state);
+CREATE INDEX IF NOT EXISTS ix_quota_reservations_expiry
+  ON quota_reservations(state, expires_at);
 
 -- OAuth 2.0 authorization-server tables (security/oauth.ts, routes/oauth.ts).
 -- Deliberately absent from cluster/replication.ts's REPLICATED_TABLES: like

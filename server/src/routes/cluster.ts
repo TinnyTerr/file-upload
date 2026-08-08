@@ -5,16 +5,30 @@ import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
 import { logHead, readChanges } from "../cluster/changelog.ts";
+import { masterStatus } from "../cluster/degraded.ts";
 import { computeDigest } from "../cluster/digest.ts";
-import {
-	getSelfState,
-	handleMasterAssumed,
-	handleVoteRequest,
-} from "../cluster/election.ts";
 import { readOwnEvents } from "../cluster/eventStore.ts";
 import * as clusterHttp from "../cluster/http.ts";
 import { ClusterHTTPError } from "../cluster/http.ts";
 import { enrollWithMaster, upsertPeer } from "../cluster/membership.ts";
+import {
+	type GrantRequest,
+	grantReservation,
+	outstandingReservations,
+	renewReservation,
+	settleReservation,
+} from "../cluster/quota.ts";
+import {
+	currentTiering,
+	isMaster,
+	measureDrift,
+	regionOf,
+	retier,
+	promoteSelf,
+	retierForNewMember,
+	selfRole,
+	type Tiering,
+} from "../cluster/tiering.ts";
 import { setEnvValue } from "../config.ts";
 import { type ClusterNodeRow, nowIso } from "../db/rows.ts";
 import { getLogger, queryBackendLogs } from "../logging.ts";
@@ -42,20 +56,31 @@ interface ContentBlobRow {
 
 function selfStats(state: AppState) {
 	const usage = diskUsageBytes();
-	const self = getSelfState(state.db);
+	const tiering = currentTiering(state.db);
+	const role = selfRole(state);
+	const masterId = tiering?.master_node_id ?? null;
+	const masterUrl =
+		masterId === state.settings.nodeId
+			? state.settings.nodeUrl
+			: (tiering?.snapshot.find((m) => m.node_id === masterId)?.base_url ??
+				null);
 	return {
 		node_id: state.settings.nodeId,
 		name: state.settings.nodeName,
-		is_master: self.role === "master",
+		is_master: role === "master",
 		archive_enabled: state.settings.archiveEnabled,
 		replication_mode: state.settings.replicationMode,
 		disk_total_bytes: usage?.total ?? 0,
 		disk_free_bytes: usage?.free ?? 0,
 		used_bytes: usedStorageBytes(state.db),
-		role: self.role,
-		epoch: self.epoch,
-		current_master_id: self.current_master_id,
-		current_master_url: self.current_master_url,
+		role,
+		region: tiering ? regionOf(tiering, state.settings.nodeId) : null,
+		tiering_generation: tiering?.generation ?? 0,
+		master_node_id: masterId,
+		master_node_url: masterUrl,
+		// The whole record, so a peer's handshake either learns nothing new or
+		// adopts a newer generation without a second request (cluster/tiering.ts).
+		tiering,
 	};
 }
 
@@ -74,8 +99,13 @@ function serializeNode(node: ClusterNodeRow) {
 		token_preview: mask(node.token),
 		active: !!node.active,
 		is_master: !!node.is_master,
+		// Derived from the tiering generation, never from what the node claimed.
 		role: node.role,
-		epoch: node.epoch,
+		region: node.region,
+		region_source: node.region_source,
+		rtt_ms: node.rtt_ms,
+		ineligible: !!node.ineligible,
+		pinned_master: !!node.pinned_master,
 		archive_enabled: !!node.archive_enabled,
 		replication_mode: node.replication_mode,
 		disk_total_bytes: node.disk_total_bytes,
@@ -119,9 +149,9 @@ async function triggerEnroll(
 	baseUrl: string,
 	token: string,
 ): Promise<Record<string, unknown>> {
-	// Master is an elected, epoch-versioned role (cluster/election.ts) -- the
+	// Master is derived from the tiering generation (cluster/tiering.ts) -- the
 	// static NODE_ROLE config value can be stale, so check the live state.
-	if (getSelfState(state.db).role !== "master") {
+	if (!isMaster(state)) {
 		const result = { status: "skipped", reason: "this server is not a master" };
 		log.info(`enroll ${baseUrl}: ${result.reason}`);
 		return result;
@@ -198,11 +228,25 @@ export function clusterRouter(state: AppState): Router {
 			([scope, until]) => ({ scope, until }),
 		);
 		res.json({
-			// stats.role already reports the live elected role (getSelfState) --
-			// don't overwrite it with the static NODE_ROLE bootstrap config value.
+			// stats.role already reports the role derived from the tiering
+			// generation -- don't overwrite it with the static NODE_ROLE bootstrap
+			// config value.
 			...stats,
 			node_url: state.settings.nodeUrl,
 			halts,
+			// What the drift counter would say right now, so the panel can show how
+			// close the cluster is to re-tiering itself. Master-only: nobody else
+			// counts drift, because nobody else may act on it.
+			drift: isMaster(state)
+				? measureDrift(db, state.settings, { persist: false })
+				: null,
+			// §5.5. `phase` is what the admin banner keys off: `grace` means a
+			// master restart is being ridden out, `degraded` means a human has to
+			// decide something.
+			master_status: masterStatus(state),
+			outstanding_reservations: isMaster(state)
+				? outstandingReservations(db).length
+				: null,
 		});
 	});
 
@@ -269,6 +313,76 @@ export function clusterRouter(state: AppState): Router {
 		}),
 	);
 
+	// Operator switches over a linked node (§5.2, §5.3). None of these re-tier on
+	// their own: they change the *input* to the computation, and the operator
+	// decides when it runs -- either by hitting /retier, or by letting the drift
+	// counter notice that the plan has changed and hold-down has passed.
+	router.patch(
+		"/nodes/:id",
+		requireSession(state),
+		requireCsrf,
+		requireCluster,
+		(req, res) => {
+			const id = Number(req.params.id);
+			const node = db.get<ClusterNodeRow>(
+				"SELECT * FROM cluster_nodes WHERE id = $id",
+				{ $id: id },
+			);
+			if (!node) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			const body = req.body as {
+				region?: string | null;
+				ineligible?: boolean;
+				pinned_master?: boolean;
+			};
+			if (body.region !== undefined) {
+				const region = (body.region ?? "").trim();
+				// An operator-set region is `configured`, which beats RTT inference
+				// permanently; clearing it hands the node back to inference.
+				db.run(
+					"UPDATE cluster_nodes SET region = $region, region_source = $source WHERE id = $id",
+					{
+						$region: region || null,
+						$source: region ? "configured" : "inferred",
+						$id: id,
+					},
+				);
+			}
+			if (body.ineligible !== undefined) {
+				db.run("UPDATE cluster_nodes SET ineligible = $v WHERE id = $id", {
+					$v: body.ineligible ? 1 : 0,
+					$id: id,
+				});
+			}
+			if (body.pinned_master !== undefined) {
+				// At most one pin, or the computation has two answers and stops being
+				// a function.
+				if (body.pinned_master) {
+					db.run("UPDATE cluster_nodes SET pinned_master = 0");
+				}
+				db.run("UPDATE cluster_nodes SET pinned_master = $v WHERE id = $id", {
+					$v: body.pinned_master ? 1 : 0,
+					$id: id,
+				});
+			}
+			recordAudit(db, {
+				actor: req.currentUser!.username,
+				action: "cluster.node_updated",
+				target: `node:${id}`,
+				ip: clientIp(state, req),
+			});
+			res.json(
+				serializeNode(
+					db.get<ClusterNodeRow>("SELECT * FROM cluster_nodes WHERE id = $id", {
+						$id: id,
+					})!,
+				),
+			);
+		},
+	);
+
 	router.delete(
 		"/nodes/:id",
 		requireSession(state),
@@ -304,14 +418,14 @@ export function clusterRouter(state: AppState): Router {
 		name: string;
 		base_url: string;
 		token: string;
-		is_master?: boolean;
 		archive_enabled?: boolean;
 		replication_mode?: string;
 		disk_total_bytes?: number;
 		disk_free_bytes?: number;
 		used_bytes?: number;
-		role?: string;
-		epoch?: number;
+		/** The sender's tiering generation. Adopted only if newer than ours; the
+		 * sender's *role* is never taken from the body (S4). */
+		tiering?: Tiering | null;
 	}
 
 	router.post("/join", clusterAuth, (req, res) => {
@@ -327,14 +441,12 @@ export function clusterRouter(state: AppState): Router {
 			name: body.name,
 			baseUrl: body.base_url,
 			token: body.token,
-			isMaster: !!body.is_master,
 			archiveEnabled: body.archive_enabled !== false,
 			replicationMode: body.replication_mode ?? "full",
 			diskTotalBytes: body.disk_total_bytes ?? 0,
 			diskFreeBytes: body.disk_free_bytes ?? 0,
 			usedBytes: body.used_bytes ?? 0,
-			role: body.role,
-			epoch: body.epoch,
+			tiering: body.tiering,
 		});
 		recordAudit(db, {
 			actor: `node:${body.node_id}`,
@@ -342,6 +454,12 @@ export function clusterRouter(state: AppState): Router {
 			target: `node:${peer.id}`,
 			ip: clientIp(state, req),
 		});
+		// A node the current generation has never seen is admitted immediately
+		// rather than waiting out the drift hold-down: until it is in a snapshot
+		// it has no upstream, so its writes reach nobody. The response below then
+		// carries the generation that names it, which is how the joiner learns its
+		// own role in the same round-trip.
+		retierForNewMember(state, body.node_id);
 
 		const others = db
 			.all<ClusterNodeRow>("SELECT * FROM cluster_nodes WHERE active = 1")
@@ -351,11 +469,8 @@ export function clusterRouter(state: AppState): Router {
 			name: n.name,
 			base_url: n.base_url,
 			token: n.token,
-			is_master: !!n.is_master,
 			archive_enabled: !!n.archive_enabled,
 			replication_mode: n.replication_mode,
-			role: n.role,
-			epoch: n.epoch,
 		}));
 		res.json({ self: selfStats(state), peers });
 	});
@@ -393,14 +508,12 @@ export function clusterRouter(state: AppState): Router {
 			name: body.name,
 			baseUrl: body.base_url,
 			token: body.token,
-			isMaster: !!body.is_master,
 			archiveEnabled: body.archive_enabled !== false,
 			replicationMode: body.replication_mode ?? "full",
 			diskTotalBytes: body.disk_total_bytes ?? 0,
 			diskFreeBytes: body.disk_free_bytes ?? 0,
 			usedBytes: body.used_bytes ?? 0,
-			role: body.role,
-			epoch: body.epoch,
+			tiering: body.tiering,
 		});
 		res.json(selfStats(state));
 	});
@@ -515,48 +628,160 @@ export function clusterRouter(state: AppState): Router {
 		});
 	});
 
-	// ── leader election (cluster-token auth, same as the rest of the
-	// node-to-node handshake -- consensus traffic is deliberately NOT routed
-	// through ws.ts's firehose; that's an audit/event fan-out mechanism and
-	// conflating it with leadership messaging would couple two things that
-	// should be able to fail independently) ────────────────────────────────
+	// ── tiering (redesign §5.3-5.4) ─────────────────────────────────────────
+	//
+	// `/vote-request` and `/master-assumed` used to live here. There is nothing
+	// to replace them with: leadership is not negotiated, it is computed, and
+	// the only thing that travels between nodes is the generation itself —
+	// which already rides on every join and heartbeat. This endpoint exists so a
+	// node can ask for it directly rather than waiting for the next heartbeat.
 
-	router.post("/vote-request", clusterAuth, (req, res) => {
-		const body = req.body as {
-			candidate_id?: string;
-			candidate_url?: string;
-			epoch?: number;
-			vector?: Record<string, number>;
-		};
-		const result = handleVoteRequest(state, body);
-		if (result.granted) {
-			recordAudit(db, {
-				actor: `node:${body.candidate_id}`,
-				action: "cluster.vote_granted",
-				target: `epoch:${body.epoch}`,
-				ip: clientIp(state, req),
-			});
-		}
-		res.json(result);
+	router.get("/tiering", clusterAuth, (_req, res) => {
+		res.json({ tiering: currentTiering(db) });
 	});
 
-	router.post("/master-assumed", clusterAuth, (req, res) => {
+	// ── quota reservations (redesign §5.9) ──────────────────────────────────
+	//
+	// The only synchronous cross-node call on the write path. Master-only: a
+	// follower holds no ledger, and answering from one would be inventing the
+	// authority the whole design exists to centralise. 409 rather than 403 —
+	// the caller's credentials are fine, its *target* is wrong, and it should
+	// re-resolve who the master is and retry.
+
+	function requireQuotaAuthority(res: Response): boolean {
+		if (isMaster(state)) return true;
+		res.status(409).json({
+			detail: "this node is not the cluster's quota authority",
+			master_node_id: currentTiering(db)?.master_node_id ?? null,
+		});
+		return false;
+	}
+
+	router.post("/quota/reserve", clusterAuth, (req, res) => {
+		if (!requireQuotaAuthority(res)) return;
+		const body = req.body as Partial<GrantRequest>;
+		if (!body?.user_uid || typeof body.bytes !== "number") {
+			res.status(400).json({ detail: "user_uid and bytes are required" });
+			return;
+		}
+		res.json(
+			grantReservation(db, {
+				user_uid: body.user_uid,
+				bytes: body.bytes,
+				kind: body.kind ?? "upload",
+				node_id: body.node_id ?? "unknown",
+			}),
+		);
+	});
+
+	router.post("/quota/renew", clusterAuth, (req, res) => {
+		if (!requireQuotaAuthority(res)) return;
+		const uid = (req.body as { reservation_uid?: string })?.reservation_uid;
+		if (!uid) {
+			res.status(400).json({ detail: "reservation_uid is required" });
+			return;
+		}
+		const renewed = renewReservation(db, uid);
+		if (!renewed) {
+			res.status(404).json({ detail: "no such reservation" });
+			return;
+		}
+		res.json(renewed);
+	});
+
+	// Commit and release are idempotent and never fail on an unknown uid: a
+	// reservation that already expired is settled, and the file row it admitted
+	// exists either way. Erroring here would only make callers handle a case
+	// with no remedy.
+	router.post("/quota/commit", clusterAuth, (req, res) => {
+		if (!requireQuotaAuthority(res)) return;
 		const body = req.body as {
-			node_id?: string;
-			node_url?: string;
-			epoch?: number;
+			reservation_uid?: string;
+			actual_bytes?: number;
 		};
-		const result = handleMasterAssumed(state, body);
-		if (result.accepted) {
+		if (body?.reservation_uid) {
+			settleReservation(db, body.reservation_uid, "committed", body.actual_bytes);
+		}
+		res.json({ status: "ok" });
+	});
+
+	router.post("/quota/release", clusterAuth, (req, res) => {
+		if (!requireQuotaAuthority(res)) return;
+		const uid = (req.body as { reservation_uid?: string })?.reservation_uid;
+		if (uid) settleReservation(db, uid, "released");
+		res.json({ status: "ok" });
+	});
+
+	// Manual re-tier (§5.4 trigger 1): always available, always wins. Master-only
+	// — a node that is not master has no standing to mint a generation, and
+	// during a master outage none can be minted at all, which is the degraded
+	// mode of §5.5 rather than a separate failure to handle.
+	router.post(
+		"/retier",
+		requireSession(state),
+		requireCsrf,
+		requireCluster,
+		(req, res) => {
+			if (!isMaster(state)) {
+				res.status(409).json({
+					detail:
+						"only the master mints a tiering generation; this node is not master",
+				});
+				return;
+			}
+			const tiering = retier(state, "manual", req.currentUser!.username);
 			recordAudit(db, {
-				actor: `node:${body.node_id}`,
-				action: "cluster.master_assumed",
-				target: `epoch:${body.epoch}`,
+				actor: req.currentUser!.username,
+				action: "cluster.retier_requested",
+				target: `generation:${tiering?.generation ?? 0}`,
 				ip: clientIp(state, req),
 			});
-		}
-		res.json(result);
-	});
+			res.json({ tiering });
+		},
+	);
+
+	// Operator promotion (§5.5). The only recovery from a master outage, and
+	// deliberately manual: a node cannot tell "the master died" from "I got cut
+	// off", and promoting on the second reading is the split brain this design
+	// refuses to automate. The typed confirmation belongs to the human.
+	router.post(
+		"/promote",
+		requireSession(state),
+		requireCsrf,
+		requireCluster,
+		(req, res) => {
+			const body = req.body as { confirm?: string; force?: boolean };
+			if (isMaster(state)) {
+				res.status(409).json({ detail: "this node is already master" });
+				return;
+			}
+			const status = masterStatus(state);
+			if (status.phase !== "degraded" && !body?.force) {
+				res.status(409).json({
+					detail:
+						status.phase === "grace"
+							? "the master is inside its restart grace window; wait for it to expire, or pass force to promote anyway"
+							: "the master is reachable; promoting now would split the cluster. Pass force only if you know it is gone.",
+					master_status: status,
+				});
+				return;
+			}
+			if (body?.confirm !== state.settings.nodeName) {
+				res.status(400).json({
+					detail: `type this node's name (${state.settings.nodeName}) to confirm promotion`,
+				});
+				return;
+			}
+			const tiering = promoteSelf(state, req.currentUser!.username);
+			recordAudit(db, {
+				actor: req.currentUser!.username,
+				action: "cluster.promote_requested",
+				target: `generation:${tiering.generation}`,
+				ip: clientIp(state, req),
+			});
+			res.json({ tiering });
+		},
+	);
 
 	return router;
 }

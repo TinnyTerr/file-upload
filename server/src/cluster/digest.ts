@@ -3,8 +3,8 @@ import type { AppState } from "../appState.ts";
 import type { ClusterNodeRow } from "../db/rows.ts";
 import { getLogger } from "../logging.ts";
 import { ensureStorageSettings } from "../storage/accounting.ts";
-import { getSelfState } from "./election.ts";
 import { ClusterHTTPError, getJson } from "./http.ts";
+import { currentTiering, selfRole } from "./tiering.ts";
 
 /** Mirrors app/api/cluster/digest.py. */
 
@@ -15,7 +15,9 @@ export interface ClusterDigest {
 	global_quota: number;
 	members: string[];
 	role: string;
-	epoch: number;
+	/** The tiering generation this node holds. Reported, not hashed: it
+	 * legitimately lags by a heartbeat on a node that has not been told yet. */
+	generation: number;
 }
 
 /** A small, comparable summary of state that SHOULD be identical on every
@@ -31,13 +33,17 @@ export function computeDigest(state: AppState): ClusterDigest {
 		.map((n) => n.node_id)
 		.filter((id): id is string => !!id);
 	const members = [...new Set([state.settings.nodeId, ...peerIds])].sort();
-	// role/epoch are deliberately excluded from the hash -- they legitimately
-	// differ between "who is master" and "master vs. follower", but ARE
-	// reported alongside it for the split-brain cross-check below.
+	// role/generation are deliberately excluded from the hash -- role
+	// legitimately differs per node, and a generation legitimately lags on a
+	// node that has not been told about the newest one yet.
 	const body = { global_quota: globalQuota, members };
 	const hash = createHash("sha256").update(JSON.stringify(body)).digest("hex");
-	const self = getSelfState(state.db);
-	return { hash, ...body, role: self.role, epoch: self.epoch };
+	return {
+		hash,
+		...body,
+		role: selfRole(state),
+		generation: currentTiering(state.db)?.generation ?? 0,
+	};
 }
 
 /** Compare this node's digest against every peer's and alert on divergence.
@@ -82,33 +88,12 @@ export async function syncCheckJob(state: AppState): Promise<number> {
 				// best-effort
 			}
 		}
-
-		// Split-brain safety net: election fencing (cluster/election.ts) should
-		// make two nodes both holding role=master at the SAME epoch structurally
-		// impossible. If it happens anyway, that's a bug worth paging on, not
-		// something to silently reconcile -- alert loudly rather than picking a
-		// winner here.
-		if (
-			remote &&
-			local.role === "master" &&
-			remote.role === "master" &&
-			remote.epoch === local.epoch
-		) {
-			log.error(
-				`SPLIT BRAIN: both this node and node=${node.node_id ?? node.id} report role=master at epoch=${local.epoch}`,
-			);
-			try {
-				state.eventBus.publish({
-					action: "cluster.split_brain_detected",
-					actor: "system",
-					target: `node:${node.node_id ?? node.id}`,
-					kind: "system",
-					epoch: local.epoch,
-				});
-			} catch {
-				// best-effort
-			}
-		}
+		// There is no split-brain cross-check here any more, and its absence is
+		// the point. Two nodes could both hold role=master only because role was
+		// something a node *decided*; it is now derived from a generation only the
+		// master mints, so "both believe they are master" is not a state the data
+		// model can express. Phase 4 deleted the check along with the elections
+		// that made it necessary.
 	}
 	return mismatches;
 }

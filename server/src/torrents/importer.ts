@@ -18,6 +18,12 @@ import { HttpError } from "../httpError.ts";
 import { newSlug } from "../links.ts";
 import { getLogger } from "../logging.ts";
 import { ensurePermissions } from "../permissions.ts";
+import {
+	commitQuota,
+	releaseQuota,
+	renewQuota,
+	reserveQuota,
+} from "../cluster/quota.ts";
 import { finalizeStoredFile } from "../routes/files.ts";
 import {
 	debridRoot,
@@ -207,14 +213,20 @@ export async function importCompletedTorrent(
 	if (oversized) {
 		throw new HttpError(413, `"${oversized.rel}" exceeds your max file size`);
 	}
-	const used =
-		db.get<{ total: number | null }>(
-			"SELECT SUM(size_bytes) as total FROM files WHERE owner_id = $id",
-			{ $id: user.id },
-		)?.total ?? 0;
-	if (used + totalBytes > perm.quota_bytes) {
-		throw new HttpError(413, "torrent would exceed your storage quota");
-	}
+	// One reservation for the whole import, held across every file in it (§5.9).
+	//
+	// This is the authoritative quota decision for a torrent, and it happens
+	// *here* rather than at dispatch for a plain reason: a magnet is a promise,
+	// not a size. You cannot reserve against bytes you do not know, and the true
+	// content length only exists once metadata has resolved. `debrid.ts` keeps a
+	// local advisory check at dispatch so a user who obviously cannot fit the
+	// torrent is told in seconds instead of after a 40 GB download — but it is a
+	// courtesy, not the gate.
+	const reservation = await reserveQuota(state, {
+		user,
+		bytes: totalBytes,
+		kind: "torrent",
+	});
 
 	// Where the requester asked for it. Everything about that folder is
 	// re-checked here rather than trusted from queue time: a torrent can run for
@@ -247,47 +259,66 @@ export async function importCompletedTorrent(
 			: target;
 
 	let imported = 0;
-	for (const file of files) {
-		const relPath = newInternalRelPath();
-		const work = `${join(storageRoot(), relPath)}.torrent.work`;
-		mkdirSync(join(work, ".."), { recursive: true });
-		// Async copy: a multi-GB torrent must not block the event loop, and the
-		// import runs on a scheduler tick alongside live requests.
-		await copyFile(file.path, work);
-		try {
-			await finalizeStoredFile({
-				state,
-				req,
-				user,
-				perm,
-				directory,
-				workPath: work,
-				relPath,
-				stored: file.size,
-				contentType: Bun.file(file.path).type || "application/octet-stream",
-				encryptionMode: "none",
-				compress: false,
-				randomizeFilename: false,
-				originalFilename: directory ? file.rel : basename(file.rel),
-				isPermanent: true,
-				tempDays: null,
-				deleteIfIdleDays: null,
-				archiveAfterIdleDays: null,
-				autoUnarchiveOnDownload: true,
-				maxUses: null,
-				expiresInSeconds: null,
-				sourceType: "torrent",
-			});
-			imported += 1;
-		} catch (err) {
+	try {
+		for (const file of files) {
+			const relPath = newInternalRelPath();
+			const work = `${join(storageRoot(), relPath)}.torrent.work`;
+			mkdirSync(join(work, ".."), { recursive: true });
+			// Async copy: a multi-GB torrent must not block the event loop, and the
+			// import runs on a scheduler tick alongside live requests.
+			await copyFile(file.path, work);
 			try {
-				unlinkSync(work);
-			} catch {
-				// best-effort
+				await finalizeStoredFile({
+					state,
+					req,
+					user,
+					perm,
+					directory,
+					workPath: work,
+					relPath,
+					stored: file.size,
+					contentType: Bun.file(file.path).type || "application/octet-stream",
+					encryptionMode: "none",
+					compress: false,
+					randomizeFilename: false,
+					originalFilename: directory ? file.rel : basename(file.rel),
+					isPermanent: true,
+					tempDays: null,
+					deleteIfIdleDays: null,
+					archiveAfterIdleDays: null,
+					autoUnarchiveOnDownload: true,
+					maxUses: null,
+					expiresInSeconds: null,
+					sourceType: "torrent",
+					// The whole import rides one reservation, so a 40-file torrent
+					// makes one call to the master rather than 40 — and, more to the
+					// point, a per-file reservation could be refused halfway and leave
+					// the torrent partly imported.
+					reservationUid: reservation.uid,
+				});
+				imported += 1;
+			} catch (err) {
+				try {
+					unlinkSync(work);
+				} catch {
+					// best-effort
+				}
+				throw err;
 			}
-			throw err;
+			// The import itself is the heartbeat (D-16). A very large torrent can
+			// take longer to copy into blob storage than the reservation's
+			// inactivity window, and an import that expired its own reservation
+			// half way through would have the rest of its files land unadmitted.
+			await renewQuota(state, reservation.uid);
 		}
+	} catch (err) {
+		await releaseQuota(state, reservation.uid);
+		throw err;
 	}
+	// Settled once, with what actually landed. An over-reservation (a torrent
+	// whose files turned out smaller) costs nothing: the reservation stops
+	// counting the moment it is settled, and the real bytes are in `files`.
+	await commitQuota(state, reservation.uid, totalBytes);
 
 	log.info(
 		`torrent imported job_id=${job.id} owner_id=${user.id} files=${imported} bytes=${totalBytes} directory_id=${directory?.id ?? "none"}`,

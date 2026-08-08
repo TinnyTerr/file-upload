@@ -508,6 +508,13 @@ export async function fetchDebridFiles(
 	});
 	const totalBytes =
 		info.bytes ?? plan?.reduce((sum, f) => sum + f.bytes, 0) ?? 0;
+	// Advisory, and local on purpose. The authoritative quota decision is the
+	// master-side reservation the importer takes once the bytes are on disk
+	// (torrents/importer.ts, §5.9) -- a magnet is a promise, not a size, so
+	// there is nothing to reserve against until metadata resolves. This check
+	// exists so a user who obviously cannot fit the torrent hears about it in
+	// seconds rather than after a 40 GB transfer, and it is deliberately not
+	// authoritative: it reads only this node's view.
 	const used =
 		db.get<{ total: number | null }>(
 			"SELECT SUM(size_bytes) as total FROM files WHERE owner_id = $id",

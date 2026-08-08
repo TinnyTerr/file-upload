@@ -89,6 +89,44 @@ export function createSqliteDb(path: string): Db {
 		"epoch",
 		"epoch INTEGER NOT NULL DEFAULT 0",
 	);
+	// Tiering (cluster/tiering.ts). `region` is nullable and `region_source`
+	// defaults to 'inferred' so an upgraded database starts out with every node
+	// in the single inferred region D-9 describes, rather than in none.
+	ensureColumn(sqlite, "cluster_nodes", "region", "region TEXT");
+	ensureColumn(
+		sqlite,
+		"cluster_nodes",
+		"region_source",
+		"region_source TEXT NOT NULL DEFAULT 'inferred'",
+	);
+	ensureColumn(sqlite, "cluster_nodes", "rtt_ms", "rtt_ms INTEGER");
+	ensureColumn(
+		sqlite,
+		"cluster_nodes",
+		"throughput_bps",
+		"throughput_bps INTEGER",
+	);
+	ensureColumn(
+		sqlite,
+		"cluster_nodes",
+		"ineligible",
+		"ineligible INTEGER NOT NULL DEFAULT 0",
+	);
+	ensureColumn(
+		sqlite,
+		"cluster_nodes",
+		"pinned_master",
+		"pinned_master INTEGER NOT NULL DEFAULT 0",
+	);
+	// Read by the change log's fixup TRIGGER, which cannot reach application
+	// state -- only other tables. Must exist before installChangeLog() below
+	// recreates that trigger.
+	ensureColumn(
+		sqlite,
+		"replication_control",
+		"is_master",
+		"is_master INTEGER NOT NULL DEFAULT 0",
+	);
 	ensureColumn(
 		sqlite,
 		"content_blobs",

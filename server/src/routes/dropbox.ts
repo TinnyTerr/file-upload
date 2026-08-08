@@ -648,9 +648,11 @@ export function dropboxRouter(state: AppState): Router {
 			handled = true;
 			writeDone
 				.then(async () => {
-					if (usedBytes(state, owner.id) + written > perm.quota_bytes) {
-						throw new HttpError(413, "upload would exceed owner quota");
-					}
+					// No local quota read here: `finalizeStoredFile` takes the
+					// reservation from the master with the bytes that actually
+					// arrived, which is the only figure worth checking -- an
+					// anonymous dropbox uploader's declared size is a claim, and
+					// `written` is the fact.
 					const result = await finalizeStoredFile({
 						state,
 						req,

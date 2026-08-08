@@ -1,9 +1,10 @@
 import type { AppState } from "../appState.ts";
 import { cacheEvictionJob } from "../cluster/cacheEviction.ts";
 import { syncCheckJob } from "../cluster/digest.ts";
-import { checkMasterLivenessJob } from "../cluster/election.ts";
 import { heartbeatJob } from "../cluster/membership.ts";
+import { quotaSweepJob } from "../cluster/quota.ts";
 import { replicationPullJob } from "../cluster/replication.ts";
+import { tieringDriftJob } from "../cluster/tiering.ts";
 import { getLogger } from "../logging.ts";
 import { prunePlayKeys } from "../media/playKeys.ts";
 import { sweepStaleParts } from "../routes/files.ts";
@@ -20,7 +21,7 @@ import {
  * wiring: archive_idle/delete_idle/temp_expiry/sweep_stale_parts hourly,
  * link_expiry every 10 minutes. reconcile_stale_states has no interval in
  * Python either -- it's manual-trigger only (see routes/admin.ts).
- * cluster_heartbeat, cluster_sync_check, cluster_election_liveness and
+ * cluster_heartbeat, cluster_sync_check, cluster_tiering_drift and
  * cluster_cache_eviction run alongside them; they are cheap no-ops on a
  * single, unlinked node (no rows in cluster_nodes) or on a REPLICATION_MODE
  * != cache node, so registering them unconditionally matches the Python
@@ -81,10 +82,24 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 			intervalMs: 5 * MINUTE_MS,
 			run: () => syncCheckJob(state),
 		},
+		// The drift counter (§5.4). Master-only, and a single query on a node with
+		// no peers -- it replaces `cluster_election_liveness`, which existed to
+		// notice a dead master and start an election. Nothing starts an election
+		// any more, so nothing needs to run at 15-second granularity: a status
+		// change has to be HELD for five minutes before it counts at all.
 		{
-			id: "cluster_election_liveness",
-			intervalMs: FIFTEEN_SEC_MS,
-			run: () => checkMasterLivenessJob(state),
+			id: "cluster_tiering_drift",
+			intervalMs: MINUTE_MS,
+			run: () => tieringDriftJob(state),
+		},
+		// Releases quota reservations nobody has touched for a full inactivity
+		// window (§5.9, D-16). Master-only -- a follower holds no ledger. Hourly
+		// is plenty against a 12-hour window, and the sweep is the only path that
+		// releases bytes without the reserving node saying so.
+		{
+			id: "cluster_quota_sweep",
+			intervalMs: HOUR_MS,
+			run: () => quotaSweepJob(state),
 		},
 		// One pull interval per hop is the propagation budget the redesign sets
 		// (§5.7). Costs nothing on a node with no peers, and nothing on a

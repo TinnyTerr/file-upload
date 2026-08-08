@@ -1,4 +1,5 @@
 import { seedChangeLog, setNodeIdentity } from "./cluster/changelog.ts";
+import { MasterReachability } from "./cluster/degraded.ts";
 import { EventBus } from "./cluster/eventBus.ts";
 import { ClusterEventWriter } from "./cluster/eventStore.ts";
 import { HaltRegistry } from "./cluster/halt.ts";
@@ -27,6 +28,9 @@ export interface AppState {
 	loginChallenges: LoginChallengeRegistry;
 	secondFactorTickets: SecondFactorTicketRegistry;
 	wsTokenRateLimiter: WsTokenRateLimiter;
+	/** Master-reachability state machine + held-request queue (§5.5). Process-
+	 * local by nature: this node's opinion about a peer, not cluster state. */
+	masterReachability: MasterReachability;
 }
 
 export function createAppState(settings: Settings, db: Db): AppState {
@@ -64,5 +68,6 @@ export function createAppState(settings: Settings, db: Db): AppState {
 		loginChallenges: new LoginChallengeRegistry(),
 		secondFactorTickets: new SecondFactorTicketRegistry(),
 		wsTokenRateLimiter: new WsTokenRateLimiter(),
+		masterReachability: new MasterReachability(),
 	};
 }

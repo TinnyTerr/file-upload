@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { errorMessage } from "@/config/api";
 import { clusterService } from "../services/clusterService";
-import type { NewClusterNode } from "../types";
+import type { ClusterNodeUpdate, NewClusterNode } from "../types";
 
 const NODES_QUERY = ["cluster", "nodes"] as const;
 const SELF_QUERY = ["cluster", "self"] as const;
@@ -32,9 +32,9 @@ export function useClusterNodes() {
 			const enroll = node.enroll;
 			if (enroll?.status === "ok") {
 				toast.success("Node linked & enrolled", {
-					description: enroll.rebased
-						? "Node rebased onto this master."
-						: "Node joined; no changes to rebase.",
+					description: enroll.synced
+						? `Node joined and applied ${enroll.synced} change(s).`
+						: "Node joined; nothing to catch up on.",
 				});
 			} else if (enroll?.status === "error") {
 				toast.warning("Node linked, but enrollment failed", {
@@ -60,7 +60,61 @@ export function useClusterNodes() {
 			toast.error("Couldn't unlink node", { description: errorMessage(err) }),
 	});
 
-	return { list, link, unlink };
+	const update = useMutation({
+		mutationFn: ({ id, patch }: { id: number; patch: ClusterNodeUpdate }) =>
+			clusterService.updateNode(id, patch),
+		onSuccess: () => {
+			// These change the *input* to the leader computation, not its output --
+			// the operator re-tiers when they're ready, or the drift counter gets
+			// there on its own.
+			toast.success("Node updated", {
+				description: "Re-tier to apply it to the topology.",
+			});
+			invalidate();
+		},
+		onError: (err) =>
+			toast.error("Couldn't update node", { description: errorMessage(err) }),
+	});
+
+	return { list, link, unlink, update };
+}
+
+/** Manual re-tiering (§5.4 trigger 1): always available on the master, always
+ * wins. Invalidates both queries because a new generation rewrites every node's
+ * derived role at once. */
+export function useRetier() {
+	const qc = useQueryClient();
+	return useMutation({
+		mutationFn: () => clusterService.retier(),
+		onSuccess: (res) => {
+			toast.success(
+				`Cluster re-tiered (generation ${res.tiering?.generation ?? "?"})`,
+			);
+			qc.invalidateQueries({ queryKey: NODES_QUERY });
+			qc.invalidateQueries({ queryKey: SELF_QUERY });
+		},
+		onError: (err) =>
+			toast.error("Couldn't re-tier", { description: errorMessage(err) }),
+	});
+}
+
+/** Operator promotion (§5.5): the way out of degraded mode, and the only one.
+ * Deliberately not automatic — see the doc comment on clusterService.promote. */
+export function usePromote() {
+	const qc = useQueryClient();
+	return useMutation({
+		mutationFn: ({ confirm, force }: { confirm: string; force?: boolean }) =>
+			clusterService.promote(confirm, force),
+		onSuccess: (res) => {
+			toast.success(
+				`This node is now master (generation ${res.tiering.generation})`,
+			);
+			qc.invalidateQueries({ queryKey: NODES_QUERY });
+			qc.invalidateQueries({ queryKey: SELF_QUERY });
+		},
+		onError: (err) =>
+			toast.error("Couldn't promote", { description: errorMessage(err) }),
+	});
 }
 
 export function useClusterToken() {

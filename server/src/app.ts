@@ -10,6 +10,7 @@ import express, {
 import type { AppState } from "./appState.ts";
 import { HttpError } from "./httpError.ts";
 import { getLogger } from "./logging.ts";
+import { degradedMode } from "./middleware/degradedMode.ts";
 import { httpsRedirect } from "./middleware/httpsRedirect.ts";
 import { requestLogging } from "./middleware/requestLogging.ts";
 import { securityHeaders } from "./middleware/securityHeaders.ts";
@@ -57,6 +58,14 @@ export function createApp(state: AppState): Express {
 	app.get("/api/health", (_req, res) => {
 		res.json({ status: "ok" });
 	});
+
+	// Degraded mode's write gate (§5.5). Mounted once, ahead of every router, and
+	// gating by method with a short allowlist rather than by enumerating write
+	// routes -- so a route added later is refused while degraded instead of
+	// silently slipping through. See middleware/degradedMode.ts for the list and
+	// the reason behind each entry. A no-op on a master and on an unclustered
+	// node, which is every single-server deployment.
+	app.use(degradedMode(state));
 
 	// Every JSON/data-returning endpoint lives under /api/* so it can never
 	// collide with an SPA client-side route (e.g. /files, /admin, /cluster are

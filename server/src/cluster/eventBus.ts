@@ -56,10 +56,10 @@ export class EventBus {
 		return this.subscribers.size;
 	}
 
-	/** This node's current sequence watermark. Used by cluster/election.ts to
-	 * fold "how far has this node itself gotten" into the applied-sequence
-	 * vector compared during vote-grant, alongside peers' watermarks read from
-	 * the cluster_events mirror. */
+	/** This node's current sequence watermark — how far its own event stream has
+	 * gotten. `election.ts` used to fold this into the applied-sequence vector it
+	 * compared during a vote grant; nothing votes any more (cluster/tiering.ts),
+	 * so it is now only a read for diagnostics and for `seedSeq`'s counterpart. */
 	currentSeq(): number {
 		return this.seq;
 	}

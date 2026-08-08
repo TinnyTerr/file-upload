@@ -10,7 +10,7 @@ import { randomBytes } from "node:crypto";
 import type { Express } from "express";
 import { createApp } from "../src/app.ts";
 import { createAppState } from "../src/appState.ts";
-import { initSelfState } from "../src/cluster/election.ts";
+import { initTiering } from "../src/cluster/tiering.ts";
 import type { Settings } from "../src/config.ts";
 import { nowIso, type UserRow } from "../src/db/rows.ts";
 import { createSqliteDb } from "../src/db/sqlite.ts";
@@ -32,6 +32,8 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
 		nodeId: "test-node",
 		nodeName: "test",
 		nodeRole: "master",
+		nodeRegion: "",
+		regionRttThresholdMs: 0,
 		nodeUrl: "",
 		masterUrl: "",
 		masterToken: "",
@@ -71,7 +73,7 @@ export async function makeHarness(
 	const settings = testSettings(settingsOverrides);
 	const db = createSqliteDb(":memory:");
 	// Same order as index.ts: the node knows its role before anything reads it.
-	initSelfState(db, settings);
+	initTiering(db, settings);
 	const state = createAppState(settings, db);
 	const app = createApp(state);
 	const server = app.listen(0);
@@ -161,18 +163,26 @@ export function makeDirectory(
  * listing and filtering, not storage. */
 export function makeFile(
 	db: Db,
-	opts: { ownerId: number; name: string; directoryId?: number | null },
+	opts: {
+		ownerId: number;
+		name: string;
+		directoryId?: number | null;
+		/** Logical bytes — what quota is measured in (§5.9, D-17). Defaults to 0,
+		 * which is what tests that only care about the row want. */
+		sizeBytes?: number;
+	},
 ): number {
 	db.run(
 		`INSERT INTO files (owner_id, directory_id, storage_path, original_filename,
        source_type, size_bytes, stored_size_bytes, content_type, encryption_mode,
        encryption_overridden, created_at)
-     VALUES ($owner, $dir, $path, $name, 'upload', 0, 0, 'text/plain', 'none', 0, $now)`,
+     VALUES ($owner, $dir, $path, $name, 'upload', $size, $size, 'text/plain', 'none', 0, $now)`,
 		{
 			$owner: opts.ownerId,
 			$dir: opts.directoryId ?? null,
 			$path: `ab/cd/${randomBytes(8).toString("hex")}`,
 			$name: opts.name,
+			$size: opts.sizeBytes ?? 0,
 			$now: nowIso(),
 		},
 	);

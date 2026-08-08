@@ -12,20 +12,81 @@ Many source comments still say "Mirrors `app/routes/x.py`" or similar. Those ref
 
 Multi-node replication lives in `server/src/cluster/*.ts`:
 - `membership.ts` — join/heartbeat/enroll handshake, full-mesh peer topology
-- `election.ts` — elected, epoch-versioned leadership (vote-request / master-assumed), layered *under* the replication protocol
-- `identity.ts` — ULID row identity (`uid`) for replicated tables + the live-safe boot backfill
-- `changelog.ts` — the `replication_log`: trigger-generated, appended **inside the writing transaction**, and the only mechanism by which metadata leaves a node
-- `replication.ts` — hierarchical pull of that log (`GET /api/cluster/changes`) + per-peer cursors
+- `tiering.ts` — leadership as a **pure function** of a master-minted membership snapshot: `cluster_tiering` generations, region inference, the deterministic leader/master computation, `upstreamOf` (the whole topology rule) and the `cluster_drift` hold-down counter. `initTiering` runs from `index.ts` **before** `createAppState`, because the change-log seed reads `replication_control.is_master`. It replaced `election.ts`, which is **deleted** — there are no votes, no epochs and no `cluster_self_state` any more
+- `identity.ts` — ULID row identity (`uid`) for replicated tables + the live-safe boot backfill. `UID_TABLES` is the canonical list of replicated tables: `users`, `permissions`, `content_blobs`, `directories`, `directory_links`, `files`, `links` — nothing else replicates
+- `changelog.ts` — the `replication_log`: trigger-generated, appended **inside the writing transaction**, and the only mechanism by which metadata leaves a node. Owns `CHANGELOG_TABLES` (= `UID_TABLES`), `TABLE_COLUMNS`, `BLOB_COLUMNS`, `FOREIGN_KEYS`, `installChangeLog`, `setNodeIdentity`, `seedChangeLog`, `readChanges`, `applyChanges`, and the cursor accessors
+- `replication.ts` — hierarchical pull of that log (`GET /api/cluster/changes`) + per-peer, per-direction cursors
 - `blobs.ts` — content-addressed blob fetch-on-miss from peers (read-time failover for `routes/public.ts`'s raw/preview handlers)
 - `cacheEviction.ts` — LRU eviction for `REPLICATION_MODE=cache` nodes; verifies durability on a full-replica peer before deleting anything
 - `halt.ts` — in-memory TTL'd upload halt registry (user-scope + global), gossiped over the event firehose
-- `digest.ts` — cluster state digest, drift detection, and the split-brain cross-check (`syncCheckJob`)
+- `quota.ts` — the master-side `quota_reservations` ledger and its client. **The only synchronous cross-node call on the write path.** Reserve → commit/release, sliding TTL, sweep. On the master (and on any single-node deployment) every call resolves in-process, so an unclustered server pays nothing
+- `degraded.ts` — master-reachability state machine: 5-minute restart grace during which writes are **held**, then degraded (reads only). `middleware/degradedMode.ts` is the write gate that enforces it
+- `digest.ts` — cluster state digest + divergence alerting (`syncCheckJob`). No split-brain cross-check: role is derived from a generation only the master mints, so "two nodes both believe they are master" is not a state the data model can express
 - `eventBus.ts` / `eventStore.ts` / `firehoseClient.ts` — in-memory live event bus, durable `cluster_events` mirror, peer-polling consumer
 - `http.ts` — node-to-node fetch helpers (cluster-token auth, timeouts)
 
-`routes/cluster.ts` exports `clusterRouter` (mounted at `/api/cluster`: session-authenticated management endpoints **plus** cluster-token-authenticated node-to-node endpoints) and `adminClusterRouter` (mounted at `/api/admin/cluster`: node-logs + HTTP long-poll event fallback). `server/src/ws.ts` attaches the websocket firehose directly to the `http.Server` returned by `app.listen()` in `index.ts`, since Express has no native websocket support.
+**Leadership (Phase 4).** Three tiers — `master` (tier 0: quota + write ordering), `leader` (tier 1: one per region, a relay and cache), `follower`. Nothing is elected. The master computes a snapshot of the cluster, runs `computePlan` over it (`master = argmax(disk_total_bytes, then node_id ASC)` over eligible nodes; each region's leader is the same argmax *minus the master*, so tier 0 and tier 1 are never the same box) and mints a numbered **generation** into `cluster_tiering`. Every other node adopts the highest generation it has seen and derives its role from it, so agreement on *who leads* reduces to agreement on *what the snapshot is* — which is one writer's output, not a quorum's.
+
+- **Only the master mints.** During a master outage no generation can be minted, so leadership does not move. That *is* D-2's "no automatic failover"; it falls out of the design rather than being enforced on top of it. `retier()` returns `null` on a non-master.
+- **A role is never asserted over the wire.** `/join` and `/heartbeat` carry a `role` field for logs and the UI, and nothing reads it — `cluster_nodes.role`/`.is_master`/`.region` are written from the local generation (`membership.ts::derivedRole`). An unauthenticated self-asserted role field was defect S4.
+- **The generation rides on the handshakes that already exist**, whole, in both directions, adopted on **strictly higher** generation. `enrollWithMaster` is the one exception: it adopts by `force`, because joining a cluster means taking its answer, and both sides start at generation 1 so highest-wins would never fire.
+- **Re-tiering has three triggers** (`docs/cluster-redesign.md` §5.4): manual (`POST /api/cluster/retier`), a new node joining (immediate — see below), and structural drift. Drift counts nodes whose status differs from what the current generation was computed against, threshold `max(2, trunc(n/3))`, and a change only counts once **held for 5 minutes** (`HOLD_DOWN_MS`) — a restart is not drift. A node the generation has never seen counts *immediately*: until it is in a snapshot it has no upstream and replicates with nobody.
+- **The drift status is a composite, `<up|down|absent>:<role-it-would-get>`.** That is what makes "a capacity change that would alter the computed leader" the only capacity change that counts — comparing raw `disk_total_bytes` would make routine disk growth look like churn.
+- `region` comes from `NODE_REGION` (`region_source = 'configured'`, always wins) or from clustering the heartbeat RTTs into `r1`, `r2`, … Inference runs **only at a re-tiering event**, never continuously, or region membership flaps with network weather. With nothing measured everything lands in `r1`, which is the single-region deployment the design assumes today.
+
+**Replication topology:** strictly hierarchical and derived entirely from the generation. Every node pulls **down** from its upstream and **up** from everyone whose upstream is itself — `upstreamOf()` is the whole rule, and `pullTargets()` in `replication.ts` applies it to both halves of every edge, once a second (`cluster_replication_pull`). A follower never pulls from a sibling: its writes reach that peer by going up to the leader, up to the master and back down, which is what keeps the master's log the canonical order. A follower whose leader is unreachable falls back to **the master** — the leader is a relay, not an authority. A node with **no generation at all** pulls from nobody, deliberately: guessing at a peer to sync from is how two halves of a partition converge on different answers.
+
+**Liveness is read from two places, on purpose.** The snapshot's `active` flag is the master's view at mint time, and it is the right input to the *leader computation*. Whether a node can reach its leader *right now* is that node's own observation, and it is what `pullTargets` passes into `upstreamOf` — a follower cut off from its relay must notice that itself, because no new generation is coming to tell it.
+
+**Quota is master-authoritative and synchronous (Phase 5).** Two nodes each reading `SUM(files.size_bytes) = 0` would each admit a 10 GB upload against a 15 GB quota, and the change log would honestly converge on 20 GB — a file that exists cannot be un-accepted, so quota is the one number that cannot be reconciled after the fact. `cluster/quota.ts` holds the master-side `quota_reservations` ledger; a node reserves before accepting bytes and commits after the row exists.
+
+- **The unit is logical quota bytes, everywhere.** `SUM(files.size_bytes)` against `quota_bytes`, so **every path that creates a `files` row reserves** — including save and copy, which write no new bytes at all. Dedup savings are the system's, not the user's; skipping the reservation there would let a user clone past their quota for free.
+- **`finalizeStoredFile` is the funnel and takes a reservation if the caller didn't**, so the rule holds by construction rather than by every future upload path remembering. Callers that can reserve earlier (chunked-upload init) pass the uid down via `reservationUid`; `finalizeStoredFile` releases only a reservation it took *itself* on failure, because one handed down belongs to the caller's lifecycle.
+- **You cannot reserve against a size you do not know.** A magnet is a promise and a remote URL may not send a `Content-Length`, so torrents reserve at *import* and remote uploads at *finalize* — the moment their true size first exists. `debrid.ts` keeps a local, explicitly **advisory** pre-check so an obviously-too-big torrent is refused in seconds rather than after a 40 GB download.
+- **The TTL slides; it is not a ceiling.** `expires_at` is an *inactivity* window (12 h, matching `CHUNK_SESSION_TTL`) pushed forward by chunk commits (strided, one in `RENEW_EVERY_CHUNKS`) and by each file of a long torrent import. Expiry means "nobody has touched this for a full window", which is the only condition under which `cluster_quota_sweep` may release the bytes.
+- **Free disk stayed local; the global cap moved to the master.** They look alike and are not: the cap is a cluster-wide budget, but free space is a fact about the node that will hold the bytes. `enforceGlobalUploadCapacity` keeps the disk check where the disk is.
+
+**Degraded mode (§5.5).** A node that cannot reach the master **holds** write-path requests for a 5-minute restart grace, then goes read-only. There is no automatic failover, by design: a node cannot tell "the master died" from "I got cut off", and promoting on the second reading is the split brain the deleted `election.ts` failed to prevent. Recovery is the master returning, or `POST /api/cluster/promote` — refused unless the node is genuinely degraded, and requiring the node's own name typed back as confirmation.
+
+- `middleware/degradedMode.ts` gates **by method with a short allowlist**, mounted once in `app.ts`, rather than enumerating write routes — so it fails closed and a route added later is refused unless deliberately allowlisted. `/api/cluster` is on that list because promotion is the only way out and gating it would make degraded mode unrecoverable.
+- Reads never gate. Every read here is local by construction, which is what makes a degraded node useful rather than merely up.
+
+`routes/cluster.ts` exports `clusterRouter` (mounted at `/api/cluster`: session-authenticated management endpoints — `/token`, `/token/rotate`, `/self`, `/nodes` (GET/POST/PATCH/DELETE), `/retier`, enroll/unlink — **plus** cluster-token-authenticated node-to-node endpoints — `/join`, `/heartbeat`, `/ping`, `/blobs/:storedSha256`, `/digest`, `/changes`, `/tiering`) and `adminClusterRouter` (mounted at `/api/admin/cluster`: `/node-logs` + `/events`, the HTTP long-poll fallback for the websocket firehose). `server/src/ws.ts` attaches the websocket firehose directly to the `http.Server` returned by `app.listen()` in `index.ts`, since Express has no native websocket support.
 
 **Invariant:** the in-memory event sequence counter in `eventBus.ts` assumes **one process per node** (this server makes a single `app.listen()` call and never forks workers). Colliding `origin_seq` values across workers is the exact bug class that broke logins under `uvicorn --workers=4` in the old deployment — see `cluster_events`' `UNIQUE(origin_node_id, origin_seq)`. Don't introduce multi-process scaling without redesigning event sequencing.
+
+#### Where the cluster rework stands
+
+`docs/cluster-redesign.md` is the design document and the authority on intent —
+Parts 1–3 are the defect inventory, Part 5 the target architecture, Part 7 the
+phasing. Work happens on the `cluster-rework` branch.
+
+**Phases 0–5 are built and green** (`clusterEvents`, `clusterIdentity`,
+`clusterChangelog`, `clusterReplication`, `clusterTiering`, `clusterQuota`
+tests): the multi-node test harness, the event-pipeline fixes, ULID `uid`
+identity, the trigger-driven change log with hierarchical pull, tiering, and
+master-gated quota + degraded mode. Phase 3 deleted
+`replicateFile`, `/cluster/reserve`, `/cluster/replicate`, `/cluster/export` and
+`rebaseFromMaster` outright — `seedChangeLog` writes an `upsert` entry per
+existing row the first time a populated database meets an empty log, so a
+joining node gets the whole corpus from cursor 0 through the ordinary pull.
+**One mechanism for state transfer, not two that can disagree.** There is no
+pending-parent buffer: entries apply in `seq` order and a forwarding hop
+re-appends in the order it applied, so seq order *is* dependency order; apply
+halts at the first entry it cannot write and leaves the cursor before it, which
+retries rather than drops. Phase 4 deleted `election.ts` in full, along with
+epochs, vote grants, `cluster_self_state`, `/vote-request`, `/master-assumed`,
+the `cluster_election_liveness` job and `digest.ts`'s split-brain check — see
+"Leadership (Phase 4)" above for what stands in their place. Phase 5 added
+`cluster/quota.ts`, `cluster/degraded.ts` and operator promotion — see "Quota is
+master-authoritative" and "Degraded mode" above.
+
+**Phase 6 is next**: `replication_conflicts` + timestamp/node-id arbitration
+with an admin Conflicts view, and the synchronous revocation path (D-13 —
+grants lazy, revocations pushed to every reachable node before the admin call
+returns). `cluster_nodes.epoch` and `throughput_bps` are dead columns today: the
+first is vestigial (SQLite cannot drop a column in place), the second is Phase
+8's placement input.
 
 ---
 
@@ -75,6 +136,15 @@ wrong. Both scripts pass `./tests` explicitly — a bare `bun test` from either
 workspace globs the whole monorepo and runs the *other* workspace's tests with
 the wrong cwd.
 
+Cluster tests go one level further: `server/tests/clusterHarness.ts`
+(`makeCluster({size})`) stands up **N real nodes on real ports** talking over
+real HTTP, which is why the Phase 0–4 work could ship green at all. A cluster
+behaviour that isn't exercised through `makeCluster` isn't tested.
+`linkAll()` also **tiers** — it mints a generation on `nodes[0]` and hands it to
+everyone — because a linked but untiered node has no upstream and replicates
+with nobody. Call `tier()` again after changing what the leader computation
+reads (capacity, eligibility, liveness) to see the new plan take effect.
+
 Config lives in `./data/app.env`, auto-generated on first run (mode `0600`). Environment variables:
 
 | Variable | Purpose |
@@ -86,7 +156,9 @@ Config lives in `./data/app.env`, auto-generated on first run (mode `0600`). Env
 | `ALLOWED_HOSTS` | Comma-separated hostnames. Gates the WebAuthn relying-party ID and the HTTPS-redirect proxy-header trust. **Empty = unconfigured**, which logs a startup warning — set it in production. |
 | `TRUST_PROXY` | `true` (generic reverse proxy) or `cloudflare` (prefer `CF-Connecting-IP`, and derive each session's region from `CF-IPCountry`). Required behind a TLS-terminating proxy, or every request 308-redirects to https forever. |
 | `NODE_ID` / `NODE_NAME` / `NODE_URL` | This node's cluster identity and the base URL it advertises to peers |
-| `NODE_ROLE` | Bootstrap role on *first ever* boot only; afterwards the persisted elected role in `cluster_self_state` always wins |
+| `NODE_ROLE` | Bootstrap role on *first ever* boot only — it decides whether this node mints tiering generation 1. Afterwards the role derived from the held `cluster_tiering` generation always wins, so an env var can't override a decision the cluster has already made |
+| `NODE_REGION` | Explicit region name (`region_source = 'configured'`). Unset = inferred by clustering heartbeat RTTs |
+| `CLUSTER_REGION_RTT_MS` | RTT spread within which two *unconfigured* nodes are taken to share a region. Default 30 |
 | `MASTER_URL` / `MASTER_TOKEN` | Coordinates a non-master node auto-joins at startup |
 | `CLUSTER_TOKEN` | Shared bearer token for node-to-node endpoints |
 | `REPLICATION_MODE` | `full` (default) or `cache` (bounded LRU over the cluster blob store) |
@@ -106,6 +178,36 @@ Config lives in `./data/app.env`, auto-generated on first run (mode `0600`). Env
 | `FILEUPLOAD_THUMBNAILS` | Override the thumbnail cache root (default `./data/thumbnails`) |
 | `FILEUPLOAD_DEBRID` | Override the Real-Debrid staging root (default `./data/debrid`) |
 
+### Background jobs
+
+`jobs/scheduler.ts::startBackendWorkers` registers every job on its own
+`setInterval`, each timer `unref()`'d so sweeps never hold the process open.
+`stopBackendWorkers` / `restartBackendWorkers` back
+`POST /api/admin/backend/restart-workers`; `startBackendWorkers` is idempotent
+(it stops existing timers first). Every job is wrapped so a throw is logged and
+swallowed rather than killing the timer.
+
+| Job id | Interval | Does |
+|---|---|---|
+| `archive_idle` | 1h | zstd-wraps blobs idle past `archive_after_idle_days` |
+| `delete_idle` | 1h | Idle-delete sweep |
+| `temp_expiry` | 1h | Expires temporary files |
+| `link_expiry` | 10m | Deactivates expired share links |
+| `sweep_stale_parts` | 1h | Drops abandoned chunked-upload parts |
+| `media_playkey_prune` | 1h | Deletes `media_play_keys` rows already past `expires_at` |
+| `oauth_prune` | 1h | Deletes `oauth_*` rows already past `expires_at` |
+| `cluster_heartbeat` | 1m | Peer heartbeat + liveness marking |
+| `cluster_sync_check` | 5m | Digest divergence alerting |
+| `cluster_tiering_drift` | 1m | Drift counter + hold-down; re-tiers on threshold (`tiering.ts`). Master-only |
+| `cluster_quota_sweep` | 1h | Releases quota reservations idle for a full window (`quota.ts`). Master-only |
+| `cluster_replication_pull` | 1s | Pulls the change log from this node's targets |
+| `cluster_cache_eviction` | 10m | LRU eviction on `REPLICATION_MODE=cache` nodes |
+| `torrent_poll` | 5s | One qBittorrent list fetch per tick + Real-Debrid progress |
+
+`cluster_replication_pull` runs at 1s because one pull interval per hop is the
+propagation budget the redesign sets (§5.7). It costs a single-node deployment
+nothing: no peers means no request.
+
 ---
 
 ## Project structure
@@ -115,7 +217,9 @@ server/src/
   index.ts                 # entrypoint: load config, init db, seed master, start workers, listen
   app.ts                   # Express app factory: middleware order, route mounting, SPA serving, error handler
   appState.ts              # AppState (settings, db, sessionManager, lockout, clusterToken, eventBus,
-                           #           eventWriter, haltRegistry, loginChallenges, secondFactorTickets)
+                           #           eventWriter, haltRegistry, loginChallenges, secondFactorTickets,
+                           #           wsTokenRateLimiter). Also arms the replication triggers
+                           #           (setNodeIdentity) and runs seedChangeLog.
   config.ts                # Settings loader / generator for data/app.env
   bootstrap.ts             # First-run master user seed (only when `users` is empty)
   spa.ts                   # Reads the built SPA shell, injects per-page og: meta tags
@@ -126,7 +230,9 @@ server/src/
                            #   this process, with the URL redacted first
   httpError.ts             # HttpError — thrown anywhere, rendered as {detail} by app.ts
   ws.ts                    # Websocket firehose, attached to the raw http.Server
+  permissions.ts           # BOOL_FLAGS + getPermissions — the permission source of truth
   db/
+    index.ts               # createDb(): picks an adapter by DATABASE_URL scheme (sqlite: only)
     schema.sql             # Whole schema, CREATE TABLE/INDEX IF NOT EXISTS, run every boot
     sqlite.ts              # bun:sqlite adapter + ensureColumn backfills for added columns
     backfill.ts            # ensureColumn helper (ALTER TABLE ADD COLUMN if absent)
@@ -136,9 +242,11 @@ server/src/
     csrf.ts                # requireCsrf (needs an already-resolved req.sessionRow)
     passwords.ts           # Argon2id via Bun.password + a constant-time dummy verify
     lockout.ts             # Rolling-window failed-login lockout, per username AND per IP
+    accessLock.ts          # checkLinkAccess — per-key-scope throttle for password-locked links
     apiKeys.ts             # Key generation, hashing, first-use IP binding
     credentials.ts         # TOTP / WebAuthn credential rows
     webauthn.ts            # @simplewebauthn wrappers + rpID/origin resolution
+    oauth.ts               # OAuth primitives: PKCE, hashed codes/tokens, SCOPES, pruneOauth
     loginChallenges.ts     # Pre-login websocket correlation ids + ws-token rate limiter
     secondFactorTickets.ts # Single-use password→second-factor bridge tickets
   middleware/
@@ -146,6 +254,7 @@ server/src/
     auth.ts                # requireSession, clientIp (proxy-header aware)
     deps.ts                # requireActiveUser / requireMaster / requirePermission / getUploadUser / requireApiKey
     securityHeaders.ts     # nosniff, DENY framing, no-referrer, HSTS in prod
+    degradedMode.ts        # §5.5 write gate: method + allowlist, mounted once in app.ts
     requestLogging.ts      # Method/path/status/duration at noise-proportional levels
     httpsRedirect.ts       # 308 http→https outside dev, honoring proxy headers
   directoryTree.ts         # Folder tree: MAX_DEPTH, ancestor/subtree walks, editor checks
@@ -182,7 +291,11 @@ server/src/
   routes/                  # one file per surface; see "Route mounts" below
 
 client/src/
-  App.tsx, main.tsx
+  App.tsx                  # Route table (public /file/:slug, /d/:slug, /watch, /oauth/authorize;
+                           #   guarded /files, /account, /api-keys, /api-docs, /torrents,
+                           #   /cluster, /admin)
+  main.tsx                 # Provider stack + the pre-paint theme applier (no ThemeProvider —
+                           #   an IIFE reads `fu_theme` from localStorage before first paint)
   features/
     auth/                  # Login page, second-factor step, auth context, login websocket
     account/               # Profile, avatar, password, security (MFA) tab
@@ -196,30 +309,46 @@ client/src/
     dropbox/               # Dropbox link management + public token-gated upload page
     apikeys/               # API key management UI
     torrents/              # Torrents page (add magnet/.torrent, live progress)
-    cluster/               # Cluster dashboard (nodes, token, halts)
+    cluster/               # Cluster dashboard (tier + region + generation + drift,
+                           #   nodes, token, halts, manual re-tier)
     admin/                 # Admin panel (users, files, keys, audit, storage, logs, torrents)
     media/                 # Media library: poster grid, player, publish + play-key UI
+    oauth/                 # OAuth app management + the /oauth/authorize consent page
     api-docs/              # API reference page — renders docs/api.md, imported into the
                            #   bundle at build time (`@docs/api.md?raw`), not fetched
   components/
-    layout/                # Sidebar, settings modal (sessions tab), top bar
+    layout/                # AppShell, PublicShell, Sidebar, Header, UserMenu, Brand,
+                           #   SettingsModal (sessions tab), PageHeader, guards.tsx,
+                           #   FeatureUnavailable, FullPageSpinner
     ui/                    # Shared Radix-based design system components
-  workers/                 # aead.worker.ts + fuplCore.ts — client-side E2E encryption off the main thread
-  lib/                     # base64url, bytes, cn, copy, download, time, zip helpers
+  workers/                 # aead.worker.ts (the worker) + aeadClient.ts / aeadTypes.ts (its
+                           #   main-thread wrapper and message contract) + fuplCore.ts (the
+                           #   FUPL container itself, shared by both sides)
+  lib/                     # base64url, bytes, cn, copy, download, redirect, time, zip helpers
   config/
     api.ts                 # Typed API client (CSRF header, ApiError normalization)
     featureFlags.ts        # All true; kept as a kill switch
     navigation.ts          # Sidebar nav items
     permissions.ts         # Permission flags + UI metadata
-  providers/               # QueryClient, DialogProvider, ThemeProvider, UploadProvider
+  providers/               # QueryProvider (TanStack), DialogProvider, ToastProvider.
+                           #   UploadProvider lives in features/files/hooks/useUpload.tsx and
+                           #   RevealedKeyProvider in features/drive/hooks/useRevealedKeys.tsx —
+                           #   both are mounted from main.tsx, RevealedKeyProvider deliberately
+                           #   *above* BrowserRouter so a revealed key survives navigation.
 
 docs/
   api.md                   # THE public API reference — single source; served raw at
                            #   GET /api/docs.md (for LLMs/tooling) and compiled into the
                            #   /api-docs page bundle. Editing it needs a client rebuild
                            #   for the page; the endpoint re-reads it on mtime change.
+  cluster-redesign.md      # The cluster rework's design doc + phasing. Authority on intent;
+                           #   see "Where the cluster rework stands" above for what is built.
 public/                    # Built client output, served by Express
-data/                      # Runtime state: app.env, app.db, storage/, thumbnails/ (gitignored)
+data/                      # Runtime state: app.env, app.db, storage/, thumbnails/, debrid/
+                           #   (gitignored)
+plan.md, checklist.md, progress.md
+                           # Working notes from the completed Drive/explorer rework. Historical
+                           #   — they describe finished work, not the current backlog.
 ```
 
 ### Route mounts
@@ -237,7 +366,14 @@ Every data endpoint lives under `/api/*` so it can never collide with an SPA cli
 | `/api/torrents`, `/api/admin/torrents` | `torrents.ts` |
 | `/api/media` | `media.ts` — library browse, publish, stream, play keys |
 | `/api/cluster`, `/api/admin/cluster` | `cluster.ts` |
-| `/api` (self-prefixed paths) | `directories.ts`, `dropbox.ts`, `docs.ts` (`/docs.md`), `public.ts` (`/file/:slug*`), public folder routes (`/d/:slug*`) |
+| `/api/admin/directories` | `directories.ts::adminDirectoriesRouter` — flat every-folder list, master-only |
+| `/api` (self-prefixed paths) | `directories.ts` (`directoriesRouter` + `publicDirectoriesRouter`), `dropbox.ts`, `docs.ts` (`/docs.md`), `public.ts` (`/file/:slug*`), public folder routes (`/d/:slug*`) |
+
+`routes/directories.ts` is one file exporting **three** routers with different
+auth postures — `directoriesRouter` (session), `adminDirectoriesRouter`
+(`requireMaster`), `publicDirectoriesRouter` (link slug is the credential). The
+public one is mounted last, after every authenticated router, so a `/d/:slug`
+path can't shadow one.
 
 ---
 
@@ -569,6 +705,14 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - **Anything added to a replicated table must also be added to `cluster/changelog.ts`'s `TABLE_COLUMNS`**, or the column silently resets to its default on every peer. A new `BLOB` column additionally needs an entry in `BLOB_COLUMNS` (`json_object()` refuses to hold blob values, so they travel as hex) and a new id-valued column needs one in `FOREIGN_KEYS` — an untranslated id lands on a peer pointing at whatever row happens to occupy that number there.
 - **Don't call anything to replicate a write.** The change log is appended by a trigger inside the same transaction as the write itself (`cluster/changelog.ts`), which is the entire point of Phase 3 — the previous design asked every route handler to remember, and two of about forty did. A route that "also replicates" is a bug.
 - **`replication_control.suppressed` must be lowered on every path that raises it.** It is raised while applying a peer's entries so they aren't re-logged as local writes; left raised, this node silently stops logging its own. `installChangeLog` clears it at boot for exactly that reason.
+- **The change-log triggers do nothing until `setNodeIdentity` runs**, and that is load-bearing, not a startup race. It is what keeps `identity.ts`'s boot `uid` backfill — which rewrites every row in seven tables — out of the log. `createAppState` calls it, and nothing writes between `createDb` and there. Don't move a write earlier in `index.ts`.
+- **`index.ts`'s startup order is a dependency chain, not a style choice.** `createDb` → `initTiering` (mints generation 1 from `NODE_ROLE` on first ever boot, and mirrors `replication_control.is_master`) → `createAppState` (`setNodeIdentity` + `seedChangeLog`, whose seed reads that column to decide whether this node assigns `master_seq`) → `ensureMaster` → workers → join. Reordering it either logs the backfill or seeds the log against the wrong role.
+- **`replication_control` carries `node_id`, `suppressed` and `is_master` as *columns* because a trigger cannot reach application state — only other tables.** `is_master` is mirrored there by `tiering.ts` on every generation change; a code path that changes who is master without going through `mirror()` silently stops (or starts) assigning `master_seq`.
+- **A replicated table is one in `identity.ts`'s `UID_TABLES`, and that list is `CHANGELOG_TABLES`.** Adding a table to one adds it to the other by construction — but it also needs a `TABLE_COLUMNS` entry, a `uid` column in `schema.sql`, and the backfill will rewrite every existing row on the next boot. Node-local tables (`sessions`, `media_play_keys`, `oauth_*`, `cluster_*`, `torrent_jobs`, `remote_upload_jobs`, `audit_log`) are absent **on purpose**; each has its own reason, recorded next to it.
+- **`id` is node-local and never replicates.** `TABLE_COLUMNS` deliberately omits it from every table — a row is identified across the cluster by its ULID `uid`, and an id-valued column that crosses the wire needs a `FOREIGN_KEYS` entry so the peer translates it. An untranslated id lands pointing at whatever row happens to occupy that number there.
+- **A node pulls from its upstream and from whoever's upstream it is — nothing else.** `pullTargets()` derives both halves of every edge from `upstreamOf()` over the same generation, so the two ends agree without negotiating. The permitted fallback is exactly one: a follower whose region leader is unreachable pulls from the **master**. Adding a "fall back to any peer" branch is how a partition converges on two different answers, and a node holding no generation pulls from nobody at all — it is supposed to degrade, not improvise.
+- **A role is derived, never asserted.** `cluster_nodes.role`/`.is_master`/`.region` are written from the local tiering generation. The `role` field on a `/join` or `/heartbeat` body is for logs and the UI; reading it back into the table re-opens S4.
+- **Only the master mints a generation.** `retier()` no-ops on a non-master, and that is what makes "no master ⇒ leadership does not move" true without a separate check. Don't add a promote-yourself path — operator promotion (Phase 5) mints `reason='promotion'` *from the node being promoted only after a human has confirmed it*, which is a different thing.
 - **A play key must never be trusted on a jti that isn't in `media_play_keys`.** Treating a missing row as valid would make the prune job a revocation-bypass.
 - **Deleting a file must also call `deleteThumbnail(fileId)`** — the thumbnail cache is keyed by file id and is not reference-counted.
 - **A debrid retry decides re-import vs. re-download by the `data/debrid/_sources/<tag>.complete` marker**, not by "the staging directory has files in it". A transfer aborted halfway also leaves files there, and importing those would silently store truncated content. The marker is written only after the last byte of the last link lands (`debrid.ts::markTransferComplete`), and lives outside the job directory so the importer never sees it as content.
@@ -596,6 +740,16 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - Don't run migrations — add nullable columns (or columns with a SQLite `DEFAULT`) plus an `ensureColumn` backfill
 - Don't write an `async` Express handler without `asyncHandler`
 - Don't scale this server to multiple processes without redesigning `cluster/eventBus.ts` sequencing
+- Don't write a route handler that "also replicates" — the trigger already did it, and a second copy is a bug
+- Don't add a second state-transfer mechanism alongside `seedChangeLog` — Phase 3 deleted `/cluster/export` specifically so there is exactly one, and two that can disagree is the failure mode it was deleted to prevent
+- Don't reintroduce an election, an epoch, or a `candidate` role — leadership is computed from a snapshot, and the only thing that travels between nodes is the generation
+- Don't write a peer's claimed `role` into `cluster_nodes` — derive it from the tiering generation
+- Don't count a brand-new node against the drift hold-down — until it is in a snapshot it has no upstream and replicates with nobody
+- Don't add a write path that creates a `files` row without a quota reservation — go through `finalizeStoredFile`, or reserve explicitly like save/copy do
+- Don't check quota by reading `SUM(files.size_bytes)` locally — that's the read two nodes can both pass, and it is the bug reservations exist to close
+- Don't move the free-disk check to the master — the master's spare space says nothing about the node holding the bytes
+- Don't gate `/api/cluster` behind the degraded-mode middleware — promotion is the only way out of degraded mode
+- Don't make promotion automatic — that's the split brain the design deliberately refuses to risk
 - Don't poll qBittorrent once per job — one list fetch per tick, grouped by tag, covering downloading *and* seeding jobs
 - Don't refuse a torrent for being over the concurrency limit — park it in `pending` and let `promotePendingJobs` start it
 - Don't count `pending` toward `IN_FLIGHT_STATUSES` — that is the status a job sits in *because* it has no slot, so counting it deadlocks the queue
@@ -625,5 +779,10 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - `torrents/debrid.ts` — `planFiles()` pairs `info.links[]` with the *selected* entries of `info.files[]` positionally; when the counts disagree (Real-Debrid splits very large torrents into RAR volumes, which are links with no matching file entry) it gives up on the mapping and names each download from its own unrestrict response instead. The transfer's only timeout is a **stall** timer — a legitimate multi-GB pull runs for hours, so idleness is what gets policed, not duration.
 - `torrents/poller.ts` — `pollDebrid` uses the row's own `updated_at` as its last-polled clock rather than a side map, so there is no in-memory registry to prune. `startDebridFetch` guards against overlapping transfers with a module-level `Set` of job ids. `promotePendingJobs` reads every owner's slot usage in **one** grouped query, not a `COUNT` per candidate, and increments its in-memory tally *before* awaiting dispatch — the same owner's next pending job is decided in that same loop. `seedLimitReached` compares against a strictly positive limit because qBittorrent reports `ratio` as `-1` before anything has been uploaded.
 - `security/sessions.ts` — the cookie carries only a signed opaque sid; `resolve()` refreshes `last_seen_at` at most once a minute.
+- `cluster/changelog.ts` — the append is a **SQLite trigger**, not a wrapper around `db.run()`. Detecting writes by parsing SQL at the adapter would be guesswork; a trigger sees the committed row. That also moved uid minting into the trigger, so "minted where the row is created" is literally true. `replication_control` carries the node identity and the suppression flag *as table columns* because a trigger cannot reach application state — only other tables.
+- `cluster/replication.ts` — `PULL_LIMIT = 500` per request, `MAX_BATCHES_PER_TICK = 20` (a node far behind can't hold the 1s job forever — it resumes next tick), `PULL_TIMEOUT_MS = 20_000`. A pull that fills a batch immediately issues another rather than waiting for the next tick.
+- `cluster/tiering.ts` — `computePlan`, `inferRegions` and `upstreamOf` are pure and exported, which is why most of `clusterTiering.test.ts` needs no cluster at all. `computePlan` takes an `incumbent` used only when nothing is eligible: an all-ineligible snapshot must keep the current master, because *vacating* leadership is precisely what no node is allowed to decide. `KEEP_GENERATIONS = 20` trims history. `measureDrift(…, {persist: false})` measures without touching the hold-down clock, for read-only surfaces like `GET /cluster/self`.
+- `cluster/membership.ts` — `heartbeatJob` times its own round-trip and writes the median of the last `RTT_SAMPLES = 5` into `cluster_nodes.rtt_ms`; the sample map is pruned against the live target list every run. Region inference is free precisely because that round-trip was already happening.
+- `db/index.ts` — the only place a `DATABASE_URL` scheme is interpreted. `sqlite:///rel`, `sqlite:////abs` and `:memory:` are the three forms; anything else throws. A future Postgres adapter implements `Db` and gets another case here rather than touching callers.
 - `client/src/components/layout/UserMenu.tsx` — the collapsed sidebar trigger is a plain `Button`; wrapping it in a `Tooltip` breaks Radix DropdownMenu clicks.
 - `client/src/features/files/components/Dropzone.tsx` — uses `bg-brand-gradient` and `text-white` for the reasons in "What NOT to do".

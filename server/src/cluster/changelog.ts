@@ -385,7 +385,12 @@ function triggerSql(table: UidTable): string[] {
  * here" means, and a forwarded entry supplies its own so COALESCE leaves it
  * alone. `master_seq` is assigned only on the master, where the local log
  * order *is* the canonical order, so the two numbers coincide there and no
- * separate counter is needed. */
+ * separate counter is needed.
+ *
+ * "Am I the master" is read from `replication_control.is_master`, mirrored
+ * there by `cluster/tiering.ts` on every generation change. It has to be a
+ * table column for the same reason the node id and the suppression flag are: a
+ * trigger cannot reach application state, only other tables. */
 const LOG_FIXUP_SQL = [
 	"DROP TRIGGER IF EXISTS trg_repl_log_seq",
 	`CREATE TRIGGER trg_repl_log_seq AFTER INSERT ON replication_log
@@ -393,7 +398,7 @@ const LOG_FIXUP_SQL = [
      UPDATE replication_log
         SET origin_seq = COALESCE(origin_seq, seq),
             master_seq = CASE
-              WHEN (SELECT role FROM cluster_self_state WHERE id = 1) = 'master'
+              WHEN (SELECT is_master FROM replication_control WHERE id = 1) = 1
                 THEN COALESCE(master_seq, seq)
               ELSE master_seq END
       WHERE seq = NEW.seq;

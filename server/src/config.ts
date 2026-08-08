@@ -24,7 +24,17 @@ export interface Settings {
 	clusterToken: string;
 	nodeId: string;
 	nodeName: string;
+	/** Bootstrap role, consulted on the first ever boot and nowhere else --
+	 * afterwards this node derives its role from the tiering generation it
+	 * holds (cluster/tiering.ts), so an env var cannot override a decision the
+	 * cluster has already made. */
 	nodeRole: string;
+	/** Explicit region name (§5.2, D-3). Set means `region_source =
+	 * 'configured'`, which always beats RTT inference. */
+	nodeRegion: string;
+	/** RTT spread within which two *unconfigured* nodes are taken to share a
+	 * region. 0 falls back to the 30 ms default. */
+	regionRttThresholdMs: number;
 	nodeUrl: string;
 	masterUrl: string;
 	masterToken: string;
@@ -200,6 +210,8 @@ export function loadSettings(configPathArg?: string): Settings {
 		nodeId: map.get("NODE_ID") || "",
 		nodeName: map.get("NODE_NAME") || "",
 		nodeRole: map.get("NODE_ROLE") || "master",
+		nodeRegion: map.get("NODE_REGION") || "",
+		regionRttThresholdMs: Number(map.get("CLUSTER_REGION_RTT_MS") || "0"),
 		nodeUrl: map.get("NODE_URL") || "",
 		masterUrl: map.get("MASTER_URL") || "",
 		masterToken: map.get("MASTER_TOKEN") || "",

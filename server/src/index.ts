@@ -1,9 +1,9 @@
 import { createApp } from "./app.ts";
 import { createAppState } from "./appState.ts";
 import { ensureMaster } from "./bootstrap.ts";
-import { initSelfState } from "./cluster/election.ts";
 import { ClusterFirehoseConsumer } from "./cluster/firehoseClient.ts";
 import { joinCluster } from "./cluster/membership.ts";
+import { initTiering } from "./cluster/tiering.ts";
 import { loadSettings } from "./config.ts";
 import { createDb } from "./db/index.ts";
 import { startBackendWorkers } from "./jobs/scheduler.ts";
@@ -23,13 +23,14 @@ if (!settings.allowedHosts) {
 	);
 }
 const db = createDb(settings.databaseUrl);
-// Seed this node's election state (cluster/election.ts) from NODE_ROLE on
-// first ever boot; a no-op on every later boot since persisted role/epoch
-// always wins over env config. Must run before anything else (heartbeat,
-// join, the scheduler) reads or writes cluster_self_state -- and before
-// createAppState, whose change-log seed reads the role to decide whether
-// this node assigns master_seq.
-initSelfState(db, settings);
+// Mint this node's first tiering generation from NODE_ROLE (cluster/
+// tiering.ts) on first ever boot; on every later boot it only re-mirrors the
+// generation already held, because a role the cluster has decided must not be
+// overridable by an env var. Must run before anything else (heartbeat, join,
+// the scheduler) reads a role -- and before createAppState, whose change-log
+// seed reads `replication_control.is_master` to decide whether this node
+// assigns master_seq.
+initTiering(db, settings);
 const state = createAppState(settings, db);
 
 await ensureMaster(db);

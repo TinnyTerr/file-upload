@@ -1,6 +1,7 @@
 import { api } from "@/config/api";
 import type {
 	ClusterNode,
+	ClusterNodeUpdate,
 	ClusterSelf,
 	LinkedClusterNode,
 	NewClusterNode,
@@ -21,5 +22,22 @@ export const clusterService = {
 	linkNode: (node: NewClusterNode) =>
 		api.post<LinkedClusterNode>("/cluster/nodes", { json: node }),
 
+	updateNode: (nodeId: number, patch: ClusterNodeUpdate) =>
+		api.patch<ClusterNode>(`/cluster/nodes/${nodeId}`, { json: patch }),
+
 	unlinkNode: (nodeId: number) => api.delete(`/cluster/nodes/${nodeId}`),
+
+	/** Mint a new tiering generation. Master-only; a follower gets a 409, since
+	 * only the master may decide where leadership sits. */
+	retier: () =>
+		api.post<{ tiering: { generation: number } | null }>("/cluster/retier"),
+
+	/** Take over as master (§5.5). Refused unless this node is genuinely
+	 * degraded, and `confirm` must be the node's own name typed out — promoting
+	 * while the old master is alive splits the cluster, and that is a decision
+	 * only a human with out-of-band knowledge can make. */
+	promote: (confirm: string, force = false) =>
+		api.post<{ tiering: { generation: number } }>("/cluster/promote", {
+			json: { confirm, force },
+		}),
 };

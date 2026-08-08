@@ -1,4 +1,5 @@
 import {
+	AlertTriangle,
 	Archive,
 	Crown,
 	Database,
@@ -6,11 +7,14 @@ import {
 	HardDrive,
 	Network,
 	PauseCircle,
+	Pin,
 	Plus,
 	Radio,
+	RefreshCw,
 	RotateCcw,
 	Server,
 	ShieldCheck,
+	ShieldOff,
 	Trash2,
 } from "lucide-react";
 import { useState } from "react";
@@ -36,8 +40,10 @@ import {
 	useClusterNodes,
 	useClusterSelf,
 	useClusterToken,
+	usePromote,
+	useRetier,
 } from "../hooks/useCluster";
-import type { ClusterHalt } from "../types";
+import type { ClusterHalt, NodeRole } from "../types";
 
 function haltLabel(scope: string): string {
 	if (scope === "global") return "All uploads halted";
@@ -46,18 +52,52 @@ function haltLabel(scope: string): string {
 	return `Halted: ${scope}`;
 }
 
+/** Tier 0 quota + write-ordering authority, tier 1 relay/cache, tier 2. Never
+ * self-asserted — the master computes it and every node derives the same
+ * answer from the same generation. */
+function RoleBadge({ role }: { role: NodeRole }) {
+	if (role === "master") {
+		return (
+			<Badge variant="default" className="gap-1">
+				<Crown className="size-3" /> master
+			</Badge>
+		);
+	}
+	if (role === "leader") {
+		return (
+			<Badge variant="secondary" className="gap-1">
+				<Network className="size-3" /> region leader
+			</Badge>
+		);
+	}
+	return <Badge variant="outline">follower</Badge>;
+}
+
 function ThisServerCard() {
 	const { data, isLoading } = useClusterSelf();
+	const retier = useRetier();
 	return (
 		<Card>
-			<CardHeader>
-				<CardTitle className="flex items-center gap-2">
-					<Database className="size-4 text-primary" />
-					This server
-				</CardTitle>
-				<CardDescription>
-					This node's identity, capacity and any active upload halts.
-				</CardDescription>
+			<CardHeader className="flex-row items-start justify-between gap-2 space-y-0">
+				<div>
+					<CardTitle className="flex items-center gap-2">
+						<Database className="size-4 text-primary" />
+						This server
+					</CardTitle>
+					<CardDescription>
+						This node's identity, tier, capacity and any active upload halts.
+					</CardDescription>
+				</div>
+				{data?.is_master && (
+					<Button
+						variant="outline"
+						size="sm"
+						onClick={() => retier.mutate()}
+						loading={retier.isPending}
+					>
+						<RefreshCw /> Re-tier
+					</Button>
+				)}
 			</CardHeader>
 			<CardContent className="space-y-3">
 				{isLoading || !data ? (
@@ -66,12 +106,9 @@ function ThisServerCard() {
 					<>
 						<div className="flex flex-wrap items-center gap-2">
 							<span className="text-sm font-medium">{data.name}</span>
-							{data.is_master ? (
-								<Badge variant="default" className="gap-1">
-									<Crown className="size-3" /> master
-								</Badge>
-							) : (
-								<Badge variant="secondary">node</Badge>
+							<RoleBadge role={data.role} />
+							{data.region && (
+								<Badge variant="outline">region {data.region}</Badge>
 							)}
 							<Badge
 								variant={data.archive_enabled ? "success" : "secondary"}
@@ -91,11 +128,59 @@ function ThisServerCard() {
 							{formatBytes(data.disk_free_bytes)} free of{" "}
 							{formatBytes(data.disk_total_bytes)}
 						</div>
+						<TieringLine
+							generation={data.tiering_generation}
+							masterNodeId={data.master_node_id}
+							isMaster={data.is_master}
+							drift={data.drift}
+							outstanding={data.outstanding_reservations}
+						/>
 						<HaltList halts={data.halts} />
 					</>
 				)}
 			</CardContent>
 		</Card>
+	);
+}
+
+function TieringLine({
+	generation,
+	masterNodeId,
+	isMaster,
+	drift,
+	outstanding,
+}: {
+	generation: number;
+	masterNodeId: string | null;
+	isMaster: boolean;
+	drift: { changes: number; threshold: number; pending: number } | null;
+	/** Writes the master has admitted whose file rows do not exist yet. Null off
+	 * the master, which holds no ledger. */
+	outstanding: number | null;
+}) {
+	// Generation 0 means this node has never been tiered, which is not cosmetic:
+	// it has no upstream, so it replicates with nobody until a master admits it.
+	if (generation === 0) {
+		return (
+			<p className="rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5 text-xs">
+				Not yet tiered — this node has no upstream and is not replicating. Link
+				it to a master, or set <code>NODE_ROLE=master</code> to bootstrap one.
+			</p>
+		);
+	}
+	return (
+		<p className="text-xs text-muted-foreground">
+			Tiering generation {generation}
+			{masterNodeId && !isMaster ? ` · master ${masterNodeId}` : ""}
+			{drift
+				? ` · drift ${drift.changes}/${drift.threshold}${
+						drift.pending ? ` (${drift.pending} in hold-down)` : ""
+					}`
+				: ""}
+			{outstanding
+				? ` · ${outstanding} write(s) admitted, not yet written`
+				: ""}
+		</p>
 	);
 }
 
@@ -265,7 +350,7 @@ function LinkNodeForm({ onDone }: { onDone: () => void }) {
 }
 
 function LinkedNodesCard() {
-	const { list, unlink } = useClusterNodes();
+	const { list, unlink, update } = useClusterNodes();
 	const { confirm } = useDialogs();
 	const [adding, setAdding] = useState(false);
 
@@ -328,10 +413,20 @@ function LinkedNodesCard() {
 										) : (
 											<Badge variant="destructive">unreachable</Badge>
 										)}
-										{node.is_master && (
-											<Badge variant="default" className="gap-1">
-												<Crown className="size-3" /> master
+										<RoleBadge role={node.role} />
+										{node.region && (
+											<Badge variant="outline">
+												{node.region}
+												{node.region_source === "configured" ? " (set)" : ""}
 											</Badge>
+										)}
+										{node.pinned_master && (
+											<Badge variant="warning" className="gap-1">
+												<Pin className="size-3" /> pinned
+											</Badge>
+										)}
+										{node.ineligible && (
+											<Badge variant="secondary">not a candidate</Badge>
 										)}
 										<Badge
 											variant={node.archive_enabled ? "success" : "secondary"}
@@ -356,8 +451,31 @@ function LinkedNodesCard() {
 										Linked {node.created_at ? formatDate(node.created_at) : "—"}{" "}
 										· heartbeat{" "}
 										{relativeTime(node.last_heartbeat_at ?? node.last_seen_at)}
+										{node.rtt_ms !== null ? ` · ${node.rtt_ms} ms` : ""}
 									</p>
 								</div>
+								<Button
+									variant="ghost"
+									size="icon"
+									onClick={() =>
+										update.mutate({
+											id: node.id,
+											patch: { ineligible: !node.ineligible },
+										})
+									}
+									aria-label={
+										node.ineligible
+											? `Allow ${node.name} to lead`
+											: `Stop ${node.name} from leading`
+									}
+									title={
+										node.ineligible
+											? "Allow this node to be a leadership candidate"
+											: "Remove this node from leadership candidacy"
+									}
+								>
+									{node.ineligible ? <ShieldOff /> : <ShieldCheck />}
+								</Button>
 								<Button
 									variant="ghost"
 									size="icon"
@@ -426,6 +544,82 @@ function CodeLine({ value }: { value: string }) {
 	);
 }
 
+/**
+ * The persistent banner §5.5 asks for: names the reason, the elapsed time, and
+ * the way out.
+ *
+ * `grace` gets a calm warning — a master restart takes seconds and the cluster
+ * is riding it out, so alarming the operator would be wrong. `degraded` gets a
+ * loud one plus the promote control, because at that point nothing resolves it
+ * except a human deciding the master is really gone.
+ */
+function MasterStatusBanner() {
+	const { data } = useClusterSelf();
+	const promote = usePromote();
+	const { prompt } = useDialogs();
+	const status = data?.master_status;
+	if (!data || !status || status.phase === "ok") return null;
+
+	const minutes = Math.floor(status.silent_ms / 60000);
+	const seconds = Math.floor((status.silent_ms % 60000) / 1000);
+	const elapsed = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+
+	const onPromote = async () => {
+		const confirm = await prompt({
+			title: "Promote this node to master?",
+			description:
+				`Type "${data.name}" to confirm. Only do this if you know the current master is genuinely gone — ` +
+				"promoting while it is still running splits the cluster into two lineages that cannot be merged.",
+			confirmText: "Promote",
+			placeholder: data.name,
+			destructive: true,
+		});
+		if (confirm) promote.mutate({ confirm });
+	};
+
+	if (status.phase === "grace") {
+		return (
+			<div className="flex flex-wrap items-center gap-3 rounded-lg border border-warning/40 bg-warning/10 px-4 py-3 text-sm">
+				<AlertTriangle className="size-4 shrink-0 text-warning" />
+				<span>
+					Can't reach the master ({status.master_node_id ?? "unknown"}) —{" "}
+					{elapsed}. Writes are being <strong>held</strong>, not failed, for the
+					restart grace window.
+					{status.held > 0 ? ` ${status.held} request(s) waiting.` : ""}
+				</span>
+			</div>
+		);
+	}
+
+	return (
+		<div className="space-y-3 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm">
+			<div className="flex flex-wrap items-center gap-3">
+				<AlertTriangle className="size-4 shrink-0 text-destructive" />
+				<span>
+					<strong>Degraded.</strong> No contact with the master (
+					{status.master_node_id ?? "unknown"}) for {elapsed}. This node is
+					read-only: downloads, previews and share links still work, but
+					uploads, renames, deletes and permission changes are refused.
+				</span>
+			</div>
+			<p className="text-xs text-muted-foreground">
+				This does not resolve itself. Either the master comes back, or you
+				promote a node — which is a judgement only someone who can see the
+				network can make safely.
+			</p>
+			<Button
+				variant="outline"
+				size="sm"
+				className="text-destructive"
+				onClick={onPromote}
+				loading={promote.isPending}
+			>
+				<Crown /> Promote this node to master
+			</Button>
+		</div>
+	);
+}
+
 export function ClusterPage() {
 	return (
 		<div className="space-y-6">
@@ -435,6 +629,7 @@ export function ClusterPage() {
 				icon={Network}
 			/>
 
+			<MasterStatusBanner />
 			<ThisServerCard />
 			<LocalTokenCard />
 			<LinkedNodesCard />

@@ -18,6 +18,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { adoptTiering, retier } from "../src/cluster/tiering.ts";
 import type { Settings } from "../src/config.ts";
 import { nowIso } from "../src/db/rows.ts";
 import { type Harness, makeHarness } from "./harness.ts";
@@ -43,8 +44,14 @@ export interface ClusterHarness {
 	/** Records `to` in `from`'s `cluster_nodes` table, which is what every
 	 * peer-walking loop (firehose consumer, replication, blob fetch) reads. */
 	link(from: ClusterNodeHarness, to: ClusterNodeHarness): void;
-	/** Full mesh, both directions, every pair. */
+	/** Full mesh, both directions, every pair — then tiers, since a linked but
+	 * untiered node has no upstream and replicates with nobody. */
 	linkAll(): void;
+	/** Mint a generation on the master and hand it to every other node, which is
+	 * what the join handshake and heartbeat do in production
+	 * (cluster/tiering.ts). Call this after changing what the computation reads
+	 * — capacity, eligibility, liveness — to see the new plan take effect. */
+	tier(): void;
 	close(): void;
 }
 
@@ -111,34 +118,38 @@ export async function makeCluster(
 		from.db.run("DELETE FROM cluster_nodes WHERE node_id = $nodeId", {
 			$nodeId: to.nodeId,
 		});
+		// No role, no is_master: both are derived from the tiering generation
+		// (cluster/tiering.ts) and writing them here would be asserting exactly
+		// the thing Phase 4 stopped letting nodes assert.
 		from.db.run(
-			`INSERT INTO cluster_nodes (node_id, name, base_url, token, active, is_master, role,
+			`INSERT INTO cluster_nodes (node_id, name, base_url, token, active,
          archive_enabled, replication_mode, created_at)
-       VALUES ($nodeId, $name, $baseUrl, $token, 1, $isMaster, $role, 1, $mode, $now)`,
+       VALUES ($nodeId, $name, $baseUrl, $token, 1, 1, $mode, $now)`,
 			{
 				$nodeId: to.nodeId,
 				$name: to.nodeName,
 				$baseUrl: to.baseUrl,
 				$token: to.token,
-				$isMaster: to.state.settings.nodeRole === "master" ? 1 : 0,
-				$role: to.state.settings.nodeRole,
 				$mode: to.state.settings.replicationMode,
 				$now: nowIso(),
 			},
 		);
 	}
 
-	// Point every follower at nodes[0] as its master. In production the join
-	// handshake learns this (membership.ts::learnMasterPointer); here it is
-	// config, because these tests are about what happens once the mesh exists.
 	const master = nodes[0]!;
-	for (const node of nodes.slice(1)) {
-		node.db.run(
-			`UPDATE cluster_self_state
-          SET current_master_id = $id, current_master_url = $url, updated_at = $now
-        WHERE id = 1`,
-			{ $id: master.nodeId, $url: master.baseUrl, $now: nowIso() },
-		);
+
+	// nodes[0] booted with NODE_ROLE=master, so it holds the bootstrap
+	// generation; every other node adopts what it computes. In production the
+	// join handshake and heartbeat carry this (membership.ts), which needs a
+	// live mesh — here it is a direct hand-off, because these tests are about
+	// what happens once the mesh exists.
+	function tier(): void {
+		const minted = retier(master.state, "manual");
+		if (!minted) throw new Error("cluster harness: nodes[0] is not master");
+		for (const node of nodes) {
+			if (node === master) continue;
+			adoptTiering(node.state, minted, { force: true });
+		}
 	}
 
 	return {
@@ -150,12 +161,14 @@ export async function makeCluster(
 			return found;
 		},
 		link,
+		tier,
 		linkAll() {
 			for (const from of nodes) {
 				for (const to of nodes) {
 					if (from !== to) link(from, to);
 				}
 			}
+			tier();
 		},
 		close() {
 			for (const n of nodes) n.close();

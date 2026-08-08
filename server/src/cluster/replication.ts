@@ -8,8 +8,8 @@ import {
 	type PullDirection,
 	setCursor,
 } from "./changelog.ts";
-import { getSelfState } from "./election.ts";
 import { ClusterHTTPError, getJson } from "./http.ts";
+import { currentTiering, upstreamOf } from "./tiering.ts";
 
 /**
  * Shipping the change log between nodes (redesign §5.7).
@@ -28,11 +28,17 @@ import { ClusterHTTPError, getJson } from "./http.ts";
  * full-database rebase (B4, B5, D4). None of that survives; row identity is a
  * ULID now (§5.6), so the collision it existed to detect cannot happen.
  *
- * Topology, for as long as the region tier is dormant (Phase 4 adds it):
- * the master pulls **up** from every peer, everyone else pulls **down** from
- * the master. A follower does not pull from another follower — its writes
- * reach that peer by going up to the master and back down, which is what keeps
- * the master's log the canonical order.
+ * Topology (§5.1, live since Phase 4): strictly hierarchical, and derived
+ * entirely from the tiering generation. Every node pulls **down** from its
+ * upstream — a follower from its region leader, a leader from the master — and
+ * **up** from everyone whose upstream is itself. Two rules, one function
+ * (`upstreamOf`), and the mesh falls out of them.
+ *
+ * A follower does not pull from a sibling: its writes reach that peer by going
+ * up to the master and back down, which is what keeps the master's log the
+ * canonical order. A follower whose leader has gone quiet pulls from the master
+ * directly — the region leader is a relay and a cache, not an authority, so
+ * losing it degrades latency rather than capability.
  */
 
 const log = getLogger("app.cluster.replication");
@@ -143,24 +149,44 @@ export async function pullFromPeer(
 
 /** Every peer this node pulls from, and in which direction.
  *
- * A follower with no resolved master pulls from nobody — deliberately. Guessing
- * at a peer to sync from is how two halves of a partition converge on different
- * answers, and D-2 already says that a node which cannot reach the master
- * degrades rather than improvises. */
+ * `down` from this node's own upstream; `up` from every active peer that has
+ * this node as *its* upstream. Because both sides are computed from the same
+ * `upstreamOf` over the same generation, the two halves of every edge agree
+ * without negotiating.
+ *
+ * A node that cannot resolve an upstream pulls from nobody — deliberately, and
+ * that includes a node holding no tiering generation at all. Guessing at a peer
+ * to sync from is how two halves of a partition converge on different answers,
+ * and D-2 already says that a node which cannot reach the master degrades
+ * rather than improvises. */
 export function pullTargets(
 	state: AppState,
 ): Array<{ peer: Peer; direction: PullDirection }> {
-	const self = getSelfState(state.db);
-	if (self.role === "master") {
-		return activePeers(state.db).map((peer) => ({
-			peer,
-			direction: "up" as const,
-		}));
+	const tiering = currentTiering(state.db);
+	if (!tiering) return [];
+	const selfId = state.settings.nodeId;
+	const peers = new Map(activePeers(state.db).map((p) => [p.nodeId, p]));
+	// This node's own liveness observation, used for both halves of every edge.
+	// Both ends read the same generation and, when they agree about who is
+	// reachable, derive the same edges — so the fallback below does not need to
+	// be negotiated. When they disagree, the worst case is one redundant or one
+	// missing pull for as long as the disagreement lasts, which the next
+	// heartbeat resolves.
+	const reachable = (id: string) => id === selfId || peers.has(id);
+	const targets: Array<{ peer: Peer; direction: PullDirection }> = [];
+
+	const upstream = upstreamOf(tiering, selfId, reachable);
+	if (upstream) {
+		const peer = peers.get(upstream);
+		if (peer) targets.push({ peer, direction: "down" });
 	}
-	const masterId = self.current_master_id;
-	if (!masterId) return [];
-	const peer = activePeers(state.db).find((p) => p.nodeId === masterId);
-	return peer ? [{ peer, direction: "down" as const }] : [];
+	for (const member of tiering.snapshot) {
+		if (member.node_id === selfId) continue;
+		if (upstreamOf(tiering, member.node_id, reachable) !== selfId) continue;
+		const peer = peers.get(member.node_id);
+		if (peer) targets.push({ peer, direction: "up" });
+	}
+	return targets;
 }
 
 /** The `cluster_replication_pull` scheduler job. A no-op with no peers, so it
@@ -168,10 +194,21 @@ export function pullTargets(
 export async function replicationPullJob(
 	state: AppState,
 ): Promise<PullOutcome[]> {
+	const tiering = currentTiering(state.db);
+	const masterId = tiering?.master_node_id ?? null;
 	const targets = pullTargets(state);
 	const outcomes: PullOutcome[] = [];
 	for (const { peer, direction } of targets) {
-		outcomes.push(await pullFromPeer(state, peer, direction));
+		const outcome = await pullFromPeer(state, peer, direction);
+		outcomes.push(outcome);
+		// This job runs once a second against the master (directly, or through a
+		// leader that is itself pulling from it), so it is by far the freshest
+		// signal of master reachability available -- much fresher than the
+		// 1-minute heartbeat. Feeding §5.5's grace timer from it is free.
+		if (peer.nodeId === masterId && masterId !== state.settings.nodeId) {
+			if (outcome.unreachable) state.masterReachability.noteFailure();
+			else state.masterReachability.confirmContact();
+		}
 	}
 	return outcomes;
 }

@@ -18,6 +18,14 @@ import type { Request, Response } from "express";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
+import {
+	commitQuota,
+	type Reservation,
+	type ReservationKind,
+	releaseQuota,
+	renewQuota,
+	reserveQuota,
+} from "../cluster/quota.ts";
 import { getMasterKey } from "../config.ts";
 import { encryptFile } from "../crypto/aead.ts";
 import {
@@ -93,6 +101,10 @@ const CHUNK = 256 * 1024;
 const REQUEST_OVERHEAD_ALLOWANCE = 1024 * 1024;
 const CHUNK_UPLOAD_SIZE = 16 * 1024 * 1024;
 const CHUNK_SESSION_TTL = 12 * 3600;
+
+/** Renew the session's quota reservation on one chunk in this many. See the
+ * call site in POST /upload/chunk for why it is strided. */
+const RENEW_EVERY_CHUNKS = 25;
 const CHUNK_TOKEN_AAD = Buffer.from("chunked-upload-v1");
 
 const UNSAFE_CT = new Set([
@@ -246,7 +258,11 @@ export function checkUploadHalt(state: AppState, userId: number): void {
 }
 
 /** Exported for reuse by dropbox.ts. Mirrors
- * app/routes/dropbox.py's import of app/routes/files.py::_precheck_declared_size. */
+ * app/routes/dropbox.py's import of app/routes/files.py::_precheck_declared_size.
+ *
+ * The per-file size cap only. Quota moved to the master (§5.9) and is claimed
+ * by `reserveDeclaredSize` below — checking it locally as well would just be a
+ * second, weaker opinion that the reservation immediately overrules. */
 export function precheckDeclaredSize(
 	state: AppState,
 	user: UserRow,
@@ -259,15 +275,23 @@ export function precheckDeclaredSize(
 		);
 		throw new HttpError(413, "file exceeds max file size");
 	}
-	if (
-		usedBytes(state, user.id) + declared >
-		perm.quota_bytes + REQUEST_OVERHEAD_ALLOWANCE
-	) {
-		log.warning(
-			`upload precheck rejected user_id=${user.id} reason=user_quota declared_bytes=${declared}`,
-		);
-		throw new HttpError(413, "upload would exceed your quota");
-	}
+}
+
+/** Check the size cap, then claim the declared bytes against the user's quota
+ * *before* accepting them — which is the whole point of reserving at the front
+ * of the request rather than at finalize. A 40 GB upload that would not fit is
+ * refused in one round-trip instead of after 40 GB have crossed the wire.
+ *
+ * The caller must pass the reservation to `finalizeStoredFile`, or release it. */
+export async function reserveDeclaredSize(
+	state: AppState,
+	user: UserRow,
+	perm: PermissionRow,
+	declared: number,
+	kind: ReservationKind = "upload",
+): Promise<Reservation> {
+	precheckDeclaredSize(state, user, perm, declared);
+	return reserveQuota(state, { user, bytes: declared, kind });
 }
 
 interface FinalizeOpts {
@@ -303,6 +327,16 @@ interface FinalizeOpts {
 	 * uploader's plaintext under a mode that promises ciphertext.
 	 */
 	clientCiphertext?: boolean;
+	/**
+	 * A quota reservation already granted for these bytes (§5.9).
+	 *
+	 * Supplied by callers that claimed the space up front — every upload route,
+	 * and the torrent/remote-upload jobs, which hold theirs for the life of the
+	 * transfer. Absent, this function takes one itself around the write, which
+	 * is what makes "every path that creates a `files` row reserves" true by
+	 * construction rather than by every caller remembering.
+	 */
+	reservationUid?: string | null;
 }
 
 /** Mirrors app/routes/files.py::_finalize_stored_file -- quota check, optional
@@ -362,6 +396,9 @@ export async function finalizeStoredFile(
 	let plainHashes: Awaited<ReturnType<typeof hashFile>>;
 	try {
 		plainHashes = await hashFile(opts.workPath);
+		// Free disk stays a LOCAL check and must: it is a fact about the node that
+		// will physically hold these bytes, and the master's free space says
+		// nothing about this one's. The global cap rides the reservation instead.
 		enforceGlobalUploadCapacity(db, opts.stored);
 	} catch (err) {
 		try {
@@ -375,16 +412,31 @@ export async function finalizeStoredFile(
 		throw err;
 	}
 
-	if (usedBytes(state, user.id) + opts.stored > perm.quota_bytes) {
+	// Quota is the master's call (§5.9). A caller that already reserved hands the
+	// uid down and we settle it at the end; one that did not gets a reservation
+	// taken here, so no path reaches the INSERT below unadmitted.
+	let reservationUid = opts.reservationUid ?? null;
+	const ownsReservation = !reservationUid;
+	if (!reservationUid) {
 		try {
-			unlinkSync(opts.workPath);
-		} catch {
-			// best-effort
+			reservationUid = (
+				await reserveQuota(state, {
+					user,
+					bytes: opts.stored,
+					kind: "upload",
+				})
+			).uid;
+		} catch (err) {
+			try {
+				unlinkSync(opts.workPath);
+			} catch {
+				// best-effort
+			}
+			log.warning(
+				`upload finalize rejected user_id=${user.id} reason=user_quota stored_bytes=${opts.stored}`,
+			);
+			throw err;
 		}
-		log.warning(
-			`upload finalize rejected user_id=${user.id} reason=user_quota stored_bytes=${opts.stored}`,
-		);
-		throw new HttpError(413, "upload would exceed your quota");
 	}
 
 	const sizeBytes = opts.stored;
@@ -549,6 +601,13 @@ export async function finalizeStoredFile(
 		// (cluster/changelog.ts), so a peer picks it up on its next pull along
 		// with the blob, links and folders it depends on -- and, unlike the push
 		// this replaced, along with every later rename, move and delete too.
+		// The row exists, so the bytes are real usage now rather than reserved
+		// usage. Committing after the INSERT (not before) is what keeps the two
+		// from ever both counting: while the reservation is open the file does not
+		// exist, and the moment it does the reservation stops counting.
+		if (reservationUid) {
+			await commitQuota(state, reservationUid, sizeBytes);
+		}
 		const baseUrl = fileUrl(req, slug);
 		return {
 			file_id: fileObj.id,
@@ -570,6 +629,14 @@ export async function finalizeStoredFile(
 			} catch {
 				// best-effort
 			}
+		}
+		// Only a reservation taken *here* is released here. One handed down by a
+		// caller belongs to that caller's lifecycle -- a torrent job whose import
+		// of one file failed may still be importing others against the same
+		// reservation, and releasing it underneath them would let the rest of the
+		// job write unadmitted.
+		if (ownsReservation && reservationUid) {
+			await releaseQuota(state, reservationUid);
 		}
 		log.error(
 			`upload finalize failed owner_id=${user.id} rel_path=${opts.relPath} stored_bytes=${opts.stored}`,
@@ -624,6 +691,12 @@ interface ChunkMeta {
 	mu: number | null;
 	eis: number | null;
 	exp: number;
+	/** The quota reservation admitting this session (§5.9), claimed at init from
+	 * the declared total. It rides in the sealed token because that is where the
+	 * rest of the session lives -- there is no server-side chunk-session table,
+	 * and inventing one just to hold a uid would undo that. Optional: a token
+	 * sealed before Phase 5 has none, and finalize reserves for itself. */
+	rsv?: string;
 }
 
 function sealChunkToken(state: AppState, meta: ChunkMeta): string {
@@ -1034,80 +1107,95 @@ export function filesRouter(state: AppState): Router {
 	});
 
 	// ── chunked uploads ──────────────────────────────────────────────────
-	router.post("/upload/init", getUploadUser(state), (req, res) => {
-		try {
-			const user = req.currentUser!;
-			checkUploadHalt(state, user.id);
-			const body = req.body ?? {};
-			const prepared = prepareUpload(state, user, {
-				encryptionMode: body.encryption_mode || "none",
-				compress: !!body.compress,
-				isPermanent: body.is_permanent !== false,
-				tempDays: body.temp_days ?? null,
-				randomizeFilename: !!body.randomize_filename,
-				directoryId: body.directory_id ?? null,
-				// As above: the chunked route also finalizes with
-				// `clientCiphertext: true`, so the two halves must agree.
-				clientCiphertext: true,
-			});
-			const hasLifecycleOptions =
-				!prepared.isPermanent ||
-				prepared.tempDays !== null ||
-				body.delete_if_idle_days != null ||
-				body.archive_after_idle_days != null ||
-				(body.auto_unarchive_on_download ?? true) !== true;
-			if (hasLifecycleOptions && !prepared.perm.can_manage_lifecycle) {
-				res.status(403).json({ detail: "lifecycle options not permitted" });
-				return;
+	// Async since Phase 5 (the quota reservation is a call to the master), so it
+	// needs asyncHandler -- Express 4 does not await handlers.
+	router.post(
+		"/upload/init",
+		getUploadUser(state),
+		asyncHandler(async (req, res) => {
+			try {
+				const user = req.currentUser!;
+				checkUploadHalt(state, user.id);
+				const body = req.body ?? {};
+				const prepared = prepareUpload(state, user, {
+					encryptionMode: body.encryption_mode || "none",
+					compress: !!body.compress,
+					isPermanent: body.is_permanent !== false,
+					tempDays: body.temp_days ?? null,
+					randomizeFilename: !!body.randomize_filename,
+					directoryId: body.directory_id ?? null,
+					// As above: the chunked route also finalizes with
+					// `clientCiphertext: true`, so the two halves must agree.
+					clientCiphertext: true,
+				});
+				const hasLifecycleOptions =
+					!prepared.isPermanent ||
+					prepared.tempDays !== null ||
+					body.delete_if_idle_days != null ||
+					body.archive_after_idle_days != null ||
+					(body.auto_unarchive_on_download ?? true) !== true;
+				if (hasLifecycleOptions && !prepared.perm.can_manage_lifecycle) {
+					res.status(403).json({ detail: "lifecycle options not permitted" });
+					return;
+				}
+				const totalSize = Number(body.total_size ?? 0);
+				// Claimed before a single byte is accepted -- the reason to reserve at
+				// init rather than at finalize. A 40 GB upload that would not fit is
+				// refused in one round-trip instead of after 40 GB have crossed the wire.
+				const reservation = await reserveDeclaredSize(
+					state,
+					user,
+					prepared.perm,
+					totalSize,
+				);
+
+				const chunkSize = chunkUploadSize();
+				const n = numChunks(totalSize, chunkSize);
+				const rand = randomBytes(32).toString("hex");
+				const relPath = `${rand.slice(0, 2)}/${rand.slice(2, 4)}/${rand.slice(4)}`;
+				mkdirSync(join(storageRoot(), rand.slice(0, 2), rand.slice(2, 4)), {
+					recursive: true,
+				});
+				mkdirSync(partsDir(relPath), { recursive: true });
+
+				const meta: ChunkMeta = {
+					v: 1,
+					uid: user.id,
+					rel: relPath,
+					total: totalSize,
+					cs: chunkSize,
+					n,
+					fn: String(body.original_filename ?? "upload"),
+					ct: body.content_type ?? null,
+					enc: prepared.encryptionMode,
+					cmp: prepared.compress,
+					perm: prepared.isPermanent,
+					td: prepared.tempDays,
+					did: body.delete_if_idle_days ?? null,
+					aaid: body.archive_after_idle_days ?? null,
+					auod: body.auto_unarchive_on_download ?? true,
+					rnd: prepared.randomizeFilename,
+					dir: prepared.directory ? prepared.directory.id : null,
+					mu: body.max_uses ?? null,
+					eis: body.expires_in_seconds ?? null,
+					exp: Math.floor(Date.now() / 1000) + CHUNK_SESSION_TTL,
+					rsv: reservation.uid,
+				};
+				log.info(
+					`chunked upload initialized user_id=${user.id} total_bytes=${totalSize} chunks=${n} chunk_size=${chunkSize} encryption=${prepared.encryptionMode} directory_id=${meta.dir}`,
+				);
+				res.json({
+					upload_id: sealChunkToken(state, meta),
+					chunk_size: chunkSize,
+					num_chunks: n,
+					total: totalSize,
+					received: [],
+				});
+			} catch (err) {
+				respondError(res, err);
 			}
-			const totalSize = Number(body.total_size ?? 0);
-			precheckDeclaredSize(state, user, prepared.perm, totalSize);
-
-			const chunkSize = chunkUploadSize();
-			const n = numChunks(totalSize, chunkSize);
-			const rand = randomBytes(32).toString("hex");
-			const relPath = `${rand.slice(0, 2)}/${rand.slice(2, 4)}/${rand.slice(4)}`;
-			mkdirSync(join(storageRoot(), rand.slice(0, 2), rand.slice(2, 4)), {
-				recursive: true,
-			});
-			mkdirSync(partsDir(relPath), { recursive: true });
-
-			const meta: ChunkMeta = {
-				v: 1,
-				uid: user.id,
-				rel: relPath,
-				total: totalSize,
-				cs: chunkSize,
-				n,
-				fn: String(body.original_filename ?? "upload"),
-				ct: body.content_type ?? null,
-				enc: prepared.encryptionMode,
-				cmp: prepared.compress,
-				perm: prepared.isPermanent,
-				td: prepared.tempDays,
-				did: body.delete_if_idle_days ?? null,
-				aaid: body.archive_after_idle_days ?? null,
-				auod: body.auto_unarchive_on_download ?? true,
-				rnd: prepared.randomizeFilename,
-				dir: prepared.directory ? prepared.directory.id : null,
-				mu: body.max_uses ?? null,
-				eis: body.expires_in_seconds ?? null,
-				exp: Math.floor(Date.now() / 1000) + CHUNK_SESSION_TTL,
-			};
-			log.info(
-				`chunked upload initialized user_id=${user.id} total_bytes=${totalSize} chunks=${n} chunk_size=${chunkSize} encryption=${prepared.encryptionMode} directory_id=${meta.dir}`,
-			);
-			res.json({
-				upload_id: sealChunkToken(state, meta),
-				chunk_size: chunkSize,
-				num_chunks: n,
-				total: totalSize,
-				received: [],
-			});
-		} catch (err) {
-			respondError(res, err);
-		}
-	});
+		}),
+	);
 
 	router.get("/upload/status", getUploadUser(state), (req, res) => {
 		try {
@@ -1188,6 +1276,22 @@ export function filesRouter(state: AppState): Router {
 					return;
 				}
 				renameSync(tmp, join(parts, String(index)));
+				// A chunk landing is this session's natural heartbeat (§5.9, D-16):
+				// it pushes the reservation's inactivity window forward, so a
+				// multi-hour upload that is still making progress keeps its space
+				// while one whose client walked away stops renewing and expires.
+				//
+				// Strided rather than per chunk. On a follower every renewal is an
+				// HTTP round-trip to the master, and the window is twelve hours --
+				// renewing on one chunk in RENEW_EVERY_CHUNKS is already orders of
+				// magnitude more often than it needs to be, and needs no per-session
+				// timer to decide when.
+				if (
+					meta.rsv &&
+					(index % RENEW_EVERY_CHUNKS === 0 || index === meta.n - 1)
+				) {
+					void renewQuota(state, meta.rsv);
+				}
 				res.json({ index, num_chunks: meta.n });
 			});
 		});
@@ -1316,6 +1420,7 @@ export function filesRouter(state: AppState): Router {
 					autoUnarchiveOnDownload: meta.auod,
 					maxUses: meta.mu,
 					expiresInSeconds: meta.eis,
+					reservationUid: meta.rsv ?? null,
 				});
 				await rm(parts, { recursive: true, force: true });
 				log.info(
@@ -1342,38 +1447,48 @@ export function filesRouter(state: AppState): Router {
 		}),
 	);
 
-	router.delete("/upload", getUploadUser(state), (req, res) => {
-		let relPath: string | null = null;
-		try {
-			const user = req.currentUser!;
-			const meta = openChunkToken(
-				state,
-				String(req.query.upload_id ?? ""),
-				user,
-			);
-			relPath = meta.rel;
-			if (uploadLocks.get(relPath) === "finalizing") {
-				res.status(409).json({ detail: "finalize in progress, retry shortly" });
-				relPath = null; // don't clear a lock we don't own
-				return;
-			}
-			uploadLocks.set(relPath, "aborting");
-			rmSync(partsDir(meta.rel), { recursive: true, force: true });
+	router.delete(
+		"/upload",
+		getUploadUser(state),
+		asyncHandler(async (req, res) => {
+			let relPath: string | null = null;
 			try {
-				unlinkSync(`${join(storageRoot(), meta.rel)}.part`);
-			} catch {
-				// best-effort
+				const user = req.currentUser!;
+				const meta = openChunkToken(
+					state,
+					String(req.query.upload_id ?? ""),
+					user,
+				);
+				relPath = meta.rel;
+				if (uploadLocks.get(relPath) === "finalizing") {
+					res
+						.status(409)
+						.json({ detail: "finalize in progress, retry shortly" });
+					relPath = null; // don't clear a lock we don't own
+					return;
+				}
+				uploadLocks.set(relPath, "aborting");
+				rmSync(partsDir(meta.rel), { recursive: true, force: true });
+				try {
+					unlinkSync(`${join(storageRoot(), meta.rel)}.part`);
+				} catch {
+					// best-effort
+				}
+				// Hand the quota back now rather than letting it expire: an abort is
+				// the user telling us they are done, which is exactly the signal the
+				// inactivity window exists to infer.
+				if (meta.rsv) await releaseQuota(state, meta.rsv);
+				log.info(
+					`chunked upload aborted user_id=${user.id} total_bytes=${meta.total}`,
+				);
+				res.json({ status: "aborted" });
+			} catch (err) {
+				respondError(res, err);
+			} finally {
+				if (relPath) uploadLocks.delete(relPath);
 			}
-			log.info(
-				`chunked upload aborted user_id=${user.id} total_bytes=${meta.total}`,
-			);
-			res.json({ status: "aborted" });
-		} catch (err) {
-			respondError(res, err);
-		} finally {
-			if (relPath) uploadLocks.delete(relPath);
-		}
-	});
+		}),
+	);
 
 	// ── save / list / delete / links ────────────────────────────────────
 	router.post(
@@ -1381,7 +1496,10 @@ export function filesRouter(state: AppState): Router {
 		requireSession(state),
 		requireCsrf,
 		requireActiveUser(state),
-		(req, res) => {
+		// Async since Phase 5: the quota reservation is a call to the master.
+		// Express 4 does not await handlers, so this MUST stay inside
+		// asyncHandler or a rejection hangs the request forever.
+		asyncHandler(async (req, res) => {
 			const user = req.currentUser!;
 			const link = resolveActiveLink(db, req.params.slug);
 			if (!link) {
@@ -1419,11 +1537,17 @@ export function filesRouter(state: AppState): Router {
 			const perm = ensurePermissions(db, user.id, {
 				master: user.role === "master",
 			});
-			if (usedBytes(state, user.id) + source.size_bytes > perm.quota_bytes) {
-				res.status(413).json({ detail: "save would exceed your quota" });
-				return;
-			}
+			// A save writes no new bytes -- it bumps the source blob's ref_count --
+			// but it does create a `files` row, and logical bytes are the quota
+			// (D-17, R-5). Skipping the reservation here would let a user clone
+			// their way past `quota_bytes` for free.
+			const reservation = await reserveQuota(state, {
+				user,
+				bytes: source.size_bytes,
+				kind: "save",
+			});
 			if (!consumeUse(db, req.params.slug)) {
+				await releaseQuota(state, reservation.uid);
 				res.status(404).json({ detail: "not found" });
 				return;
 			}
@@ -1501,6 +1625,7 @@ export function filesRouter(state: AppState): Router {
 			log.info(
 				`shared file saved source_file_id=${source.id} saved_file_id=${saved.id} owner_id=${user.id} blob_id=${saved.blob_id}`,
 			);
+			await commitQuota(state, reservation.uid, source.size_bytes);
 			const base = fileUrl(req, newLinkSlug);
 			res.json({
 				file_id: saved.id,
@@ -1513,7 +1638,7 @@ export function filesRouter(state: AppState): Router {
 				encryption_mode: resolveFileEncryption(db, saved).mode,
 				access_key: recoverAccessKey(state, saved),
 			});
-		},
+		}),
 	);
 
 	/**
@@ -1532,7 +1657,8 @@ export function filesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		requirePermission(state, "can_upload"),
-		(req, res) => {
+		// Async since Phase 5 -- see the note on /:slug/save above.
+		asyncHandler(async (req, res) => {
 			const user = req.currentUser!;
 			const source = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
 				$id: req.params.fileId,
@@ -1585,10 +1711,13 @@ export function filesRouter(state: AppState): Router {
 			const perm = ensurePermissions(db, user.id, {
 				master: user.role === "master",
 			});
-			if (usedBytes(state, user.id) + source.size_bytes > perm.quota_bytes) {
-				res.status(413).json({ detail: "copy would exceed your quota" });
-				return;
-			}
+			// Same reasoning as save: no new bytes, but a new `files` row, and
+			// logical bytes are the entitlement (D-17).
+			const reservation = await reserveQuota(state, {
+				user,
+				bytes: source.size_bytes,
+				kind: "copy",
+			});
 
 			// The copy carries the source's *resolved* key, because the source's own
 			// columns are NULL whenever it inherits. It can only go on inheriting if
@@ -1681,8 +1810,9 @@ export function filesRouter(state: AppState): Router {
 			log.info(
 				`file copied source_file_id=${source.id} copy_file_id=${copy.id} owner_id=${user.id} directory_id=${copy.directory_id}`,
 			);
+			await commitQuota(state, reservation.uid, source.size_bytes);
 			res.json(serializeFiles(state, req, [copy])[0]!);
-		},
+		}),
 	);
 
 	// Session cookie, or an OAuth token carrying files:read.

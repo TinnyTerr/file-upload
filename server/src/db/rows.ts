@@ -351,20 +351,52 @@ export interface ClusterNodeRow {
 	created_at: string;
 	last_seen_at: string | null;
 	last_heartbeat_at: string | null;
+	/** Derived from the tiering snapshot (cluster/tiering.ts), never asserted by
+	 * the peer itself: 'master' | 'leader' | 'follower'. */
 	role: string;
+	/** Vestigial -- elections are gone and nothing reads it. SQLite cannot drop
+	 * a column in place, so it stays at its default. */
 	epoch: number;
+	region: string | null;
+	region_source: string;
+	rtt_ms: number | null;
+	throughput_bps: number | null;
+	ineligible: number;
+	pinned_master: number;
 }
 
-export interface ClusterSelfStateRow {
-	id: 1;
-	role: string;
-	epoch: number;
-	voted_epoch: number;
-	voted_for: string | null;
-	current_master_id: string | null;
-	current_master_url: string | null;
-	last_master_contact_at: string | null;
-	updated_at: string;
+export interface ClusterTieringRow {
+	generation: number;
+	computed_at: string;
+	reason: string;
+	master_node_id: string;
+	/** JSON `TieringMember[]`. */
+	snapshot: string;
+	/** JSON `Record<string, RegionPlan>`. */
+	regions: string;
+}
+
+export interface QuotaReservationRow {
+	uid: string;
+	user_uid: string;
+	bytes: number;
+	node_id: string;
+	kind: string;
+	state: string;
+	created_at: string;
+	renewed_at: string;
+	expires_at: string;
+	committed_bytes: number | null;
+}
+
+export interface ClusterDriftRow {
+	node_id: string;
+	/** `'<up|down|absent>:<master|leader|follower>'` -- see
+	 * cluster/tiering.ts::observedStatus. */
+	status: string;
+	observed_at: string;
+	settled_status: string | null;
+	settled_at: string | null;
 }
 
 export interface ClusterEventRow {

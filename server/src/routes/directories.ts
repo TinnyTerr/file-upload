@@ -5,6 +5,11 @@ import type { Request, Response } from "express";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
+import {
+	commitQuota,
+	releaseQuota,
+	reserveQuota,
+} from "../cluster/quota.ts";
 import { getMasterKey } from "../config.ts";
 import {
 	type EffectiveEncryption,
@@ -1144,7 +1149,10 @@ export function directoriesRouter(state: AppState): Router {
 		requireSession(state),
 		requireCsrf,
 		requirePermission(state, "can_create_directories"),
-		(req, res) => {
+		// Async since Phase 5: the quota reservation is a call to the master.
+		// Express 4 does not await handlers, so this MUST stay inside
+		// asyncHandler or a rejection hangs the request forever.
+		asyncHandler(async (req, res) => {
 			const user = req.currentUser!;
 			const sourceDir = getDirectory(db, Number(req.params.dirId));
 			if (!sourceDir) {
@@ -1245,13 +1253,14 @@ export function directoriesRouter(state: AppState): Router {
 				res.status(403).json({ detail: "permission denied: can_upload" });
 				return;
 			}
-			if (
-				usedStorageBytesForUser(db, user.id) + logicalBytes >
-				perm.quota_bytes
-			) {
-				res.status(413).json({ detail: "copy would exceed your quota" });
-				return;
-			}
+			// One reservation for the whole tree, taken before any of it is
+			// written: a folder copy creates many `files` rows and quota is
+			// logical bytes (D-17), so the sum is what has to be admitted.
+			const reservation = await reserveQuota(state, {
+				user,
+				bytes: logicalBytes,
+				kind: "copy",
+			});
 
 			// " - Copy", as everywhere else, but only when it would otherwise
 			// collide: pasting into a different folder should keep the name.
@@ -1429,8 +1438,9 @@ export function directoriesRouter(state: AppState): Router {
 			log.info(
 				`directory copied source_directory_id=${sourceDir.id} copy_directory_id=${newDir.id} owner_id=${user.id} copied_files=${copiedFiles}`,
 			);
+			await commitQuota(state, reservation.uid, logicalBytes);
 			res.json(serializeDirectories(state, req, [newDir], user)[0]!);
-		},
+		}),
 	);
 
 	/** Change what protects a folder's contents.
@@ -2429,7 +2439,8 @@ export function publicDirectoriesRouter(state: AppState): Router {
 		requireSession(state),
 		requireCsrf,
 		requireActiveUser(state),
-		(req, res) => {
+		// Async since Phase 5 -- see the note on /directories/:dirId/copy above.
+		asyncHandler(async (req, res) => {
 			const user = req.currentUser!;
 			const resolved = resolveDirectory(db, req.params.slug);
 			if (!resolved) {
@@ -2512,14 +2523,15 @@ export function publicDirectoriesRouter(state: AppState): Router {
 			const perm = ensurePermissions(db, user.id, {
 				master: user.role === "master",
 			});
-			if (
-				usedStorageBytesForUser(db, user.id) + logicalBytes >
-				perm.quota_bytes
-			) {
-				res.status(413).json({ detail: "save would exceed your quota" });
-				return;
-			}
+			// As with a file save (R-5): no new bytes, but a `files` row per
+			// member, and logical bytes are the entitlement.
+			const reservation = await reserveQuota(state, {
+				user,
+				bytes: logicalBytes,
+				kind: "save",
+			});
 			if (!consumeDirUse(db, req.params.slug)) {
+				await releaseQuota(state, reservation.uid);
 				res.status(404).json({ detail: "not found" });
 				return;
 			}
@@ -2668,6 +2680,7 @@ export function publicDirectoriesRouter(state: AppState): Router {
 				`directory saved source_directory_id=${sourceDir.id} saved_directory_id=${newDir.id} owner_id=${user.id} saved_files=${savedFiles}`,
 			);
 
+			await commitQuota(state, reservation.uid, logicalBytes);
 			res.json({
 				id: newDir.id,
 				slug: newDir.slug,
@@ -2676,7 +2689,7 @@ export function publicDirectoriesRouter(state: AppState): Router {
 				source_type: "saved",
 				access_key: recoverDirAccessKey(state, newDir),
 			});
-		},
+		}),
 	);
 
 	router.get(
