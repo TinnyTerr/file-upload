@@ -7,6 +7,10 @@ import {
 	type PermissionRow,
 	type UserRow,
 } from "../db/rows.ts";
+import {
+	pushRevocation,
+	revocationMark,
+} from "../cluster/revocation.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
@@ -248,6 +252,10 @@ export function usersRouter(state: AppState): Router {
 		requireMaster(state),
 		asyncHandler(async (req, res) => {
 			const master = req.currentUser!;
+			// Demoting a master, forcing MFA or renaming an account are all
+			// revocations in §5.9's sense -- they take something away, and a peer
+			// still honouring the old row is the hole. Pushed, not left to the pull.
+			const mark = revocationMark(state);
 			const userId = Number(req.params.userId);
 			const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 				$id: userId,
@@ -362,6 +370,7 @@ export function usersRouter(state: AppState): Router {
 					username: updated.username,
 					role: updated.role,
 					mfa_required: !!updated.mfa_required,
+					revocation: await pushRevocation(state, mark),
 				});
 			} catch (err) {
 				if (!res.headersSent) {
@@ -379,8 +388,12 @@ export function usersRouter(state: AppState): Router {
 		requireSession(state),
 		requireCsrf,
 		requireMaster(state),
-		(req, res) => {
+		asyncHandler(async (req, res) => {
 			const master = req.currentUser!;
+			// Deleting an account is the strongest revocation there is: every peer
+			// must lose the row before this call returns, or it keeps authorizing
+			// a user who no longer exists here.
+			const mark = revocationMark(state);
 			const userId = Number(req.params.userId);
 			if (userId === master.id) {
 				res.status(400).json({ detail: "cannot delete yourself" });
@@ -505,8 +518,11 @@ export function usersRouter(state: AppState): Router {
 			});
 
 			unlinkQueued(unlinkAfterCommit);
-			res.json({ status: "deleted" });
-		},
+			res.json({
+				status: "deleted",
+				revocation: await pushRevocation(state, mark),
+			});
+		}),
 	);
 
 	router.post(
@@ -514,8 +530,14 @@ export function usersRouter(state: AppState): Router {
 		requireSession(state),
 		requireCsrf,
 		requireMaster(state),
-		(req, res) => {
+		asyncHandler(async (req, res) => {
 			const master = req.currentUser!;
+			// §5.9's asymmetry: a permission edit may be a *revocation*, and a
+			// revoked flag that takes a pull interval to reach a peer is a window
+			// in which that peer still honours it. Grants riding the same push
+			// costs nothing and saves this handler from having to work out which
+			// of the two a given edit was.
+			const mark = revocationMark(state);
 			const userId = Number(req.params.userId);
 			const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 				$id: userId,
@@ -604,8 +626,8 @@ export function usersRouter(state: AppState): Router {
 			log.info(
 				`admin permissions updated target_user_id=${userId} actor_id=${master.id} fields=${JSON.stringify(changedFields.sort())}`,
 			);
-			res.json({ status: "updated" });
-		},
+			res.json({ status: "updated", revocation: await pushRevocation(state, mark) });
+		}),
 	);
 
 	return router;

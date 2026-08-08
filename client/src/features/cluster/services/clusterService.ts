@@ -4,6 +4,7 @@ import type {
 	ClusterNodeUpdate,
 	ClusterSelf,
 	ClusterTopology,
+	ConflictsResponse,
 	LinkedClusterNode,
 	NewClusterNode,
 } from "../types";
@@ -21,6 +22,21 @@ export const clusterService = {
 	 * the whole topology rule, and a second copy here could disagree with the
 	 * pulls the cluster is actually doing. */
 	topology: () => api.get<ClusterTopology>("/cluster/topology"),
+
+	/** Conflicts are recorded where they are arbitrated — the master. A
+	 * non-master answers this by reading through to it, so the panel works from
+	 * whichever node the operator happens to be signed in to. */
+	listConflicts: (includeDismissed = false) =>
+		api.get<ConflictsResponse>(
+			`/cluster/conflicts?include_dismissed=${includeDismissed ? 1 : 0}`,
+		),
+
+	dismissConflict: (id: number) => api.post(`/cluster/conflicts/${id}/dismiss`),
+
+	/** Write the losing edit again, now, on top of the winner. Not a replay —
+	 * see the route's comment: replaying the original entry would re-enter the
+	 * arbitration it already lost. */
+	reapplyConflict: (id: number) => api.post(`/cluster/conflicts/${id}/reapply`),
 
 	listNodes: () =>
 		api.get<{ nodes: ClusterNode[] }>("/cluster/nodes").then((r) => r.nodes),

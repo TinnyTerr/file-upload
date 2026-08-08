@@ -22,6 +22,8 @@ Multi-node replication lives in `server/src/cluster/*.ts`:
 - `halt.ts` — in-memory TTL'd upload halt registry (user-scope + global), gossiped over the event firehose
 - `quota.ts` — the master-side `quota_reservations` ledger and its client. **The only synchronous cross-node call on the write path.** Reserve → commit/release, sliding TTL, sweep. On the master (and on any single-node deployment) every call resolves in-process, so an unclustered server pays nothing
 - `degraded.ts` — master-reachability state machine: 5-minute restart grace during which writes are **held**, then degraded (reads only). `middleware/degradedMode.ts` is the write gate that enforces it
+- `conflicts.ts` — `replication_conflicts` and §5.8's arbitration: optimistic concurrency keyed on `master_seq`, **later timestamp wins, node id breaks the tie**, evaluated on the master alone. `winnerOf` is total and `comparableTs` clamps a clock running more than `CLOCK_SKEW_MS` fast. The rule runs inside `applyChanges`; this file owns the record, the list, dismiss and the open count
+- `revocation.ts` — §5.9's asymmetry: grants are lazy, revocations are pushed. `revocationMark` before the write, `pushRevocation` after, `POST /api/cluster/revocations` on the receiving side. It carries the *same* log entries the pull would, so a failed push costs latency and not correctness
 - `digest.ts` — cluster state digest + divergence alerting (`syncCheckJob`). No split-brain cross-check: role is derived from a generation only the master mints, so "two nodes both believe they are master" is not a state the data model can express
 - `eventBus.ts` / `eventStore.ts` / `firehoseClient.ts` — in-memory live event bus, durable `cluster_events` mirror, peer-polling consumer
 - `http.ts` — node-to-node fetch helpers (cluster-token auth, timeouts)
@@ -47,12 +49,61 @@ Multi-node replication lives in `server/src/cluster/*.ts`:
 - **The TTL slides; it is not a ceiling.** `expires_at` is an *inactivity* window (12 h, matching `CHUNK_SESSION_TTL`) pushed forward by chunk commits (strided, one in `RENEW_EVERY_CHUNKS`) and by each file of a long torrent import. Expiry means "nobody has touched this for a full window", which is the only condition under which `cluster_quota_sweep` may release the bytes.
 - **Free disk stayed local; the global cap moved to the master.** They look alike and are not: the cap is a cluster-wide budget, but free space is a fact about the node that will hold the bytes. `enforceGlobalUploadCapacity` keeps the disk check where the disk is.
 
+**Conflicts are arbitrated by the master, and the loser is kept (Phase 6, §5.8).**
+Only quota is gated on the write path, so two nodes can both accept a rename, a
+move, a permission edit or a link revocation on the same row. Detection is
+optimistic concurrency keyed on `master_seq`: every entry carries the
+`base_master_seq` the row stood at when its writer changed it, and if the row has
+moved on, the two edits are concurrent.
+
+- **Later `ts` wins; a tie goes to the higher `origin_node`.** The rule is total
+  on purpose — second-resolution timestamps collide constantly under bulk edits,
+  and a rule undefined on a tie is a rule that diverges on a tie.
+- **Only the master runs it**, once, against one clock's view of arrival. Two
+  nodes cannot reach opposite verdicts, which is the failure
+  last-write-wins-at-every-node has and this does not.
+- **Clock skew is bounded, not trusted.** An entry whose `ts` is more than
+  `CLOCK_SKEW_MS` ahead of the master's clock is compared at receipt time, or one
+  fast box would win every conflict it ever entered.
+- **A losing entry never enters the master's log** — the log is what ships down,
+  and a loser with a `master_seq` would be applied by every follower *after* the
+  winner. It goes to `replication_conflicts` alone, and the master appends a
+  **restatement** of the winning row, which is how the node that lost finds out.
+- **Redelivery is a no-op.** An entry already ordered in the log, or already
+  recorded as a loser, is skipped rather than re-applied: re-applying an accepted
+  entry would clobber whatever later edit has since won the row.
+- **Conflicts are read through to the master, not replicated.** They are rows only
+  the master writes, so the panel on any other node proxies `/cluster/conflicts`
+  to it rather than adding an eighth table to `UID_TABLES`.
+- **Re-apply is a fresh edit on top of the winner, never a replay.** Replaying the
+  original entry would re-enter the arbitration it already lost.
+
+**Revocations are pushed; grants are lazy (Phase 6, §5.9, D-13).** Permissions are
+read from the local row on every request, which is what keeps `requirePermission`
+free — and it means a change takes effect on a peer only when the log gets there.
+For a grant that is a wait; for a revocation it is a window in which a peer still
+honours something an admin took away. So `cluster/revocation.ts` pushes: the admin
+call does not return until every *reachable* node has applied the change, and the
+response carries `revocation: {acknowledged, lagging}` naming any node that
+didn't. Wired into permission edits, user updates and deletion, share- and
+folder-link edits and deletes, and `POST /files/:id/seal`.
+
+- **It is not a second replication mechanism.** What travels is exactly the
+  `replication_log` entries the write already produced, applied through exactly
+  `applyChanges`; the ordinary pull re-delivers them and dedups to nothing. A
+  failed push costs latency, not correctness.
+- **API keys are absent from that list because they are node-local** — `api_keys`
+  is not a replicated table, so there is no peer copy to revoke.
+- **The receiver does not move a cursor.** These entries did not come from the
+  peer's ordinary stream, and advancing a cursor for them would claim this node
+  had read past things it has not seen.
+
 **Degraded mode (§5.5).** A node that cannot reach the master **holds** write-path requests for a 5-minute restart grace, then goes read-only. There is no automatic failover, by design: a node cannot tell "the master died" from "I got cut off", and promoting on the second reading is the split brain the deleted `election.ts` failed to prevent. Recovery is the master returning, or `POST /api/cluster/promote` — refused unless the node is genuinely degraded, and requiring the node's own name typed back as confirmation.
 
 - `middleware/degradedMode.ts` gates **by method with a short allowlist**, mounted once in `app.ts`, rather than enumerating write routes — so it fails closed and a route added later is refused unless deliberately allowlisted. `/api/cluster` is on that list because promotion is the only way out and gating it would make degraded mode unrecoverable.
 - Reads never gate. Every read here is local by construction, which is what makes a degraded node useful rather than merely up.
 
-`routes/cluster.ts` exports `clusterRouter` (mounted at `/api/cluster`: session-authenticated management endpoints — `/token`, `/token/rotate`, `/self`, `/topology`, `/nodes` (GET/POST/PATCH/DELETE), `/retier`, enroll/unlink — **plus** cluster-token-authenticated node-to-node endpoints — `/join`, `/heartbeat`, `/ping`, `/blobs/:storedSha256`, `/digest`, `/changes`, `/tiering`) and `adminClusterRouter` (mounted at `/api/admin/cluster`: `/node-logs` + `/events`, the HTTP long-poll fallback for the websocket firehose). `server/src/ws.ts` attaches the websocket firehose directly to the `http.Server` returned by `app.listen()` in `index.ts`, since Express has no native websocket support.
+`routes/cluster.ts` exports `clusterRouter` (mounted at `/api/cluster`: session-authenticated management endpoints — `/token`, `/token/rotate`, `/self`, `/topology`, `/conflicts` (+ `/:id/dismiss`, `/:id/reapply`), `/nodes` (GET/POST/PATCH/DELETE), `/retier`, enroll/unlink — **plus** cluster-token-authenticated node-to-node endpoints — `/join`, `/heartbeat`, `/ping`, `/blobs/:storedSha256`, `/digest`, `/changes`, `/tiering`, `/revocations`) and `adminClusterRouter` (mounted at `/api/admin/cluster`: `/node-logs` + `/events`, the HTTP long-poll fallback for the websocket firehose). `server/src/ws.ts` attaches the websocket firehose directly to the `http.Server` returned by `app.listen()` in `index.ts`, since Express has no native websocket support.
 
 **Invariant:** the in-memory event sequence counter in `eventBus.ts` assumes **one process per node** (this server makes a single `app.listen()` call and never forks workers). Colliding `origin_seq` values across workers is the exact bug class that broke logins under `uvicorn --workers=4` in the old deployment — see `cluster_events`' `UNIQUE(origin_node_id, origin_seq)`. Don't introduce multi-process scaling without redesigning event sequencing.
 
@@ -62,11 +113,12 @@ Multi-node replication lives in `server/src/cluster/*.ts`:
 Parts 1–3 are the defect inventory, Part 5 the target architecture, Part 7 the
 phasing. Work happens on the `cluster-rework` branch.
 
-**Phases 0–5 are built and green** (`clusterEvents`, `clusterIdentity`,
-`clusterChangelog`, `clusterReplication`, `clusterTiering`, `clusterQuota`
-tests): the multi-node test harness, the event-pipeline fixes, ULID `uid`
-identity, the trigger-driven change log with hierarchical pull, tiering, and
-master-gated quota + degraded mode. Phase 3 deleted
+**Phases 0–6 are built and green** (`clusterEvents`, `clusterIdentity`,
+`clusterChangelog`, `clusterReplication`, `clusterTiering`, `clusterQuota`,
+`clusterConflicts`, `clusterRevocation`, `clusterTopology` tests): the
+multi-node test harness, the event-pipeline fixes, ULID `uid` identity, the
+trigger-driven change log with hierarchical pull, tiering, master-gated quota +
+degraded mode, and conflict arbitration + the synchronous revocation path. Phase 3 deleted
 `replicateFile`, `/cluster/reserve`, `/cluster/replicate`, `/cluster/export` and
 `rebaseFromMaster` outright — `seedChangeLog` writes an `upsert` entry per
 existing row the first time a populated database meets an empty log, so a
@@ -82,12 +134,16 @@ the `cluster_election_liveness` job and `digest.ts`'s split-brain check — see
 `cluster/quota.ts`, `cluster/degraded.ts` and operator promotion — see "Quota is
 master-authoritative" and "Degraded mode" above.
 
-**Phase 6 is next**: `replication_conflicts` + timestamp/node-id arbitration
-with an admin Conflicts view, and the synchronous revocation path (D-13 —
-grants lazy, revocations pushed to every reachable node before the admin call
-returns). `cluster_nodes.epoch` and `throughput_bps` are dead columns today: the
-first is vestigial (SQLite cannot drop a column in place), the second is Phase
-8's placement input.
+Phase 6 added `cluster/conflicts.ts` and `cluster/revocation.ts` — see
+"Conflicts" and "Revocations" below.
+
+**Phase 7 is next**: the identity split (D-12, D-18) — on-demand
+`/cluster/identity/fetch` for the password hash and TOTP seed, invalidation down
+the log, WebAuthn staying node-local because a credential registered against one
+node's rpID is unusable on a peer regardless of what is replicated.
+`cluster_nodes.epoch` and `throughput_bps` are dead columns today: the first is
+vestigial (SQLite cannot drop a column in place), the second is Phase 8's
+placement input.
 
 ---
 
@@ -313,7 +369,8 @@ client/src/
     cluster/               # Cluster dashboard (tier + region + generation + drift,
                            #   nodes, token, halts, manual re-tier) + the topology
                            #   diagram, whose graph comes from the server and whose
-                           #   lib/topologyLayout.ts only positions it
+                           #   lib/topologyLayout.ts only positions it. ConflictsTab
+                           #   lives here too and is mounted by the *admin* panel.
     admin/                 # Admin panel (users, files, keys, audit, storage, logs, torrents)
     media/                 # Media library: poster grid, player, publish + play-key UI
     oauth/                 # OAuth app management + the /oauth/authorize consent page
@@ -754,6 +811,11 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - Don't move the free-disk check to the master — the master's spare space says nothing about the node holding the bytes
 - Don't gate `/api/cluster` behind the degraded-mode middleware — promotion is the only way out of degraded mode
 - Don't make promotion automatic — that's the split brain the design deliberately refuses to risk
+- Don't arbitrate a conflict anywhere but the master — a verdict reached in two places is a verdict that can disagree with itself
+- Don't append a losing entry to the master's log — it would ship down and overwrite the winner on every follower; record it in `replication_conflicts` and restate the winner instead
+- Don't re-apply an entry the master has already judged — an accepted one would clobber a later edit that has since won the row, and a rejected one would overwrite the winner with the loser
+- Don't implement "re-apply" as a replay of the losing entry — write it as a fresh local edit, or it re-enters the arbitration it already lost
+- Don't leave a revocation to the pull — a stale grant is a security hole and a stale denial is only an inconvenience, which is the whole reason the two are treated differently
 - Don't poll qBittorrent once per job — one list fetch per tick, grouped by tag, covering downloading *and* seeding jobs
 - Don't refuse a torrent for being over the concurrency limit — park it in `pending` and let `promotePendingJobs` start it
 - Don't count `pending` toward `IN_FLIGHT_STATUSES` — that is the status a job sits in *because* it has no slot, so counting it deadlocks the queue

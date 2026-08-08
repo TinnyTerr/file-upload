@@ -26,6 +26,10 @@ import {
 	renewQuota,
 	reserveQuota,
 } from "../cluster/quota.ts";
+import {
+	pushRevocation,
+	revocationMark,
+} from "../cluster/revocation.ts";
 import { getMasterKey } from "../config.ts";
 import { encryptFile } from "../crypto/aead.ts";
 import {
@@ -2277,6 +2281,10 @@ export function filesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
+			// Sealing takes a file's readability away from everyone including its
+			// owner, so §5.9 puts it on the revocation path: a peer still holding
+			// the pre-seal row would keep serving readable bytes.
+			const mark = revocationMark(state);
 			const user = req.currentUser!;
 			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
 				$id: req.params.fileId,
@@ -2358,6 +2366,7 @@ export function filesRouter(state: AppState): Router {
 				key_is_password: usePassword,
 				seal_salt: salt ? salt.toString("base64url") : null,
 				seal_kdf: usePassword ? sealKdfId() : null,
+				revocation: await pushRevocation(state, mark),
 			});
 		}),
 	);
@@ -2729,7 +2738,11 @@ export function linksRouter(state: AppState): Router {
 		requireSession(state),
 		requireCsrf,
 		requirePermission(state, "can_delete_links"),
-		(req, res) => {
+		asyncHandler(async (req, res) => {
+			// Revoking a share link is §5.9's example case: the slug is the whole
+			// credential, so a peer that has not applied the deletion yet is still
+			// serving the file to anyone holding the URL.
+			const mark = revocationMark(state);
 			const user = req.currentUser!;
 			const link = db.get<LinkRow>("SELECT * FROM links WHERE id = $id", {
 				$id: req.params.linkId,
@@ -2755,8 +2768,11 @@ export function linksRouter(state: AppState): Router {
 				target: `link:${link.id}`,
 				ip: clientIp(state, req),
 			});
-			res.json({ status: "deleted" });
-		},
+			res.json({
+				status: "deleted",
+				revocation: await pushRevocation(state, mark),
+			});
+		}),
 	);
 
 	router.patch(
@@ -2764,7 +2780,10 @@ export function linksRouter(state: AppState): Router {
 		requireSession(state),
 		requireCsrf,
 		requirePermission(state, "can_regenerate_links"),
-		(req, res) => {
+		asyncHandler(async (req, res) => {
+			// Same path as the delete above: `active: false`, a shorter expiry or a
+			// lower use cap all take access away.
+			const mark = revocationMark(state);
 			const user = req.currentUser!;
 			const link = db.get<LinkRow>("SELECT * FROM links WHERE id = $id", {
 				$id: req.params.linkId,
@@ -2819,8 +2838,11 @@ export function linksRouter(state: AppState): Router {
 				target: `link:${link.id}`,
 				ip: clientIp(state, req),
 			});
-			res.json({ status: "updated" });
-		},
+			res.json({
+				status: "updated",
+				revocation: await pushRevocation(state, mark),
+			});
+		}),
 	);
 
 	return router;

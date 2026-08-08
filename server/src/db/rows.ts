@@ -389,6 +389,24 @@ export interface QuotaReservationRow {
 	committed_bytes: number | null;
 }
 
+/** One arbitrated edit that lost (§5.8). Written on the master only. */
+export interface ReplicationConflictRow {
+	id: number;
+	table_name: string;
+	row_uid: string;
+	losing_op: string;
+	/** JSON of the losing edit's replicated columns; `"null"` for a delete. */
+	losing_payload: string;
+	losing_ts: string;
+	winning_master_seq: number;
+	winning_ts: string;
+	origin_node: string;
+	winner_node: string;
+	origin_seq: number | null;
+	detected_at: string;
+	dismissed_at: string | null;
+}
+
 export interface ClusterDriftRow {
 	node_id: string;
 	/** `'<up|down|absent>:<master|leader|follower>'` -- see

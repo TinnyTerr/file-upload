@@ -11,6 +11,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/features/auth/hooks/auth";
+import { ConflictsTab } from "@/features/cluster/components/ConflictsTab";
 import { formatBytes } from "@/lib/bytes";
 import { useDiskStats } from "../hooks/useAdminDashboard";
 import { AuditTab } from "./AuditTab";
@@ -77,6 +78,14 @@ export function AdminPage() {
 			allowed: isMaster,
 		},
 		{ value: "audit", label: "Audit", el: <AuditTab />, allowed: isMaster },
+		{
+			// §5.8's record of edits a concurrent write displaced. Gated on the
+			// cluster flag rather than `isMaster`, matching the endpoint behind it.
+			value: "conflicts",
+			label: "Conflicts",
+			el: <ConflictsTab />,
+			allowed: can("can_manage_cluster"),
+		},
 		{
 			value: "backend",
 			label: "Backend",

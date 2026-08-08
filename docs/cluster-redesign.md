@@ -966,8 +966,8 @@ correctness.
 
 ### Built so far (2026-08-08)
 
-Phases **0, 1, 2, 3 and 4** are implemented and green — the door is walked through, and
-the topology in this document now actually exists.
+Phases **0 through 6** are implemented and green — the door is walked through, the
+topology in this document actually exists, and nothing is overwritten silently any more.
 
 | Phase | Landed as |
 |---|---|
@@ -977,9 +977,11 @@ the topology in this document now actually exists.
 | 3 | `cluster/changelog.ts` (triggers + apply + cursors + seed), `cluster/replication.ts` rewritten as the pull, `GET /api/cluster/changes`, `cluster_replication_pull` job |
 | 4 | `cluster/tiering.ts` — `cluster_tiering` + `cluster_drift`, the deterministic leader function, region inference, generation minting and the hold-down drift counter. **`cluster/election.ts` deleted in full**, with epochs, votes, `cluster_self_state`, `/vote-request`, `/master-assumed`, `cluster_election_liveness` and `digest.ts`'s split-brain check |
 | 5 | `cluster/quota.ts` — the `quota_reservations` ledger, `/cluster/quota/{reserve,renew,commit,release}`, sliding TTL + sweep. `cluster/degraded.ts` + `middleware/degradedMode.ts` — reachability state machine, 5-minute grace, held-request queue, write gate. `promoteSelf` + `POST /cluster/promote` + the admin banner |
+| 6 | `cluster/conflicts.ts` — `replication_conflicts`, the total timestamp/node-id rule and the skew clamp, arbitrated inside `applyChanges` on the master alone; `/cluster/conflicts` + dismiss + re-apply, and the admin **Conflicts** tab. `cluster/revocation.ts` — `revocationMark`/`pushRevocation` + `POST /cluster/revocations`, wired into permission edits, user updates and deletion, share- and folder-link edits and deletes, and sealing |
 
 Tests: `clusterEvents`, `clusterIdentity`, `clusterChangelog`, `clusterReplication`,
-`clusterTiering`, `clusterQuota`.
+`clusterTiering`, `clusterQuota`, `clusterConflicts`, `clusterRevocation`,
+`clusterTopology`.
 
 Three implementation decisions worth recording, because the text above does not predict
 them:
@@ -1056,6 +1058,32 @@ And four from Phase 5:
   the node that will physically hold the bytes, and the master's spare gigabytes say
   nothing about a follower's. Moving both would have made a full follower accept writes it
   cannot store.
+
+And four from Phase 6:
+
+- **A losing entry never enters the master's log.** §5.8 says the loser is recorded; it
+  does not say where the loser must *not* go. It must not go into `replication_log`,
+  because the log is what ships down — a loser with a `master_seq` would be applied by
+  every follower after the winner and the cluster would converge on the edit the master
+  rejected. So the loser goes to `replication_conflicts` only, and the master appends a
+  **restatement** of the winning row, which is what carries the verdict back to the node
+  that lost.
+- **Conflicts are read through to the master, not replicated.** The doc says the conflict
+  row "ships down like any other row". Making that literally true would mean adding an
+  eighth table to `UID_TABLES` — with a `uid`, triggers and a boot backfill — for rows only
+  the master ever writes. The panel on a non-master proxies to the master instead: one
+  writer, one record, and no second thing that can disagree about a verdict.
+- **Arbitration is idempotent by construction.** A peer whose cursor slips re-delivers
+  entries the master has already judged. An entry already in the log with a `master_seq`,
+  or already recorded as a loser, is skipped outright — re-applying an accepted entry
+  would clobber whatever later edit has since won the row, which is a worse outcome than
+  the redelivery it was meant to tolerate.
+- **The revocation push is delivery *earlier*, not delivery *differently*.** What it sends
+  is the `replication_log` entries the write already produced, applied through the same
+  `applyChanges`; the ordinary pull re-delivers them afterwards and dedups to nothing. If
+  the push fails entirely the cluster still converges at pull speed, so a peer being down
+  degrades latency rather than correctness — which is what lets the admin call report a
+  lagging node instead of failing.
 
 ---
 

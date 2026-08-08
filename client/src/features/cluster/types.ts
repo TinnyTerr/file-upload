@@ -97,6 +97,36 @@ export interface ClusterTopology {
 	nodes: TopologyNode[];
 }
 
+/** One arbitrated edit that lost (§5.8). Recorded on the master — the only
+ * node that arbitrates — so a panel on any other node reads through to it. */
+export interface ReplicationConflict {
+	id: number;
+	table_name: string;
+	row_uid: string;
+	/** `upsert` | `delete`. A losing delete has no payload to re-apply. */
+	losing_op: string;
+	/** JSON of the losing edit's replicated columns, or `"null"` for a delete. */
+	losing_payload: string;
+	losing_ts: string;
+	winning_master_seq: number;
+	winning_ts: string;
+	/** Who wrote the edit that lost. */
+	origin_node: string;
+	/** Who wrote the one that stands. */
+	winner_node: string;
+	origin_seq: number | null;
+	detected_at: string;
+	dismissed_at: string | null;
+}
+
+export interface ConflictsResponse {
+	conflicts: ReplicationConflict[];
+	/** Undismissed count, for the tab badge. */
+	open: number;
+	/** The node that arbitrated them — the master, whichever node was asked. */
+	node_id: string;
+}
+
 export interface ClusterHalt {
 	scope: string;
 	until: number;

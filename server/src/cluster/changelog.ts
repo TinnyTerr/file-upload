@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { nowIso } from "../db/rows.ts";
 import type { Db, SqlParams } from "../db/types.ts";
 import { getLogger } from "../logging.ts";
+import { comparableTs, recordConflict, winnerOf } from "./conflicts.ts";
 import { UID_TABLES, type UidTable } from "./identity.ts";
 
 /**
@@ -560,7 +561,7 @@ export function setCursor(
 
 // ── applying ────────────────────────────────────────────────────────────────
 
-function isChangelogTable(table: string): table is UidTable {
+export function isChangelogTable(table: string): table is UidTable {
 	return Object.hasOwn(TABLE_COLUMNS, table);
 }
 
@@ -643,6 +644,142 @@ function upsertRow(
 	);
 }
 
+// ── arbitration (§5.8, the master only) ─────────────────────────────────────
+
+/** Read from `replication_control` for the same reason the triggers do: it is
+ * the one place "am I the master" is available without application state. */
+function isMasterNode(db: Db): boolean {
+	return (
+		(db.get<{ is_master: number }>(
+			"SELECT is_master FROM replication_control WHERE id = 1",
+		)?.is_master ?? 0) === 1
+	);
+}
+
+/** The entry that currently holds this row's ordering — the highest
+ * `master_seq` the master has assigned for it. Null for a row the master has
+ * never ordered, which is a row nothing can conflict with yet. */
+function committedEntry(
+	db: Db,
+	table: string,
+	uid: string,
+): LogRow | undefined {
+	return db.get<LogRow>(
+		`SELECT seq, master_seq, base_master_seq, table_name, row_uid, op, payload,
+            origin_node, origin_seq, ts
+       FROM replication_log
+      WHERE table_name = $table AND row_uid = $uid AND master_seq IS NOT NULL
+      ORDER BY master_seq DESC LIMIT 1`,
+		{ $table: table, $uid: uid },
+	);
+}
+
+/** Has this exact entry already been arbitrated here? Either it was accepted
+ * (it is in the log, ordered) or it lost (it is in the conflicts table).
+ *
+ * Master-only, and deliberately so: re-applying an accepted entry would clobber
+ * a *later* edit that has since won the row, and re-applying a rejected one
+ * would overwrite the winner with the loser. On a follower the redelivery path
+ * stays as it was — that is how a node adopts the `master_seq` for an entry it
+ * originated. */
+function alreadyArbitrated(db: Db, entry: ChangeEntry): boolean {
+	const ordered = db.get<{ seq: number }>(
+		`SELECT seq FROM replication_log
+      WHERE origin_node = $origin AND origin_seq = $originSeq AND master_seq IS NOT NULL`,
+		{ $origin: entry.origin_node, $originSeq: entry.origin_seq },
+	);
+	if (ordered) return true;
+	return !!db.get<{ id: number }>(
+		"SELECT id FROM replication_conflicts WHERE origin_node = $origin AND origin_seq = $originSeq",
+		{ $origin: entry.origin_node, $originSeq: entry.origin_seq },
+	);
+}
+
+/** Re-append the row's winning state so the node whose edit lost converges.
+ *
+ * The loser is never written to the master's log, so it never ships down; what
+ * ships down is this restatement, which the losing node applies like any other
+ * entry. A row that has since been deleted restates as a delete — "the winner"
+ * is whatever the master holds, including its absence. */
+function restateWinner(db: Db, table: UidTable, uid: string): void {
+	const exists = db.get<{ id: number }>(
+		`SELECT id FROM ${table} WHERE uid = $uid`,
+		{ $uid: uid },
+	);
+	if (exists) {
+		db.run(appendSql(table, `${table}.uid = $uid`), { $uid: uid });
+		return;
+	}
+	db.run(
+		`INSERT INTO replication_log
+       (table_name, row_uid, op, payload, base_master_seq, origin_node, ts)
+     VALUES ($table, $uid, 'delete', NULL,
+       (SELECT MAX(l.master_seq) FROM replication_log l
+         WHERE l.table_name = $table AND l.row_uid = $uid),
+       ${NODE_ID_SQL}, ${NOW_SQL})`,
+		{ $table: table, $uid: uid },
+	);
+}
+
+/** The ordering the master just gave an entry it accepted. Read back rather
+ * than predicted: `master_seq` is assigned by the log-fixup trigger, and
+ * guessing at `MAX(seq)` would be a second copy of that rule. */
+function masterSeqOf(db: Db, entry: ChangeEntry): number {
+	return (
+		db.get<{ master_seq: number | null }>(
+			`SELECT master_seq FROM replication_log
+        WHERE origin_node = $origin AND origin_seq = $originSeq`,
+			{ $origin: entry.origin_node, $originSeq: entry.origin_seq },
+		)?.master_seq ?? 0
+	);
+}
+
+type Verdict =
+	/** Write it. `committed` is set only when the incoming edit *beat* an edit
+	 * already here — the loser to record once the winner has an ordering. */
+	| { kind: "apply"; committed?: LogRow }
+	/** Already decided once; the row state here already reflects the outcome. */
+	| { kind: "skip" }
+	/** Concurrent, and the edit already committed here wins. */
+	| { kind: "reject"; committed: LogRow };
+
+/** §5.8, on the master and nowhere else. */
+function arbitrate(db: Db, entry: ChangeEntry, receivedAt: string): Verdict {
+	if (alreadyArbitrated(db, entry)) return { kind: "skip" };
+	const committed = committedEntry(db, entry.table_name, entry.row_uid);
+	// Nothing ordered this row yet, or the writer edited the version this node
+	// holds: not concurrent, so there is nothing to arbitrate.
+	if (!committed) return { kind: "apply" };
+	if (entry.base_master_seq === committed.master_seq) return { kind: "apply" };
+
+	const winner = winnerOf(
+		{ ts: committed.ts, origin_node: committed.origin_node },
+		{
+			ts: comparableTs(entry.ts, receivedAt),
+			origin_node: entry.origin_node,
+		},
+	);
+	return winner === "incoming"
+		? { kind: "apply", committed }
+		: { kind: "reject", committed };
+}
+
+/** Write a row as an ordinary *local* change — unsuppressed, so the triggers
+ * log it as this node's own edit, with a fresh timestamp and whatever
+ * `base_master_seq` the row now stands at.
+ *
+ * That is exactly what re-applying a losing edit has to be (§5.8): a new edit
+ * on top of the winner, not a replay. Replaying the original entry would
+ * re-enter it into the arbitration it already lost, and it would lose again. */
+export function applyLocalUpsert(
+	db: Db,
+	table: UidTable,
+	uid: string,
+	payload: Record<string, unknown>,
+): void {
+	upsertRow(db, table, uid, payload);
+}
+
 export interface ApplyResult {
 	/** Entries written locally. */
 	applied: number;
@@ -668,6 +805,10 @@ export function applyChanges(
 ): ApplyResult {
 	let applied = 0;
 	let cursor = startCursor;
+	// Arbitration is the master's job alone (§5.8), and the answer cannot change
+	// mid-batch: a node that stopped being master would be applying a batch it
+	// no longer orders, and one generation lands between pulls, not inside one.
+	const arbitrating = isMasterNode(db);
 	for (const entry of entries) {
 		if (!isChangelogTable(entry.table_name)) {
 			// A peer running a newer version replicating a table this node does not
@@ -682,6 +823,32 @@ export function applyChanges(
 		const table = entry.table_name;
 		try {
 			db.transaction(() => {
+				const verdict: Verdict = arbitrating
+					? arbitrate(db, entry, nowIso())
+					: { kind: "apply" };
+				if (verdict.kind === "skip") return;
+				if (verdict.kind === "reject") {
+					// The loser is not written to the row and never enters the log, so
+					// it cannot ship down and overwrite the winner. What ships instead
+					// is a restatement of the winning state, which is how the node that
+					// lost finds out it lost.
+					const recorded = recordConflict(db, {
+						table_name: table,
+						row_uid: entry.row_uid,
+						losing_op: entry.op,
+						losing_payload: entry.payload
+							? JSON.stringify(entry.payload)
+							: "null",
+						losing_ts: entry.ts,
+						winning_master_seq: verdict.committed.master_seq ?? 0,
+						winning_ts: verdict.committed.ts,
+						origin_node: entry.origin_node,
+						winner_node: verdict.committed.origin_node,
+						origin_seq: entry.origin_seq,
+					});
+					if (recorded) restateWinner(db, table, entry.row_uid);
+					return;
+				}
 				db.run("UPDATE replication_control SET suppressed = 1 WHERE id = 1");
 				try {
 					if (entry.op === "delete") {
@@ -722,6 +889,23 @@ export function applyChanges(
 						$ts: entry.ts,
 					},
 				);
+				if (verdict.committed) {
+					// The incoming edit beat one that was already committed here. The
+					// winner ships down on its own; what needs recording is the edit it
+					// displaced, which its author still believes took effect.
+					recordConflict(db, {
+						table_name: table,
+						row_uid: entry.row_uid,
+						losing_op: verdict.committed.op,
+						losing_payload: verdict.committed.payload ?? "null",
+						losing_ts: verdict.committed.ts,
+						winning_master_seq: masterSeqOf(db, entry),
+						winning_ts: entry.ts,
+						origin_node: verdict.committed.origin_node,
+						winner_node: entry.origin_node,
+						origin_seq: verdict.committed.origin_seq,
+					});
+				}
 			});
 		} catch (err) {
 			const reason =

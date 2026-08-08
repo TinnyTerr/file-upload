@@ -44,6 +44,10 @@ import {
 import { HttpError } from "../httpError.ts";
 import { newSlug } from "../links.ts";
 import { getLogger } from "../logging.ts";
+import {
+	pushRevocation,
+	revocationMark,
+} from "../cluster/revocation.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
 import {
@@ -2101,7 +2105,11 @@ export function directoriesRouter(state: AppState): Router {
 		requireSession(state),
 		requireCsrf,
 		requireActiveUser(state),
-		(req, res) => {
+		asyncHandler(async (req, res) => {
+			// Deactivating a folder link, shortening its life or capping its uses
+			// are revocations (§5.9): a peer serving the old row keeps handing the
+			// folder out. Pushed rather than left to the pull.
+			const mark = revocationMark(state);
 			const user = req.currentUser!;
 			const perm = ensurePermissions(db, user.id, {
 				master: user.role === "master",
@@ -2170,8 +2178,11 @@ export function directoriesRouter(state: AppState): Router {
 				"SELECT * FROM directory_links WHERE id = $id",
 				{ $id: lk.id },
 			)!;
-			res.json(serializeDirLink(updated, req));
-		},
+			res.json({
+				...serializeDirLink(updated, req),
+				revocation: await pushRevocation(state, mark),
+			});
+		}),
 	);
 
 	router.delete(
@@ -2179,7 +2190,8 @@ export function directoriesRouter(state: AppState): Router {
 		requireSession(state),
 		requireCsrf,
 		requireActiveUser(state),
-		(req, res) => {
+		asyncHandler(async (req, res) => {
+			const mark = revocationMark(state);
 			const user = req.currentUser!;
 			const perm = ensurePermissions(db, user.id, {
 				master: user.role === "master",
@@ -2215,8 +2227,11 @@ export function directoriesRouter(state: AppState): Router {
 				target: `directory_link:${lk.id}`,
 				ip: clientIp(state, req),
 			});
-			res.json({ status: "deleted" });
-		},
+			res.json({
+				status: "deleted",
+				revocation: await pushRevocation(state, mark),
+			});
+		}),
 	);
 
 	return router;

@@ -28,6 +28,46 @@ export function useClusterTopology() {
 	});
 }
 
+/** The Conflicts view (§5.8). Both mutations invalidate the list rather than
+ * patching it: re-applying writes a new edit, which is a change to the row
+ * itself and not just to this record. */
+export function useConflicts(includeDismissed: boolean) {
+	const qc = useQueryClient();
+	const invalidate = () =>
+		qc.invalidateQueries({ queryKey: ["cluster", "conflicts"] });
+
+	const list = useQuery({
+		queryKey: ["cluster", "conflicts", includeDismissed] as const,
+		queryFn: () => clusterService.listConflicts(includeDismissed),
+		refetchInterval: 30000,
+	});
+
+	const dismiss = useMutation({
+		mutationFn: (id: number) => clusterService.dismissConflict(id),
+		onSuccess: () => {
+			toast.success("Conflict dismissed");
+			invalidate();
+		},
+		onError: (err) =>
+			toast.error("Couldn't dismiss", { description: errorMessage(err) }),
+	});
+
+	const reapply = useMutation({
+		mutationFn: (id: number) => clusterService.reapplyConflict(id),
+		onSuccess: () => {
+			toast.success("Re-applied", {
+				description:
+					"The losing edit was written again as a fresh change, on top of the winner.",
+			});
+			invalidate();
+		},
+		onError: (err) =>
+			toast.error("Couldn't re-apply", { description: errorMessage(err) }),
+	});
+
+	return { list, dismiss, reapply };
+}
+
 export function useClusterNodes() {
 	const qc = useQueryClient();
 	const invalidate = () => {

@@ -567,6 +567,41 @@ CREATE TABLE IF NOT EXISTS replication_log (
 CREATE INDEX IF NOT EXISTS ix_replication_log_row ON replication_log(table_name, row_uid, master_seq);
 CREATE INDEX IF NOT EXISTS ix_replication_log_master_seq ON replication_log(master_seq);
 
+-- ── conflict records (cluster/conflicts.ts, redesign §5.8) ─────────────────
+--
+-- Written by the master alone, because the master alone arbitrates: an edit
+-- that arrives with a stale `base_master_seq` is concurrent with one already
+-- committed, and the later timestamp wins (node id breaking the tie). The
+-- loser is never silently dropped -- it is written here, with enough of the
+-- attempt to re-apply it by hand.
+--
+-- `origin_node`/`origin_seq` identify the *losing* edit and are UNIQUE
+-- together: an entry re-delivered because a peer's cursor slipped must not
+-- record the same conflict twice, and that dedup is also what stops the
+-- master restating the winner on every redelivery.
+CREATE TABLE IF NOT EXISTS replication_conflicts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  table_name TEXT NOT NULL,
+  row_uid TEXT NOT NULL,
+  -- 'upsert' | 'delete' -- a delete carries no payload, and an admin looking
+  -- at the row still needs to know that is what lost.
+  losing_op TEXT NOT NULL DEFAULT 'upsert',
+  losing_payload TEXT NOT NULL,
+  losing_ts TEXT NOT NULL,
+  winning_master_seq INTEGER NOT NULL,
+  winning_ts TEXT NOT NULL,
+  origin_node TEXT NOT NULL,        -- who wrote the losing edit
+  winner_node TEXT NOT NULL,        -- who wrote the winning one
+  -- The losing entry's seq in its own origin's log. Whichever edit lost, it
+  -- was a real log entry somewhere, so this identifies it either way.
+  origin_seq INTEGER,
+  detected_at TEXT NOT NULL,
+  dismissed_at TEXT,
+  UNIQUE(origin_node, origin_seq)
+);
+CREATE INDEX IF NOT EXISTS ix_replication_conflicts_open
+  ON replication_conflicts(dismissed_at, id);
+
 CREATE TABLE IF NOT EXISTS replication_cursors (
   peer_node_id TEXT NOT NULL,
   direction    TEXT NOT NULL,       -- 'up' (from a child) | 'down' (from the parent)

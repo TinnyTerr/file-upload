@@ -4,7 +4,19 @@ import type { NextFunction, Request, Response } from "express";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
-import { logHead, readChanges } from "../cluster/changelog.ts";
+import {
+	applyLocalUpsert,
+	type ChangeEntry,
+	isChangelogTable,
+	logHead,
+	readChanges,
+} from "../cluster/changelog.ts";
+import {
+	dismissConflict,
+	getConflict,
+	listConflicts,
+	openConflictCount,
+} from "../cluster/conflicts.ts";
 import { masterStatus } from "../cluster/degraded.ts";
 import { computeDigest } from "../cluster/digest.ts";
 import { readOwnEvents } from "../cluster/eventStore.ts";
@@ -18,6 +30,7 @@ import {
 	renewReservation,
 	settleReservation,
 } from "../cluster/quota.ts";
+import { applyPushedRevocation } from "../cluster/revocation.ts";
 import {
 	currentTiering,
 	isMaster,
@@ -32,6 +45,7 @@ import {
 import { buildTopology } from "../cluster/topology.ts";
 import { setEnvValue } from "../config.ts";
 import { type ClusterNodeRow, nowIso } from "../db/rows.ts";
+import { HttpError } from "../httpError.ts";
 import { getLogger, queryBackendLogs } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
@@ -118,26 +132,35 @@ function serializeNode(node: ClusterNodeRow) {
 	};
 }
 
+/** Whether this request carries *our* cluster token. Separate from the guard
+ * below because one route (the Conflicts read-through) has to tell a peer call
+ * from an operator's session and dispatch to a different auth for each — a
+ * bearer that is not this token is left to the session path, where an API key
+ * or OAuth token is judged on its own terms. */
+export function clusterTokenPresented(state: AppState, req: Request): boolean {
+	const header = req.header("authorization") ?? "";
+	let presented = header.startsWith("Bearer ")
+		? header.slice("Bearer ".length).trim()
+		: "";
+	if (!presented) presented = (req.header("x-cluster-token") ?? "").trim();
+	const expected = state.clusterToken || "";
+	const presentedBuf = Buffer.from(presented);
+	const expectedBuf = Buffer.from(expected);
+	return (
+		!!presented &&
+		!!expected &&
+		presentedBuf.length === expectedBuf.length &&
+		timingSafeEqual(presentedBuf, expectedBuf)
+	);
+}
+
 /** Authenticate a request by the cluster token (Bearer or X-Cluster-Token).
  * Distinct from API-key/session auth: this single token grants read/write
  * access to node-to-node membership/replication endpoints regardless of
  * which user (if any) is behind the request. */
 export function requireClusterToken(state: AppState) {
 	return (req: Request, res: Response, next: NextFunction): void => {
-		const header = req.header("authorization") ?? "";
-		let presented = header.startsWith("Bearer ")
-			? header.slice("Bearer ".length).trim()
-			: "";
-		if (!presented) presented = (req.header("x-cluster-token") ?? "").trim();
-		const expected = state.clusterToken || "";
-		const presentedBuf = Buffer.from(presented);
-		const expectedBuf = Buffer.from(expected);
-		const ok =
-			!!presented &&
-			!!expected &&
-			presentedBuf.length === expectedBuf.length &&
-			timingSafeEqual(presentedBuf, expectedBuf);
-		if (!ok) {
+		if (!clusterTokenPresented(state, req)) {
 			res.status(401).json({ detail: "invalid cluster token" });
 			return;
 		}
@@ -257,6 +280,148 @@ export function clusterRouter(state: AppState): Router {
 	router.get("/topology", requireCluster, (_req, res) => {
 		res.json(buildTopology(state));
 	});
+
+	// ── conflicts (redesign §5.8) ───────────────────────────────────────────
+	//
+	// Arbitration happens on the master and the record lives there, because a
+	// verdict reached in two places is a verdict that can disagree with itself.
+	// So the panel on any other node reads through to the master rather than
+	// answering from a local table that would always be empty. `managerOrPeer`
+	// is what lets one path serve both the operator's session and that
+	// read-through.
+
+	const managerOrPeer = (
+		req: Request,
+		res: Response,
+		next: NextFunction,
+	): void => {
+		if (clusterTokenPresented(state, req)) {
+			clusterAuth(req, res, next);
+			return;
+		}
+		requireCluster(req, res, next);
+	};
+
+	/** The master as a peer we can call: its URL from the generation, its token
+	 * from the `cluster_nodes` row we linked it through. */
+	function masterPeer(): { baseUrl: string; token: string } | null {
+		const tiering = currentTiering(db);
+		const masterId = tiering?.master_node_id;
+		if (!masterId || masterId === state.settings.nodeId) return null;
+		const row = db.get<ClusterNodeRow>(
+			"SELECT * FROM cluster_nodes WHERE node_id = $id",
+			{ $id: masterId },
+		);
+		if (!row?.base_url || !row.token) return null;
+		return { baseUrl: row.base_url.replace(/\/$/, ""), token: row.token };
+	}
+
+	/** Hand a conflicts request to the master. Returns false when this node *is*
+	 * the master (answer locally) and throws an HttpError when it should be
+	 * proxying but can't reach anyone. */
+	async function proxyToMaster(
+		res: Response,
+		path: string,
+		payload?: unknown,
+	): Promise<boolean> {
+		if (isMaster(state)) return false;
+		const peer = masterPeer();
+		if (!peer) {
+			throw new HttpError(
+				503,
+				"conflicts are recorded on the master, and this node cannot reach one",
+			);
+		}
+		const url = `${peer.baseUrl}/api/cluster${path}`;
+		try {
+			const body =
+				payload === undefined
+					? await clusterHttp.getJson(url, peer.token)
+					: await clusterHttp.postJson(url, peer.token, payload);
+			res.json(body ?? {});
+		} catch (err) {
+			const reason =
+				err instanceof ClusterHTTPError ? err.message : String(err);
+			throw new HttpError(502, `the master refused the request: ${reason}`);
+		}
+		return true;
+	}
+
+	router.get(
+		"/conflicts",
+		managerOrPeer,
+		asyncHandler(async (req, res) => {
+			const includeDismissed = req.query.include_dismissed === "1";
+			const limit = Number(req.query.limit ?? 100) || 100;
+			const query = `?include_dismissed=${includeDismissed ? 1 : 0}&limit=${limit}`;
+			if (await proxyToMaster(res, `/conflicts${query}`)) return;
+			res.json({
+				conflicts: listConflicts(db, { includeDismissed, limit }),
+				open: openConflictCount(db),
+				node_id: state.settings.nodeId,
+			});
+		}),
+	);
+
+	router.post(
+		"/conflicts/:id(\\d+)/dismiss",
+		managerOrPeer,
+		asyncHandler(async (req, res) => {
+			const id = Number(req.params.id);
+			if (await proxyToMaster(res, `/conflicts/${id}/dismiss`, {})) return;
+			if (!dismissConflict(db, id)) {
+				throw new HttpError(404, "no such open conflict");
+			}
+			res.json({ status: "dismissed" });
+		}),
+	);
+
+	// Re-apply is a *fresh edit on top of the winner*, never a replay: the
+	// losing payload is written as a local change, so it gets a new timestamp
+	// and a base_master_seq of wherever the row now stands, and travels the
+	// ordinary way. Replaying it as the original entry would re-enter it into
+	// the same arbitration it already lost.
+	router.post(
+		"/conflicts/:id(\\d+)/reapply",
+		managerOrPeer,
+		asyncHandler(async (req, res) => {
+			const id = Number(req.params.id);
+			if (await proxyToMaster(res, `/conflicts/${id}/reapply`, {})) return;
+			const conflict = getConflict(db, id);
+			if (!conflict) throw new HttpError(404, "no such conflict");
+			if (conflict.losing_op !== "upsert") {
+				throw new HttpError(
+					400,
+					"the losing edit was a delete; re-apply it by deleting the row",
+				);
+			}
+			if (!isChangelogTable(conflict.table_name)) {
+				throw new HttpError(400, "that table no longer replicates");
+			}
+			const payload = JSON.parse(conflict.losing_payload) as Record<
+				string,
+				unknown
+			> | null;
+			if (!payload)
+				throw new HttpError(400, "the losing edit carried no payload");
+			const exists = db.get<{ id: number }>(
+				`SELECT id FROM ${conflict.table_name} WHERE uid = $uid`,
+				{ $uid: conflict.row_uid },
+			);
+			if (!exists) {
+				throw new HttpError(409, "the row no longer exists");
+			}
+			applyLocalUpsert(db, conflict.table_name, conflict.row_uid, payload);
+			dismissConflict(db, id);
+			recordAudit(db, {
+				actor: req.currentUser?.username ?? "cluster",
+				action: "cluster.conflict_reapplied",
+				target: `${conflict.table_name}:${conflict.row_uid}`,
+				ip: clientIp(state, req),
+			});
+			res.json({ status: "reapplied" });
+		}),
+	);
 
 	router.get("/nodes", requireCluster, (_req, res) => {
 		const nodes = db.all<ClusterNodeRow>(
@@ -634,6 +799,24 @@ export function clusterRouter(state: AppState): Router {
 			head: logHead(db),
 			count: entries.length,
 		});
+	});
+
+	// ── pushed revocations (redesign §5.9, D-13) ────────────────────────────
+	//
+	// The same entries the pull would have carried, delivered early because a
+	// stale *grant* is a security hole and the operator is waiting. Applied
+	// through the ordinary apply path, so a redelivery by the pull afterwards
+	// dedups to nothing.
+
+	router.post("/revocations", clusterAuth, (req, res) => {
+		const entries = Array.isArray(req.body?.entries)
+			? (req.body.entries as ChangeEntry[])
+			: [];
+		if (entries.length === 0) {
+			res.json({ applied: 0 });
+			return;
+		}
+		res.json(applyPushedRevocation(state, entries));
 	});
 
 	// ── tiering (redesign §5.3-5.4) ─────────────────────────────────────────
