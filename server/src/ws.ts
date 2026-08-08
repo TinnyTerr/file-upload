@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import type { Server as HttpServer, IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
 import type { Request } from "express";
 import { type WebSocket, WebSocketServer } from "ws";
 import type { AppState } from "./appState.ts";
@@ -57,10 +58,32 @@ function logConnection(ws: WebSocket, path: string, who: string): void {
 	});
 }
 
-/** A refused upgrade is logged at WARNING: it is either a misconfigured client
- * or someone probing the endpoints, and neither should need DEBUG to see. */
+/**
+ * A refused upgrade is logged at WARNING: it is either a misconfigured client
+ * or someone probing the endpoints, and neither should need DEBUG to see.
+ *
+ * **This log line is the only diagnostic.** The socket is closed without an
+ * HTTP response, so from outside every refusal looks identical — a wrong path,
+ * a wrong cluster token and a missing session all surface as the same bare TCP
+ * close, which a reverse proxy renders as an unexplained `502 Bad Gateway`.
+ *
+ * That is not a choice, and it is worth recording so nobody spends the
+ * afternoon re-discovering it: **Bun (1.3.11) silently discards anything
+ * written to the socket handed to a `node:http` `'upgrade'` handler.** RFC 6455
+ * §4.2.2 permits answering a failed handshake with a normal HTTP response, and
+ * `socket.end(response)`, `write()` + `destroy()`, `write()` + delayed
+ * `destroy()`, and `write()` with no close at all were all measured against a
+ * minimal `node:http` server on this runtime — every one produced zero bytes on
+ * the wire. Returning a real 404/401 needs the server to move off `app.listen()`
+ * onto `Bun.serve`, whose native upgrade path can return a `Response`; that is a
+ * bigger change than this comment's problem justifies.
+ *
+ * So: when someone reports a 502 from a websocket endpoint, read this log line.
+ * "no websocket route at this path" means they got the URL wrong (almost always
+ * a missing `/api` prefix); "cluster token mismatch" means the URL was right.
+ */
 function rejectUpgrade(
-	socket: { destroy(): void },
+	socket: Duplex,
 	path: string,
 	ip: string,
 	reason: string,
@@ -214,7 +237,15 @@ export function setupWebSockets(server: HttpServer, state: AppState): void {
 			return;
 		}
 
-		rejectUpgrade(socket, path, ip, "no websocket route at this path");
+		rejectUpgrade(
+			socket,
+			path,
+			ip,
+			// Names the missing prefix explicitly: this exact mistake is what a
+			// 502 from the firehose almost always is, and the log line is the only
+			// place a reader can be told (see rejectUpgrade).
+			`no websocket route at this path (data endpoints live under /api, e.g. /api${path})`,
+		);
 	});
 
 	log.info(
