@@ -589,13 +589,11 @@ export function clusterRouter(state: AppState): Router {
 	return router;
 }
 
-/** Mirrors app/routes/ws.py's admin_router (`/api/admin/cluster/*`) REST
+/** Mirrors app/routes/ws.py's admin_router (`/admin/cluster/*`) REST
  * surface -- node-logs and the HTTP long-poll firehose fallback. The
- * websocket firehose itself (`/api/admin/cluster/firehose`) is set up
+ * websocket firehose itself (`/admin/cluster/firehose`) is set up
  * separately in server/src/ws.ts since it needs the raw http.Server.
- * Mounted at /api/admin/cluster in app.ts -- the `/api` prefix is part of the
- * public URL and clients must include it, or ws.ts's upgrade handler finds no
- * route and destroys the socket (a proxy renders that as a bare 502). */
+ * Mounted at /admin/cluster in app.ts. */
 export function adminClusterRouter(state: AppState): Router {
 	const router = Router();
 	const clusterAuth = requireClusterToken(state);

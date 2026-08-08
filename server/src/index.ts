@@ -48,7 +48,7 @@ void joinCluster(state).catch((err) => {
 const app = createApp(state);
 const port = Number(process.env.PORT ?? 8000);
 
-// The websocket firehose (/api/ws/events, /api/admin/cluster/firehose) needs the
+// The websocket firehose (/ws/events, /admin/cluster/firehose) needs the
 // raw http.Server that app.listen() returns -- Express itself has no
 // websocket support.
 const server = app.listen(port, () => {
