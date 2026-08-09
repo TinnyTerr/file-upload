@@ -26,11 +26,8 @@ import {
 	renewQuota,
 	reserveQuota,
 } from "../cluster/quota.ts";
-import {
-	pushRevocation,
-	revocationMark,
-} from "../cluster/revocation.ts";
-import { getMasterKey } from "../config.ts";
+import { pushRevocation, revocationMark } from "../cluster/revocation.ts";
+import { configValue, getMasterKey } from "../config.ts";
 import { encryptFile } from "../crypto/aead.ts";
 import {
 	keyScopeOf,
@@ -741,7 +738,7 @@ function openChunkToken(
 
 /** Exported for reuse by dropbox.ts. */
 export function chunkUploadSize(): number {
-	const raw = process.env.FILEUPLOAD_CHUNK_SIZE;
+	const raw = configValue("FILEUPLOAD_CHUNK_SIZE");
 	if (raw) {
 		const v = Number(raw);
 		if (v > 0) return v;

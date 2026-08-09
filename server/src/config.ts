@@ -10,6 +10,84 @@ import {
 } from "node:fs";
 import { hostname } from "node:os";
 import { dirname } from "node:path";
+import { HttpError } from "./httpError.ts";
+
+/**
+ * Configuration has one namespace and two sources: `data/app.env` and the
+ * process environment. A variable set on the command line (or in a unit file,
+ * or a container's `-e`) is read exactly as if it were a line in `app.env`,
+ * and **wins** over one -- which is what lets a value that can only be known
+ * at launch be supplied at launch.
+ *
+ * Two rules make that safe:
+ *
+ * - **The environment is never written back.** `app.env` is this node's
+ *   durable record; the environment is this boot's overlay. Persisting an
+ *   overlay would leave a second answer on disk that silently takes over the
+ *   day the variable is dropped -- for `SECRET_KEY` that is every session
+ *   invalidated, where the *absent* key is a loud startup error instead.
+ * - **An environment-supplied key cannot be written from the admin panel.**
+ *   `setEnvValue` refuses it rather than persisting a value the running
+ *   process would go on ignoring (`ConfigLockedError`).
+ */
+
+/** Every key resolved through this module. A key outside this list is only
+ * read from the environment when `app.env` already carries it -- so anything
+ * you can put in the file you can also set in the environment, but a stray
+ * variable named like a config key can't reach a value the app doesn't have.
+ *
+ * `FILEUPLOAD_CONFIG` is deliberately absent: it names the file, so it can
+ * only ever come from the environment. */
+export const CONFIG_KEYS = [
+	"APP_ENV",
+	"DATABASE_URL",
+	"SECRET_KEY",
+	"MASTER_KEY_B64",
+	"TRUST_PROXY",
+	"ALLOWED_HOSTS",
+	"CLUSTER_TOKEN",
+	"NODE_ID",
+	"NODE_NAME",
+	"NODE_ROLE",
+	"NODE_REGION",
+	"CLUSTER_REGION_RTT_MS",
+	"NODE_URL",
+	"MASTER_URL",
+	"MASTER_TOKEN",
+	"ARCHIVE_ENABLED",
+	"REPLICATION_MODE",
+	"CACHE_MAX_BYTES",
+	"QBITTORRENT_URL",
+	"QBITTORRENT_USERNAME",
+	"QBITTORRENT_PASSWORD",
+	"QBITTORRENT_SAVE_PATH",
+	"TORRENT_CONTENT_PATH",
+	"QBITTORRENT_SEEDING",
+	"QBITTORRENT_SEED_RATIO",
+	"QBITTORRENT_SEED_MINUTES",
+	"REALDEBRID_API_KEY",
+	"REALDEBRID_ENABLED",
+	"PORT",
+	"LOG_LEVEL",
+	"FILEUPLOAD_STORAGE",
+	"FILEUPLOAD_THUMBNAILS",
+	"FILEUPLOAD_DEBRID",
+	"FILEUPLOAD_CHUNK_SIZE",
+] as const;
+
+const CONFIG_KEY_SET: ReadonlySet<string> = new Set(CONFIG_KEYS);
+
+/** Thrown when a write would be shadowed by the environment. A 409 rather than
+ * a silent no-op: the operator has to change the variable, not the file. */
+export class ConfigLockedError extends HttpError {
+	constructor(public readonly key: string) {
+		super(
+			409,
+			`${key} is set in this node's environment and cannot be changed here -- change the variable and restart`,
+		);
+		this.name = "ConfigLockedError";
+	}
+}
 
 export interface Settings {
 	appEnv: string;
@@ -90,6 +168,86 @@ function serializeEnvFile(map: Map<string, string>): string {
 	return [...map.entries()].map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
 }
 
+// ── resolution ──────────────────────────────────────────────────────────────
+
+let cache: { path: string; map: Map<string, string> } | null = null;
+
+function configPathDefault(): string {
+	return process.env.FILEUPLOAD_CONFIG || "./data/app.env";
+}
+
+/** The parsed config file, read once. `loadSettings` primes this; the handful
+ * of knobs read before it runs (the log level) or without it (the storage
+ * roots, in tests) fall back to reading the default path lazily. A file that
+ * isn't there yet resolves to nothing rather than being generated -- only
+ * `loadSettings` creates it. */
+function fileValues(): Map<string, string> {
+	const path = cache?.path ?? configPathDefault();
+	if (!cache || cache.path !== path) {
+		cache = {
+			path,
+			map: existsSync(path)
+				? parseEnvFile(readFileSync(path, "utf-8"))
+				: new Map(),
+		};
+	}
+	return cache.map;
+}
+
+/** Forget the cached file, so the next read resolves `FILEUPLOAD_CONFIG` (or
+ * the default path) afresh. For tests that point `loadSettings` at a temp
+ * file: without it the rest of the suite would go on resolving `storageRoot()`
+ * and friends against that file. */
+export function resetConfigCache(): void {
+	cache = null;
+}
+
+function loadConfigFile(path: string): void {
+	cache = {
+		path,
+		map: existsSync(path)
+			? parseEnvFile(readFileSync(path, "utf-8"))
+			: new Map(),
+	};
+}
+
+/** The environment's value for `key`, or undefined if it doesn't supply one.
+ * An empty string counts: `ALLOWED_HOSTS= ` on the command line is how you
+ * blank a value the file sets. */
+function envValue(key: string): string | undefined {
+	if (!CONFIG_KEY_SET.has(key) && !fileValues().has(key)) return undefined;
+	return process.env[key];
+}
+
+/** Resolve one key: environment first, then `app.env`, then `fallback`.
+ * A key present but blank resolves to `""` from either source -- callers apply
+ * their own `|| default` where blank is meant to mean unset. */
+export function configValue(key: string): string | undefined;
+export function configValue(key: string, fallback: string): string;
+export function configValue(
+	key: string,
+	fallback?: string,
+): string | undefined {
+	const env = envValue(key);
+	if (env !== undefined) return env;
+	return fileValues().get(key) ?? fallback;
+}
+
+/** Whether `key` is fixed by the environment for this boot -- i.e. whether
+ * writing it to `app.env` would have any effect. */
+export function isEnvManaged(key: string): boolean {
+	return envValue(key) !== undefined;
+}
+
+/** Config keys this process took from its environment, names only: several
+ * carry secrets. For the startup log, so an operator debugging a value that
+ * "won't change" can see which ones the file no longer decides. */
+export function environmentKeys(): string[] {
+	const keys = new Set<string>(CONFIG_KEYS);
+	for (const key of fileValues().keys()) keys.add(key);
+	return [...keys].filter((k) => process.env[k] !== undefined).sort();
+}
+
 function generateFile(path: string): void {
 	mkdirSync(dirname(path), { recursive: true });
 	const defaultAppEnv = process.env.FILEUPLOAD_DEFAULT_APP_ENV || "prod";
@@ -127,13 +285,25 @@ function generateFile(path: string): void {
 		["REALDEBRID_API_KEY", ""],
 		["REALDEBRID_ENABLED", "true"],
 	]);
+	// A key the environment already supplies is recorded as a comment instead
+	// of a value -- see the header: a persisted copy of an overlay is a second
+	// answer that takes over silently when the variable goes away.
+	const lines = [...map.entries()].map(([k, v]) =>
+		process.env[k] !== undefined
+			? `# ${k} is set in this node's environment`
+			: `${k}=${v}`,
+	);
 	const fd = openSync(path, "wx", 0o600);
-	writeSync(fd, serializeEnvFile(map));
+	writeSync(fd, lines.join("\n") + "\n");
 	closeSync(fd);
 	chmodSync(path, 0o600);
 }
 
+/** Persist one key to `app.env`. Refuses a key the environment supplies:
+ * writing it would leave the file and the running process disagreeing, with
+ * the file losing. */
 export function setEnvValue(path: string, key: string, value: string): void {
+	if (isEnvManaged(key)) throw new ConfigLockedError(key);
 	const map = existsSync(path)
 		? parseEnvFile(readFileSync(path, "utf-8"))
 		: new Map<string, string>();
@@ -141,6 +311,7 @@ export function setEnvValue(path: string, key: string, value: string): void {
 	const fd = openSync(path, "w", 0o600);
 	writeSync(fd, serializeEnvFile(map));
 	closeSync(fd);
+	if (cache?.path === path) cache.map = map;
 }
 
 function truthy(value: string | undefined): boolean {
@@ -162,29 +333,32 @@ export function getMasterKey(settings: Settings): Buffer {
 }
 
 export function loadSettings(configPathArg?: string): Settings {
-	const configPath =
-		configPathArg || process.env.FILEUPLOAD_CONFIG || "./data/app.env";
+	const configPath = configPathArg || configPathDefault();
 
 	if (!existsSync(configPath)) {
 		generateFile(configPath);
 	}
 
-	let map = parseEnvFile(readFileSync(configPath, "utf-8"));
+	loadConfigFile(configPath);
+	// Every read below goes through the resolver, so an environment variable
+	// is indistinguishable from the same key written in the file.
+	const map = { get: (key: string) => configValue(key) };
 
 	if (!map.get("SECRET_KEY") || !map.get("MASTER_KEY_B64")) {
 		throw new Error(
-			"SECRET_KEY and MASTER_KEY_B64 must be set in the config file",
+			"SECRET_KEY and MASTER_KEY_B64 must be set in the config file or the environment",
 		);
 	}
 
-	// Backfill fields introduced after older configs were generated.
+	// Backfill fields introduced after older configs were generated. An
+	// environment-supplied value satisfies the check, so these mint into the
+	// file only when nothing else answers -- and `setEnvValue`'s refusal is
+	// unreachable here for the same reason.
 	if (!map.get("CLUSTER_TOKEN")) {
 		setEnvValue(configPath, "CLUSTER_TOKEN", tokenUrlsafe(32));
-		map = parseEnvFile(readFileSync(configPath, "utf-8"));
 	}
 	if (!map.get("NODE_ID")) {
 		setEnvValue(configPath, "NODE_ID", crypto.randomUUID().replace(/-/g, ""));
-		map = parseEnvFile(readFileSync(configPath, "utf-8"));
 	}
 
 	// TRUST_PROXY accepts "true" (generic reverse proxy) or "cloudflare"

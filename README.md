@@ -29,6 +29,21 @@ bun run dev             # Vite on :5173 (proxies API calls) + Express on :8000
 
 Config lives in `./data/app.env` and is auto-generated on first run.
 
+Every setting can also be given as an environment variable, which is read
+exactly as if it were a line in `app.env` and **overrides** one — so a value
+that is only known at launch can be supplied at launch:
+
+```bash
+PORT=8100 NODE_NAME=box-2 DATABASE_URL=sqlite:///./data/node2.db bun run start
+```
+
+The environment is an overlay and is never written back to `app.env`: on first
+run the generated file records those keys as comments instead of values, and
+the admin panel refuses (409) to write a key the environment is supplying,
+rather than persisting a value the running process would ignore. Removing the
+variable falls back to the file — or, for `SECRET_KEY` and `MASTER_KEY_B64`,
+fails loudly at startup rather than quietly minting a new identity.
+
 | Variable | Purpose |
 |---|---|
 | `APP_ENV` | `dev` (HTTP cookies) or `prod` (Secure cookies) |

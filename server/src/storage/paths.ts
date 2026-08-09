@@ -1,14 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { join, resolve, sep } from "node:path";
+import { configValue } from "../config.ts";
 
 /** Mirrors app/storage/paths.py. */
 
 export function storageRoot(): string {
-	return process.env.FILEUPLOAD_STORAGE || "./data/storage";
+	return configValue("FILEUPLOAD_STORAGE") || "./data/storage";
 }
 
 export function thumbnailRoot(): string {
-	return process.env.FILEUPLOAD_THUMBNAILS || "./data/thumbnails";
+	return configValue("FILEUPLOAD_THUMBNAILS") || "./data/thumbnails";
 }
 
 /** Staging area for Real-Debrid downloads: files land under
@@ -16,7 +17,7 @@ export function thumbnailRoot(): string {
  * TORRENT_CONTENT_PATH instead -- that directory belongs to qBittorrent, this
  * one is ours. */
 export function debridRoot(): string {
-	return process.env.FILEUPLOAD_DEBRID || "./data/debrid";
+	return configValue("FILEUPLOAD_DEBRID") || "./data/debrid";
 }
 
 /** Random fan-out path relative to the storage root, e.g. "ab/cd/…". */

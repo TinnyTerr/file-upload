@@ -51,7 +51,7 @@ import {
 	type Tiering,
 } from "../cluster/tiering.ts";
 import { buildTopology } from "../cluster/topology.ts";
-import { setEnvValue } from "../config.ts";
+import { ConfigLockedError, isEnvManaged, setEnvValue } from "../config.ts";
 import { type ClusterNodeRow, nowIso, type UserRow } from "../db/rows.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger, queryBackendLogs } from "../logging.ts";
@@ -235,6 +235,13 @@ export function clusterRouter(state: AppState): Router {
 		requireCsrf,
 		requireCluster,
 		(req, res) => {
+			// A CLUSTER_TOKEN fixed by the environment can't be rotated: the new
+			// one would live in memory until the next restart handed every peer
+			// back the old one. Refuse up front (409) rather than rotate into
+			// that. Persistence itself stays best-effort -- an unwritable config
+			// file is an operator problem, and the rotation has already happened.
+			if (isEnvManaged("CLUSTER_TOKEN"))
+				throw new ConfigLockedError("CLUSTER_TOKEN");
 			const newToken = randomBytes(32).toString("base64url");
 			state.clusterToken = newToken;
 			try {
@@ -847,37 +854,37 @@ export function clusterRouter(state: AppState): Router {
 		clusterAuth,
 		asyncHandler(async (req, res) => {
 			const userUid =
-			typeof req.body?.user_uid === "string" ? req.body.user_uid : "";
-		if (!userUid) {
-			res.status(422).json({ detail: "user_uid required" });
-			return;
-		}
-		// A bucket key, never an authorization input — an unauthenticated
-		// self-asserted node id decides nothing here but which counter is
-		// incremented, and a peer that lies about it only rate-limits itself
-		// against a different bucket. The IP fallback keeps it keyed on
-		// *something* when the field is absent.
-		const bucket =
-			typeof req.body?.node_id === "string" && req.body.node_id
-				? req.body.node_id
-				: clientIp(state, req);
-		if (!allowIdentityFetch(bucket, userUid)) {
-			res.status(429).json({ detail: "too many identity fetches" });
-			return;
-		}
-		const user = db.get<UserRow>("SELECT * FROM users WHERE uid = $uid", {
-			$uid: userUid,
-		});
-		const material = user ? localMaterial(db, user) : null;
-		if (material) {
-			res.json({ material });
-			return;
-		}
-		// Not held here. Forward up our own chain rather than answering "no" —
-		// and deliberately do NOT keep a copy of what comes back: a relay that
-		// cached would widen the set of nodes holding a hash beyond "nodes this
-		// user has actually logged in on", which is the bound §5.10 promises.
-		const hops = Number(req.body?.hops ?? 0) || 0;
+				typeof req.body?.user_uid === "string" ? req.body.user_uid : "";
+			if (!userUid) {
+				res.status(422).json({ detail: "user_uid required" });
+				return;
+			}
+			// A bucket key, never an authorization input — an unauthenticated
+			// self-asserted node id decides nothing here but which counter is
+			// incremented, and a peer that lies about it only rate-limits itself
+			// against a different bucket. The IP fallback keeps it keyed on
+			// *something* when the field is absent.
+			const bucket =
+				typeof req.body?.node_id === "string" && req.body.node_id
+					? req.body.node_id
+					: clientIp(state, req);
+			if (!allowIdentityFetch(bucket, userUid)) {
+				res.status(429).json({ detail: "too many identity fetches" });
+				return;
+			}
+			const user = db.get<UserRow>("SELECT * FROM users WHERE uid = $uid", {
+				$uid: userUid,
+			});
+			const material = user ? localMaterial(db, user) : null;
+			if (material) {
+				res.json({ material });
+				return;
+			}
+			// Not held here. Forward up our own chain rather than answering "no" —
+			// and deliberately do NOT keep a copy of what comes back: a relay that
+			// cached would widen the set of nodes holding a hash beyond "nodes this
+			// user has actually logged in on", which is the bound §5.10 promises.
+			const hops = Number(req.body?.hops ?? 0) || 0;
 			res.json({ material: await fetchMaterial(state, userUid, hops) });
 		}),
 	);
