@@ -9,7 +9,21 @@ CREATE TABLE IF NOT EXISTS users (
   -- boot backfill has run over a database created before this column existed.
   uid TEXT,
   username TEXT NOT NULL UNIQUE,
+  -- Credential material, and deliberately NOT replicated (D-12, §5.10): it is
+  -- absent from cluster/changelog.ts's TABLE_COLUMNS, so a user row arriving
+  -- from a peer lands here holding '' and the node fetches the real hash the
+  -- first time someone tries to log in as that user. '' reads as "wrong
+  -- password" through verifyPassword, so a node holding nothing fails closed.
   password_hash TEXT NOT NULL,
+  -- The invalidation signal for the above, and the one half of it that DOES
+  -- replicate. Bumped by every password change and TOTP enrolment; a node
+  -- whose credential_version_local is behind it knows its cached material is
+  -- stale without anyone having to push it a message.
+  credential_version INTEGER NOT NULL DEFAULT 1,
+  -- Which `credential_version` this node's held material corresponds to.
+  -- Node-local (absent from TABLE_COLUMNS, or every peer would claim to hold
+  -- what only one of them has). NULL = holds nothing for this user.
+  credential_version_local INTEGER,
   role TEXT NOT NULL DEFAULT 'user',
   must_change_credentials INTEGER NOT NULL DEFAULT 0,
   avatar_data BLOB,

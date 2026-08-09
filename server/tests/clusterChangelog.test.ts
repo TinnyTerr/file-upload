@@ -215,6 +215,37 @@ describe("column maps", () => {
 			expect(TABLE_COLUMNS[table]).toContain("uid");
 		}
 	});
+
+	test("every column of a replicated table is carried or deliberately not", async () => {
+		// A column added to a replicated table and forgotten here silently resets
+		// to its default on every peer -- the failure CLAUDE.md warns about, and
+		// one nothing else catches. So the exclusions are enumerated: adding a
+		// column means either replicating it or saying here why not.
+		const EXCLUDED: Record<string, Record<string, string>> = {
+			users: {
+				id: "node-local row id (§5.6)",
+				password_hash: "credential material, fetched on demand (§5.10, D-12)",
+				credential_version_local:
+					"which version *this* node holds; every peer's answer differs",
+			},
+		};
+		const h = await makeHarness();
+		try {
+			for (const table of CHANGELOG_TABLES) {
+				const excluded = EXCLUDED[table] ?? { id: "node-local row id (§5.6)" };
+				const unaccounted = h.db
+					.all<{ name: string }>(`PRAGMA table_info(${table})`)
+					.map((c) => c.name)
+					.filter(
+						(name) =>
+							!TABLE_COLUMNS[table].includes(name) && !(name in excluded),
+					);
+				expect({ table, unaccounted }).toEqual({ table, unaccounted: [] });
+			}
+		} finally {
+			h.close();
+		}
+	});
 });
 
 describe("apply", () => {

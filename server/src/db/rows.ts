@@ -8,7 +8,15 @@ export interface UserRow {
 	 * predates the boot backfill. */
 	uid: string | null;
 	username: string;
+	/** Node-local credential material (§5.10, D-12). '' on a node that has not
+	 * fetched it yet -- never read it directly on a login path, go through
+	 * `cluster/identityFetch.ts::ensureCredentialMaterial`. */
 	password_hash: string;
+	/** Replicated invalidation counter for the above. */
+	credential_version: number;
+	/** Which `credential_version` this node's material matches; NULL = none
+	 * held. Node-local. */
+	credential_version_local: number | null;
 	role: string;
 	must_change_credentials: number;
 	avatar_data: Uint8Array | null;

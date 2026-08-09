@@ -2,6 +2,11 @@ import busboy from "busboy";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
+import {
+	bumpCredentialVersion,
+	publishCredentialChange,
+} from "../cluster/identityFetch.ts";
+import { revocationMark } from "../cluster/revocation.ts";
 import type { FileRow, UserRow } from "../db/rows.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
@@ -167,6 +172,11 @@ export function accountRouter(state: AppState): Router {
 			}
 			const actor = user.username;
 			const newHash = await hashPassword(newPassword);
+			// A password change is a revocation of the old one, so it is pushed
+			// rather than left to the pull (§5.9) -- and the material itself does
+			// not travel in the log at all (§5.10), so the master is handed it
+			// separately. The mark has to precede the write.
+			const mark = revocationMark(state);
 			db.run(
 				"UPDATE users SET username = $u, password_hash = $h, must_change_credentials = 0 WHERE id = $id",
 				{
@@ -175,6 +185,7 @@ export function accountRouter(state: AppState): Router {
 					$id: user.id,
 				},
 			);
+			bumpCredentialVersion(db, user.id);
 			db.run("DELETE FROM sessions WHERE user_id = $id AND id != $sid", {
 				$id: user.id,
 				$sid: sessionRow.id,
@@ -185,7 +196,10 @@ export function accountRouter(state: AppState): Router {
 				target: `user:${user.id}`,
 				ip: clientIp(state, req),
 			});
-			res.json({ status: "updated" });
+			res.json({
+				status: "updated",
+				revocation: await publishCredentialChange(state, user.id, mark),
+			});
 		}),
 	);
 

@@ -22,6 +22,14 @@ import { computeDigest } from "../cluster/digest.ts";
 import { readOwnEvents } from "../cluster/eventStore.ts";
 import * as clusterHttp from "../cluster/http.ts";
 import { ClusterHTTPError } from "../cluster/http.ts";
+import {
+	allowIdentityFetch,
+	applyPublishedMaterial,
+	type CredentialMaterial,
+	fetchMaterial,
+	localMaterial,
+	materialSummary,
+} from "../cluster/identityFetch.ts";
 import { enrollWithMaster, upsertPeer } from "../cluster/membership.ts";
 import {
 	type GrantRequest,
@@ -44,7 +52,7 @@ import {
 } from "../cluster/tiering.ts";
 import { buildTopology } from "../cluster/topology.ts";
 import { setEnvValue } from "../config.ts";
-import { type ClusterNodeRow, nowIso } from "../db/rows.ts";
+import { type ClusterNodeRow, nowIso, type UserRow } from "../db/rows.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger, queryBackendLogs } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
@@ -271,6 +279,10 @@ export function clusterRouter(state: AppState): Router {
 			outstanding_reservations: isMaster(state)
 				? outstandingReservations(db).length
 				: null,
+			// §5.10. How much of the user population this node can authenticate
+			// without asking anyone — the operational read on D-12's "a user cannot
+			// log in on a node that cannot reach a holder".
+			identity: materialSummary(db),
 		});
 	});
 
@@ -817,6 +829,75 @@ export function clusterRouter(state: AppState): Router {
 			return;
 		}
 		res.json(applyPushedRevocation(state, entries));
+	});
+
+	// ── identity material (redesign §5.10, D-12) ────────────────────────────
+	//
+	// `password_hash` and TOTP seeds do not replicate. A node fetches them the
+	// first time somebody tries to log in as a given user there, and the fetch
+	// walks up the tier until it reaches a holder — the master, which every
+	// credential write publishes to. Nothing walks down or sideways.
+	//
+	// A miss answers `{material: null}` rather than 404: "nobody up the chain
+	// holds any" is a real answer, and the caller turns it into a failed login,
+	// not an error.
+
+	router.post(
+		"/identity/fetch",
+		clusterAuth,
+		asyncHandler(async (req, res) => {
+			const userUid =
+			typeof req.body?.user_uid === "string" ? req.body.user_uid : "";
+		if (!userUid) {
+			res.status(422).json({ detail: "user_uid required" });
+			return;
+		}
+		// A bucket key, never an authorization input — an unauthenticated
+		// self-asserted node id decides nothing here but which counter is
+		// incremented, and a peer that lies about it only rate-limits itself
+		// against a different bucket. The IP fallback keeps it keyed on
+		// *something* when the field is absent.
+		const bucket =
+			typeof req.body?.node_id === "string" && req.body.node_id
+				? req.body.node_id
+				: clientIp(state, req);
+		if (!allowIdentityFetch(bucket, userUid)) {
+			res.status(429).json({ detail: "too many identity fetches" });
+			return;
+		}
+		const user = db.get<UserRow>("SELECT * FROM users WHERE uid = $uid", {
+			$uid: userUid,
+		});
+		const material = user ? localMaterial(db, user) : null;
+		if (material) {
+			res.json({ material });
+			return;
+		}
+		// Not held here. Forward up our own chain rather than answering "no" —
+		// and deliberately do NOT keep a copy of what comes back: a relay that
+		// cached would widen the set of nodes holding a hash beyond "nodes this
+		// user has actually logged in on", which is the bound §5.10 promises.
+		const hops = Number(req.body?.hops ?? 0) || 0;
+			res.json({ material: await fetchMaterial(state, userUid, hops) });
+		}),
+	);
+
+	router.post("/identity/publish", clusterAuth, (req, res) => {
+		const material = req.body?.material as CredentialMaterial | undefined;
+		if (!material || typeof material.user_uid !== "string") {
+			res.status(422).json({ detail: "material required" });
+			return;
+		}
+		const result = applyPublishedMaterial(state, material);
+		if (!result.stored) {
+			// The user row has not replicated here yet. The publisher pushes the
+			// log entries first precisely so this cannot happen; when it does, the
+			// row arrives at pull speed and the material follows on the next
+			// credential write or fetch.
+			res.status(409).json({ detail: result.reason ?? "not stored" });
+			return;
+		}
+		res.json({ stored: true });
 	});
 
 	// ── tiering (redesign §5.3-5.4) ─────────────────────────────────────────

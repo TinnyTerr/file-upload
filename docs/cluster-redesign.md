@@ -964,10 +964,11 @@ Phase 4 is the point at which the topology in this document actually exists. Pha
 separable and can slip without blocking anything above it — chunking is capability, not
 correctness.
 
-### Built so far (2026-08-08)
+### Built so far (2026-08-09)
 
-Phases **0 through 6** are implemented and green — the door is walked through, the
-topology in this document actually exists, and nothing is overwritten silently any more.
+Phases **0 through 7** are implemented and green — the door is walked through, the
+topology in this document actually exists, nothing is overwritten silently any more, and
+credential material no longer travels to nodes that have no use for it.
 
 | Phase | Landed as |
 |---|---|
@@ -978,10 +979,11 @@ topology in this document actually exists, and nothing is overwritten silently a
 | 4 | `cluster/tiering.ts` — `cluster_tiering` + `cluster_drift`, the deterministic leader function, region inference, generation minting and the hold-down drift counter. **`cluster/election.ts` deleted in full**, with epochs, votes, `cluster_self_state`, `/vote-request`, `/master-assumed`, `cluster_election_liveness` and `digest.ts`'s split-brain check |
 | 5 | `cluster/quota.ts` — the `quota_reservations` ledger, `/cluster/quota/{reserve,renew,commit,release}`, sliding TTL + sweep. `cluster/degraded.ts` + `middleware/degradedMode.ts` — reachability state machine, 5-minute grace, held-request queue, write gate. `promoteSelf` + `POST /cluster/promote` + the admin banner |
 | 6 | `cluster/conflicts.ts` — `replication_conflicts`, the total timestamp/node-id rule and the skew clamp, arbitrated inside `applyChanges` on the master alone; `/cluster/conflicts` + dismiss + re-apply, and the admin **Conflicts** tab. `cluster/revocation.ts` — `revocationMark`/`pushRevocation` + `POST /cluster/revocations`, wired into permission edits, user updates and deletion, share- and folder-link edits and deletes, and sealing |
+| 7 | `cluster/identityFetch.ts` — `password_hash` out of `TABLE_COLUMNS`, `users.credential_version` (replicated) + `credential_version_local` (not), `POST /cluster/identity/{fetch,publish}`, the login-time fetch, and the publish-to-master on every credential write. WebAuthn untouched, because it was already node-local |
 
 Tests: `clusterEvents`, `clusterIdentity`, `clusterChangelog`, `clusterReplication`,
 `clusterTiering`, `clusterQuota`, `clusterConflicts`, `clusterRevocation`,
-`clusterTopology`.
+`clusterTopology`, `clusterIdentityFetch`.
 
 Three implementation decisions worth recording, because the text above does not predict
 them:
@@ -1084,6 +1086,37 @@ And four from Phase 6:
   the push fails entirely the cluster still converges at pull speed, so a peer being down
   degrades latency rather than correctness — which is what lets the admin call report a
   lagging node instead of failing.
+
+And four from Phase 7:
+
+- **Invalidation is a replicated counter, not a message.** §5.10 says a password change
+  "publishes an invalidation down the log", which reads as a new kind of entry. It is not
+  one: `users.credential_version` is an ordinary replicated column, bumped by every
+  credential write, and `credential_version_local` — which does *not* replicate — records
+  which version this node's copy matches. A node whose local number is behind knows its
+  material is stale, and it knows it from a row it was going to receive anyway. Because
+  the counter is monotonic, a node that was offline, a node that cached nothing and a node
+  that received the bump out of order all behave identically, with no delivery guarantee
+  needed for correctness. The revocation push rides on top purely for speed: a stale
+  password hash is a stale *grant*, which is the case §5.9 refuses to leave to the pull.
+- **The master is the holder of record, so a fetch always terminates.** §5.10 says a node
+  "pulls the material up the tier" without saying who is guaranteed to have it. Nothing is,
+  unless credential writes put it somewhere known — so every write publishes to the master
+  synchronously (`POST /cluster/identity/publish`) *after* pushing its log entries, since
+  the master needs the `users` row before it can hold material for it. Fetch then walks up
+  and stops at the master. Nothing walks down or sideways; a node asking a sibling is how
+  two halves of a partition end up authenticating against two different passwords.
+- **A relay forwards without keeping a copy.** A follower's fetch passes through its region
+  leader, and the obvious optimisation is for the leader to cache what it relays. It does
+  not, deliberately: §5.10's stated cost is that the hash ends up on every node *the user
+  has actually used*, and a caching relay would quietly widen that to every node on every
+  path. The bound is worth more than the round-trip.
+- **Storing fetched material is suppressed, exactly as applying an entry is.** Writing a
+  fetched hash into `users` fires the change-log trigger, which would append a `users`
+  upsert carrying no new replicated state — and that spurious entry could go on to *win*
+  an arbitration against a real concurrent edit and discard it. Material learned from a
+  peer is not this node's own write, so `replication_control.suppressed` is raised around
+  it, on the same reasoning that raises it inside `applyChanges`.
 
 ---
 

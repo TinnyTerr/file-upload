@@ -73,6 +73,31 @@ export function createSqliteDb(path: string): Db {
 		"webauthn_user_handle",
 		"webauthn_user_handle TEXT",
 	);
+	// The identity split (§5.10, D-12). `credential_version` replicates and is
+	// the invalidation signal; `credential_version_local` does not and says
+	// which version this node's own copy of the material matches.
+	ensureColumn(
+		sqlite,
+		"users",
+		"credential_version",
+		"credential_version INTEGER NOT NULL DEFAULT 1",
+	);
+	ensureColumn(
+		sqlite,
+		"users",
+		"credential_version_local",
+		"credential_version_local INTEGER",
+	);
+	// Claim material this node demonstrably holds. Runs every boot rather than
+	// once, and stays correct because the test is the hash itself: a row that
+	// arrived by replication lands with password_hash = '' (changelog.ts's
+	// INSERT_PLACEHOLDERS) and is left unclaimed, while a row predating the
+	// split -- including one an older build replicated eagerly -- holds a real
+	// hash and is claimed at whatever version it carries.
+	sqlite.exec(
+		`UPDATE users SET credential_version_local = credential_version
+      WHERE credential_version_local IS NULL AND password_hash <> ''`,
+	);
 	// Cloudflare CF-IPCountry, recorded at login. See middleware/auth.ts.
 	ensureColumn(sqlite, "sessions", "country_code", "country_code TEXT");
 	ensureColumn(sqlite, "credentials", "updated_at", "updated_at TEXT");

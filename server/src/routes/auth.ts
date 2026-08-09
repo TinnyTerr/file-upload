@@ -3,6 +3,7 @@ import { Router } from "express";
 import { authenticator } from "otplib";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
+import { ensureCredentialMaterial } from "../cluster/identityFetch.ts";
 import { getMasterKey } from "../config.ts";
 import { openSecret } from "../crypto/secretEncrypt.ts";
 import type { UserRow } from "../db/rows.ts";
@@ -78,10 +79,23 @@ export function authRouter(state: AppState): Router {
 				return;
 			}
 
-			const user = db.get<UserRow>(
+			const found = db.get<UserRow>(
 				"SELECT * FROM users WHERE username = $username",
 				{ $username: username },
 			);
+
+			// §5.10, D-12: `password_hash` and the TOTP seeds do not replicate.
+			// If this node has never authenticated this user -- or a password
+			// change elsewhere has invalidated what it holds -- it pulls the
+			// material up the tier now, once, and verifies locally from here on.
+			// The candidate password never leaves this node either way.
+			//
+			// Deliberately after the lockout check above: a fetch is a peer
+			// request, and letting an unthrottled login attempt trigger one would
+			// hand an attacker a lever on the master.
+			const user = found
+				? await ensureCredentialMaterial(state, found)
+				: undefined;
 
 			const ok = user
 				? await verifyPassword(password, user.password_hash)

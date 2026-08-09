@@ -24,6 +24,7 @@ Multi-node replication lives in `server/src/cluster/*.ts`:
 - `degraded.ts` — master-reachability state machine: 5-minute restart grace during which writes are **held**, then degraded (reads only). `middleware/degradedMode.ts` is the write gate that enforces it
 - `conflicts.ts` — `replication_conflicts` and §5.8's arbitration: optimistic concurrency keyed on `master_seq`, **later timestamp wins, node id breaks the tie**, evaluated on the master alone. `winnerOf` is total and `comparableTs` clamps a clock running more than `CLOCK_SKEW_MS` fast. The rule runs inside `applyChanges`; this file owns the record, the list, dismiss and the open count
 - `revocation.ts` — §5.9's asymmetry: grants are lazy, revocations are pushed. `revocationMark` before the write, `pushRevocation` after, `POST /api/cluster/revocations` on the receiving side. It carries the *same* log entries the pull would, so a failed push costs latency and not correctness
+- `identityFetch.ts` — §5.10's identity split: `password_hash` and TOTP seeds are fetched from a peer at first login rather than replicated. `materialState` (held/stale/absent), `ensureCredentialMaterial` (the login path's one entry point), `bumpCredentialVersion` + `publishCredentialChange` (the write path's), `POST /api/cluster/identity/{fetch,publish}`. Not to be confused with `identity.ts`, which is about *row* identity
 - `digest.ts` — cluster state digest + divergence alerting (`syncCheckJob`). No split-brain cross-check: role is derived from a generation only the master mints, so "two nodes both believe they are master" is not a state the data model can express
 - `eventBus.ts` / `eventStore.ts` / `firehoseClient.ts` — in-memory live event bus, durable `cluster_events` mirror, peer-polling consumer
 - `http.ts` — node-to-node fetch helpers (cluster-token auth, timeouts)
@@ -98,12 +99,53 @@ folder-link edits and deletes, and `POST /files/:id/seal`.
   peer's ordinary stream, and advancing a cursor for them would claim this node
   had read past things it has not seen.
 
+**Identity: authorization replicates, authentication is fetched (Phase 7, §5.10,
+D-12/D-18).** Every node holds every `users` row, so `requirePermission` stays a
+local read. What no node holds until it needs it is the material that lets it
+*authenticate* somebody: `users.password_hash` is absent from `TABLE_COLUMNS`
+and `credentials` is not a replicated table at all. A node pulls both up the
+tier the first time someone attempts a login there, stores them, and verifies
+with local Argon2id from then on — so the candidate password never leaves the
+node it was typed into, and one round-trip is paid per user per node rather
+than per login.
+
+- **Invalidation is a replicated counter, not a message.** `users.credential_version`
+  replicates; `credential_version_local` (which version *this* node's copy
+  matches) does not. A bump anywhere makes every other node's copy read as
+  stale via a row it was receiving anyway — monotonic, so out-of-order
+  delivery, an offline node and a node that cached nothing all behave the same.
+  Nothing has to arrive for this to be correct.
+- **Credential writes still ride the revocation push**, because a stale password
+  hash is a stale *grant*. `publishCredentialChange` does both halves: push the
+  log entries (carrying the bump), then hand the master the material.
+- **The master is the holder of record**, which is what makes a fetch terminate.
+  Writes publish up; fetches walk up; nothing walks down or sideways.
+- **A relay forwards without keeping a copy.** The hash is supposed to end up on
+  nodes the user has *used*, and a caching leader would widen that to every node
+  on every path.
+- **Storing fetched material is suppressed**, exactly as `applyChanges` is. It is
+  a peer's write, and logging it would append a `users` upsert carrying no new
+  replicated state — one that could win an arbitration against a real concurrent
+  edit and discard it.
+- **WebAuthn never travels (D-18)**, and needed no work: `credentials` was
+  already node-local. A passkey is registered against one node's rpID and is
+  unusable elsewhere, so `require_passkey` means enrolling per node.
+  `webauthn_user_handle` *does* replicate — an identifier, not a credential.
+- **Logins work while degraded; credential *writes* do not.** `/api/auth` is on
+  the degraded-mode allowlist and `/api/account`, `/api/users` are not, so a
+  cut-off node keeps signing in everyone it already holds material for and
+  refuses the writes whose publish-to-master could not succeed anyway. That is
+  what lets `publishCredentialMaterial` log a failure rather than throw.
+- **TOTP seeds travel sealed under `MASTER_KEY_B64`**, which cluster nodes must
+  therefore share. They already must: `files.enc_key_blob` replicates and is
+  sealed the same way.
+
 **Degraded mode (§5.5).** A node that cannot reach the master **holds** write-path requests for a 5-minute restart grace, then goes read-only. There is no automatic failover, by design: a node cannot tell "the master died" from "I got cut off", and promoting on the second reading is the split brain the deleted `election.ts` failed to prevent. Recovery is the master returning, or `POST /api/cluster/promote` — refused unless the node is genuinely degraded, and requiring the node's own name typed back as confirmation.
 
 - `middleware/degradedMode.ts` gates **by method with a short allowlist**, mounted once in `app.ts`, rather than enumerating write routes — so it fails closed and a route added later is refused unless deliberately allowlisted. `/api/cluster` is on that list because promotion is the only way out and gating it would make degraded mode unrecoverable.
 - Reads never gate. Every read here is local by construction, which is what makes a degraded node useful rather than merely up.
 
-`routes/cluster.ts` exports `clusterRouter` (mounted at `/api/cluster`: session-authenticated management endpoints — `/token`, `/token/rotate`, `/self`, `/topology`, `/conflicts` (+ `/:id/dismiss`, `/:id/reapply`), `/nodes` (GET/POST/PATCH/DELETE), `/retier`, enroll/unlink — **plus** cluster-token-authenticated node-to-node endpoints — `/join`, `/heartbeat`, `/ping`, `/blobs/:storedSha256`, `/digest`, `/changes`, `/tiering`, `/revocations`) and `adminClusterRouter` (mounted at `/api/admin/cluster`: `/node-logs` + `/events`, the HTTP long-poll fallback for the websocket firehose). `server/src/ws.ts` attaches the websocket firehose directly to the `http.Server` returned by `app.listen()` in `index.ts`, since Express has no native websocket support.
+`routes/cluster.ts` exports `clusterRouter` (mounted at `/api/cluster`: session-authenticated management endpoints — `/token`, `/token/rotate`, `/self`, `/topology`, `/conflicts` (+ `/:id/dismiss`, `/:id/reapply`), `/nodes` (GET/POST/PATCH/DELETE), `/retier`, enroll/unlink — **plus** cluster-token-authenticated node-to-node endpoints — `/join`, `/heartbeat`, `/ping`, `/blobs/:storedSha256`, `/digest`, `/changes`, `/tiering`, `/revocations`, `/identity/fetch`, `/identity/publish`) and `adminClusterRouter` (mounted at `/api/admin/cluster`: `/node-logs` + `/events`, the HTTP long-poll fallback for the websocket firehose). `server/src/ws.ts` attaches the websocket firehose directly to the `http.Server` returned by `app.listen()` in `index.ts`, since Express has no native websocket support.
 
 **Invariant:** the in-memory event sequence counter in `eventBus.ts` assumes **one process per node** (this server makes a single `app.listen()` call and never forks workers). Colliding `origin_seq` values across workers is the exact bug class that broke logins under `uvicorn --workers=4` in the old deployment — see `cluster_events`' `UNIQUE(origin_node_id, origin_seq)`. Don't introduce multi-process scaling without redesigning event sequencing.
 
@@ -113,12 +155,14 @@ folder-link edits and deletes, and `POST /files/:id/seal`.
 Parts 1–3 are the defect inventory, Part 5 the target architecture, Part 7 the
 phasing. Work happens on the `cluster-rework` branch.
 
-**Phases 0–6 are built and green** (`clusterEvents`, `clusterIdentity`,
+**Phases 0–7 are built and green** (`clusterEvents`, `clusterIdentity`,
 `clusterChangelog`, `clusterReplication`, `clusterTiering`, `clusterQuota`,
-`clusterConflicts`, `clusterRevocation`, `clusterTopology` tests): the
+`clusterConflicts`, `clusterRevocation`, `clusterTopology`,
+`clusterIdentityFetch` tests): the
 multi-node test harness, the event-pipeline fixes, ULID `uid` identity, the
 trigger-driven change log with hierarchical pull, tiering, master-gated quota +
-degraded mode, and conflict arbitration + the synchronous revocation path. Phase 3 deleted
+degraded mode, conflict arbitration + the synchronous revocation path, and the
+identity split. Phase 3 deleted
 `replicateFile`, `/cluster/reserve`, `/cluster/replicate`, `/cluster/export` and
 `rebaseFromMaster` outright — `seedChangeLog` writes an `upsert` entry per
 existing row the first time a populated database meets an empty log, so a
@@ -135,12 +179,13 @@ the `cluster_election_liveness` job and `digest.ts`'s split-brain check — see
 master-authoritative" and "Degraded mode" above.
 
 Phase 6 added `cluster/conflicts.ts` and `cluster/revocation.ts` — see
-"Conflicts" and "Revocations" below.
+"Conflicts" and "Revocations" below. Phase 7 added `cluster/identityFetch.ts` —
+see "Identity" below.
 
-**Phase 7 is next**: the identity split (D-12, D-18) — on-demand
-`/cluster/identity/fetch` for the password hash and TOTP seed, invalidation down
-the log, WebAuthn staying node-local because a credential registered against one
-node's rpID is unusable on a peer regardless of what is replicated.
+**Phase 8 is next**: chunking — `blob_chunks`, `chunk_locations`, a
+configurable replication factor, push replication of chunks, and the LRU +
+pinned-exemption cache caps that go with it (B10, D6, D-10, D-11). It is
+separable: chunking is capability, not correctness.
 `cluster_nodes.epoch` and `throughput_bps` are dead columns today: the first is
 vestigial (SQLite cannot drop a column in place), the second is Phase 8's
 placement input.
@@ -773,6 +818,19 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - **A node pulls from its upstream and from whoever's upstream it is — nothing else.** `pullTargets()` derives both halves of every edge from `upstreamOf()` over the same generation, so the two ends agree without negotiating. The permitted fallback is exactly one: a follower whose region leader is unreachable pulls from the **master**. Adding a "fall back to any peer" branch is how a partition converges on two different answers, and a node holding no generation pulls from nobody at all — it is supposed to degrade, not improvise.
 - **A role is derived, never asserted.** `cluster_nodes.role`/`.is_master`/`.region` are written from the local tiering generation. The `role` field on a `/join` or `/heartbeat` body is for logs and the UI; reading it back into the table re-opens S4.
 - **Only the master mints a generation.** `retier()` no-ops on a non-master, and that is what makes "no master ⇒ leadership does not move" true without a separate check. Don't add a promote-yourself path — operator promotion (Phase 5) mints `reason='promotion'` *from the node being promoted only after a human has confirmed it*, which is a different thing.
+- **Never read `users.password_hash` on a login path.** Go through
+  `cluster/identityFetch.ts::ensureCredentialMaterial` — on a node that has not
+  fetched the material the column holds `''`, which `verifyPassword` reads as a
+  wrong password. A re-auth on an *already authenticated* session (revoking a
+  session, deleting an account, removing a credential) may read it directly: the
+  session only exists because a login on this node already fetched it.
+- **Every path that sets a password or enrols TOTP must bump
+  `credential_version`** and publish. Without the bump, peers keep honouring the
+  old credential until something else happens to invalidate their copy — which
+  may be never.
+- **`INSERT INTO users` must set `credential_version_local`.** A row inserted
+  without it reads as "holds no material" on the node that just minted the hash,
+  and that node will go looking for an upstream to fetch its own password from.
 - **A play key must never be trusted on a jti that isn't in `media_play_keys`.** Treating a missing row as valid would make the prune job a revocation-bypass.
 - **Deleting a file must also call `deleteThumbnail(fileId)`** — the thumbnail cache is keyed by file id and is not reference-counted.
 - **A debrid retry decides re-import vs. re-download by the `data/debrid/_sources/<tag>.complete` marker**, not by "the staging directory has files in it". A transfer aborted halfway also leaves files there, and importing those would silently store truncated content. The marker is written only after the last byte of the last link lands (`debrid.ts::markTransferComplete`), and lives outside the job directory so the importer never sees it as content.
@@ -815,6 +873,10 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - Don't append a losing entry to the master's log — it would ship down and overwrite the winner on every follower; record it in `replication_conflicts` and restate the winner instead
 - Don't re-apply an entry the master has already judged — an accepted one would clobber a later edit that has since won the row, and a rejected one would overwrite the winner with the loser
 - Don't implement "re-apply" as a replay of the losing entry — write it as a fresh local edit, or it re-enters the arbitration it already lost
+- Don't add `password_hash` (or any credential material) to `TABLE_COLUMNS` — it is fetched on demand precisely so it lives only where it is used
+- Don't have a relaying node cache the material it forwards — the bound "nodes the user has actually logged in on" is the point
+- Don't write fetched credential material without raising `replication_control.suppressed` — it is a peer's write, and logging it can lose a real concurrent edit to arbitration
+- Don't invent a second invalidation channel for credentials — the replicated `credential_version` counter already is one, and it works for a node that was offline
 - Don't leave a revocation to the pull — a stale grant is a security hole and a stale denial is only an inconvenience, which is the whole reason the two are treated differently
 - Don't poll qBittorrent once per job — one list fetch per tick, grouped by tag, covering downloading *and* seeding jobs
 - Don't refuse a torrent for being over the concurrency limit — park it in `pending` and let `promotePendingJobs` start it

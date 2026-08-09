@@ -171,6 +171,14 @@ export interface ClusterSelf {
 	master_status: MasterStatus;
 	/** Writes admitted but not yet written, master-side. Null off the master. */
 	outstanding_reservations: number | null;
+	/** §5.10: how much of the user population this node can authenticate without
+	 * asking anyone. `material_held` grows with use, not with cluster size —
+	 * users who have actually logged in here. */
+	identity: {
+		users_total: number;
+		material_held: number;
+		material_stale: number;
+	};
 	archive_enabled: boolean;
 	replication_mode: string;
 	disk_total_bytes: number;

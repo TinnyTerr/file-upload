@@ -43,7 +43,7 @@ import {
 	usePromote,
 	useRetier,
 } from "../hooks/useCluster";
-import type { ClusterHalt, NodeRole } from "../types";
+import type { ClusterHalt, ClusterSelf, NodeRole } from "../types";
 import { TopologyCard } from "./TopologyCard";
 
 function haltLabel(scope: string): string {
@@ -136,6 +136,7 @@ function ThisServerCard() {
 							drift={data.drift}
 							outstanding={data.outstanding_reservations}
 						/>
+						<IdentityLine identity={data.identity} />
 						<HaltList halts={data.halts} />
 					</>
 				)}
@@ -180,6 +181,24 @@ function TieringLine({
 				: ""}
 			{outstanding
 				? ` · ${outstanding} write(s) admitted, not yet written`
+				: ""}
+		</p>
+	);
+}
+
+/** §5.10: password hashes and TOTP seeds are fetched at first login rather than
+ * replicated, so what this node can authenticate offline is a fact worth
+ * showing — it is exactly the set of users who have signed in here. A stale
+ * count is not an error: it means a credential changed elsewhere and the next
+ * login on this node will refetch. */
+function IdentityLine({ identity }: { identity: ClusterSelf["identity"] }) {
+	if (!identity || identity.users_total === 0) return null;
+	return (
+		<p className="text-xs text-muted-foreground">
+			Credential material for {identity.material_held} of {identity.users_total}{" "}
+			user{identity.users_total === 1 ? "" : "s"}
+			{identity.material_stale
+				? ` · ${identity.material_stale} awaiting refetch`
 				: ""}
 		</p>
 	);

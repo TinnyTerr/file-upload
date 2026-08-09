@@ -2,15 +2,16 @@ import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
 import {
+	bumpCredentialVersion,
+	publishCredentialChange,
+} from "../cluster/identityFetch.ts";
+import { pushRevocation, revocationMark } from "../cluster/revocation.ts";
+import {
 	type FileRow,
 	nowIso,
 	type PermissionRow,
 	type UserRow,
 } from "../db/rows.ts";
-import {
-	pushRevocation,
-	revocationMark,
-} from "../cluster/revocation.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
@@ -122,6 +123,12 @@ export function usersRouter(state: AppState): Router {
 		requireMaster(state),
 		asyncHandler(async (req, res) => {
 			const master = req.currentUser!;
+			// The new user's password hash does not replicate (§5.10), so the
+			// master has to be handed it explicitly or the account would only be
+			// usable on this node. Taken here, before the write, because
+			// `publishCredentialChange` ships the log entries first -- the master
+			// needs the `users` row before it can hold material for it.
+			const mark = revocationMark(state);
 			const body = req.body ?? {};
 			const username = String(body.username ?? "");
 			const password = String(body.password ?? "");
@@ -153,8 +160,12 @@ export function usersRouter(state: AppState): Router {
 				const passwordHash = await hashPassword(password);
 				db.transaction(() => {
 					db.run(
-						`INSERT INTO users (username, password_hash, role, must_change_credentials, created_at)
-           VALUES ($u, $hash, $role, 0, $now)`,
+						// credential_version_local = 1 claims the material this node just
+						// minted (§5.10). The row replicates without the hash, so every
+						// peer starts out holding nothing for this user and fetches on
+						// first login there.
+						`INSERT INTO users (username, password_hash, credential_version_local, role, must_change_credentials, created_at)
+           VALUES ($u, $hash, 1, $role, 0, $now)`,
 						{ $u: username, $hash: passwordHash, $role: role, $now: nowIso() },
 					);
 				});
@@ -233,7 +244,12 @@ export function usersRouter(state: AppState): Router {
 				log.info(
 					`admin user created target_user_id=${user.id} role=${user.role} actor_id=${master.id}`,
 				);
-				res.json({ id: user.id, username: user.username, role: user.role });
+				res.json({
+					id: user.id,
+					username: user.username,
+					role: user.role,
+					identity: await publishCredentialChange(state, user.id, mark),
+				});
 			} catch (err) {
 				if (!res.headersSent) {
 					res.status(err instanceof HttpError ? err.status : 500).json({
@@ -256,6 +272,10 @@ export function usersRouter(state: AppState): Router {
 			// revocations in §5.9's sense -- they take something away, and a peer
 			// still honouring the old row is the hole. Pushed, not left to the pull.
 			const mark = revocationMark(state);
+			// Set when this request reset the password. A reset also has to hand
+			// the master the new material (§5.10), which the plain push does not
+			// carry -- the hash is not in the log.
+			let credentialsChanged = false;
 			const userId = Number(req.params.userId);
 			const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 				$id: userId,
@@ -303,6 +323,11 @@ export function usersRouter(state: AppState): Router {
 						$h: hash,
 						$id: user.id,
 					});
+					// §5.10: the hash itself stays here, but the bump replicates and
+					// is what makes every peer's cached copy of the *old* one read as
+					// stale. `pushRevocation` at the end of this handler carries it.
+					bumpCredentialVersion(db, user.id);
+					credentialsChanged = true;
 					db.run("DELETE FROM sessions WHERE user_id = $id", { $id: user.id });
 					log.warning(
 						`admin password reset target_user_id=${user.id} actor_id=${master.id} sessions_revoked=true`,
@@ -370,7 +395,9 @@ export function usersRouter(state: AppState): Router {
 					username: updated.username,
 					role: updated.role,
 					mfa_required: !!updated.mfa_required,
-					revocation: await pushRevocation(state, mark),
+					revocation: credentialsChanged
+						? await publishCredentialChange(state, userId, mark)
+						: await pushRevocation(state, mark),
 				});
 			} catch (err) {
 				if (!res.headersSent) {
@@ -626,7 +653,10 @@ export function usersRouter(state: AppState): Router {
 			log.info(
 				`admin permissions updated target_user_id=${userId} actor_id=${master.id} fields=${JSON.stringify(changedFields.sort())}`,
 			);
-			res.json({ status: "updated", revocation: await pushRevocation(state, mark) });
+			res.json({
+				status: "updated",
+				revocation: await pushRevocation(state, mark),
+			});
 		}),
 	);
 

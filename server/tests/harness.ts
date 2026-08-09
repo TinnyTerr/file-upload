@@ -117,8 +117,11 @@ export async function makeUser(
 	role: "master" | "user" = "user",
 ): Promise<UserRow> {
 	db.run(
-		`INSERT INTO users (username, password_hash, role, must_change_credentials, created_at)
-     VALUES ($username, $hash, $role, 0, $now)`,
+		// credential_version_local = 1 claims the material, as every production
+		// insert does (§5.10) -- without it this node would read its own freshly
+		// minted hash as "not held" and try to fetch it from an upstream.
+		`INSERT INTO users (username, password_hash, credential_version_local, role, must_change_credentials, created_at)
+     VALUES ($username, $hash, 1, $role, 0, $now)`,
 		{
 			$username: username,
 			$hash: await hashPassword("correct horse battery staple"),

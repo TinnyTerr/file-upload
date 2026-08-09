@@ -34,8 +34,12 @@ export async function ensureMaster(
 
 	const userId = db.transaction(() => {
 		db.run(
-			`INSERT INTO users (username, password_hash, role, must_change_credentials, created_at)
-       VALUES ($username, $passwordHash, 'master', 1, $createdAt)`,
+			// credential_version_local = 1 claims the material this node just
+			// minted, at the version the column defaults to (§5.10). Without it the
+			// seeded master would read as "holds nothing" and try to fetch its own
+			// password from an upstream that does not exist.
+			`INSERT INTO users (username, password_hash, credential_version_local, role, must_change_credentials, created_at)
+       VALUES ($username, $passwordHash, 1, 'master', 1, $createdAt)`,
 			{
 				$username: DEFAULT_USERNAME,
 				$passwordHash: passwordHash,

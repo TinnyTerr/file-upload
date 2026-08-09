@@ -50,7 +50,14 @@ export const TABLE_COLUMNS: Record<UidTable, string[]> = {
 	users: [
 		"uid",
 		"username",
-		"password_hash",
+		// `password_hash` is deliberately absent (§5.10, D-12). Every node can
+		// *authorize* every user without a round-trip, which is what §5.9's local
+		// permission read depends on -- but the material that lets a node
+		// *authenticate* them is fetched on demand at first login there, and the
+		// hash therefore lives only on nodes the user has actually used.
+		// `credential_version` is the invalidation half, and it does replicate:
+		// a bump is how every peer learns its cached copy is stale.
+		"credential_version",
 		"role",
 		"must_change_credentials",
 		"avatar_data",
@@ -195,6 +202,22 @@ export const BLOB_COLUMNS: Record<string, ReadonlySet<string>> = {
 	directories: new Set(["enc_key_blob", "enc_access_blob"]),
 	files: new Set(["enc_key_blob", "enc_access_blob", "seal_salt"]),
 };
+
+/** NOT NULL columns that a payload deliberately does not carry, and what to
+ * put in them when *inserting* a replicated row.
+ *
+ * Exactly one entry, and it is the identity split (§5.10): `password_hash` is
+ * node-local material, but the column is NOT NULL on a table whose rows do
+ * replicate, so an insert has to write something. '' is chosen because
+ * `verifyPassword` reads a malformed hash as "wrong password" rather than
+ * throwing — a node holding no material fails closed until it fetches.
+ *
+ * Applied on INSERT only, never in the ON CONFLICT assignments: an update
+ * arriving from a peer must not wipe material this node already holds. */
+const INSERT_PLACEHOLDERS: Partial<Record<UidTable, Record<string, unknown>>> =
+	{
+		users: { password_hash: "" },
+	};
 
 interface ForeignKey {
 	/** The table the id points into. */
@@ -632,13 +655,22 @@ function upsertRow(
 ): void {
 	const cols = TABLE_COLUMNS[table];
 	const params = bindPayload(db, table, { ...payload, uid });
+	const placeholders = INSERT_PLACEHOLDERS[table] ?? {};
+	const placeholderCols = Object.keys(placeholders);
+	for (const col of placeholderCols) {
+		params[`$${col}`] = placeholders[col] as SqlParams[string];
+	}
+	// The placeholder columns are in the insert list and out of the update
+	// list: a new row needs a value for a NOT NULL column the payload does not
+	// carry, and an existing row must keep whatever it already has there.
+	const insertCols = [...cols, ...placeholderCols];
 	const assignments = cols
 		.filter((c) => c !== "uid")
 		.map((c) => `${c} = excluded.${c}`)
 		.join(", ");
 	db.run(
-		`INSERT INTO ${table} (${cols.join(", ")})
-     VALUES (${cols.map((c) => `$${c}`).join(", ")})
+		`INSERT INTO ${table} (${insertCols.join(", ")})
+     VALUES (${insertCols.map((c) => `$${c}`).join(", ")})
      ON CONFLICT(uid) DO UPDATE SET ${assignments}`,
 		params,
 	);

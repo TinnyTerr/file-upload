@@ -3,6 +3,11 @@ import { Router } from "express";
 import { authenticator } from "otplib";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
+import {
+	bumpCredentialVersion,
+	publishCredentialChange,
+} from "../cluster/identityFetch.ts";
+import { revocationMark } from "../cluster/revocation.ts";
 import { getMasterKey } from "../config.ts";
 import { sealSecret } from "../crypto/secretEncrypt.ts";
 import type { UserRow } from "../db/rows.ts";
@@ -67,7 +72,7 @@ export function mfaRouter(state: AppState): Router {
 		"/totp/confirm",
 		requireSession(state),
 		requireCsrf,
-		(req, res) => {
+		asyncHandler(async (req, res) => {
 			const { secret, code, label } = req.body ?? {};
 			if (typeof secret !== "string" || typeof code !== "string") {
 				res.status(422).json({ detail: "secret and code required" });
@@ -85,6 +90,13 @@ export function mfaRouter(state: AppState): Router {
 			}
 			state.lockout.resetSuccess(db, sessionKey);
 			const userId = req.sessionRow!.user_id;
+			// A TOTP seed is credential material and rides with the password hash
+			// (§5.10, D-12): it does not replicate, so the version bump below is
+			// what tells peers their copy is stale, and the publish is what puts
+			// the new seed where they can fetch it from. A second factor that is
+			// unavailable on the node you are logging into is not a second
+			// factor, it is an outage.
+			const mark = revocationMark(state);
 			const encrypted = sealSecret(
 				getMasterKey(state.settings),
 				Buffer.from(secret),
@@ -95,6 +107,7 @@ export function mfaRouter(state: AppState): Router {
 				encrypted,
 				typeof label === "string" && label ? label : "Authenticator app",
 			);
+			bumpCredentialVersion(db, userId);
 			const enrolledUser = db.get<UserRow>(
 				"SELECT * FROM users WHERE id = $id",
 				{ $id: userId },
@@ -105,8 +118,12 @@ export function mfaRouter(state: AppState): Router {
 				target: `credential:${id}`,
 				ip: clientIp(state, req),
 			});
-			res.json({ status: "enrolled", id });
-		},
+			res.json({
+				status: "enrolled",
+				id,
+				revocation: await publishCredentialChange(state, userId, mark),
+			});
+		}),
 	);
 
 	router.post(
@@ -226,18 +243,30 @@ export function mfaRouter(state: AppState): Router {
 				return;
 			}
 			const id = Number(req.params.id);
+			// Read the kind before it is gone: only a TOTP removal invalidates
+			// what peers hold. A passkey is node-local by construction (D-18) --
+			// no peer ever had a copy, so bumping for one would send every node
+			// off to refetch material that has not changed.
+			const wasTotp = credentials.getById(db, id)?.kind === "totp";
+			const mark = revocationMark(state);
 			const ok = credentials.deleteCredential(db, user.id, id);
 			if (!ok) {
 				res.status(404).json({ detail: "credential not found" });
 				return;
 			}
+			if (wasTotp) bumpCredentialVersion(db, user.id);
 			recordAudit(db, {
 				actor: user.username,
 				action: "mfa.credential_removed",
 				target: `credential:${id}`,
 				ip: clientIp(state, req),
 			});
-			res.json({ status: "removed" });
+			res.json({
+				status: "removed",
+				revocation: wasTotp
+					? await publishCredentialChange(state, user.id, mark)
+					: undefined,
+			});
 		}),
 	);
 
