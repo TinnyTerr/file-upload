@@ -6,6 +6,7 @@ import {
 	unlinkSync,
 } from "node:fs";
 import { recordAudit } from "../audit.ts";
+import { rechunkBlob } from "../cluster/placement.ts";
 import { type ContentBlobRow, type FileRow, nowIso } from "../db/rows.ts";
 import type { Db } from "../db/types.ts";
 import { HttpError } from "../httpError.ts";
@@ -17,7 +18,7 @@ import {
 	usedStorageBytes,
 	usedStorageBytesForUser,
 } from "../storage/accounting.ts";
-import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
+import { hashFile, releaseBlob, unlinkQueued } from "../storage/blobs.ts";
 import {
 	compressFile,
 	decompressStream,
@@ -150,6 +151,9 @@ export async function archiveIdleJob(db: Db): Promise<number> {
 						$id: blob.id,
 					},
 				);
+				// The bytes on disk are new bytes, so the chunk manifest describing
+				// the old ones is now wrong -- see cluster/placement.ts::rechunkBlob.
+				rechunkBlob(db, blob.id, (await hashFile(src)).chunks);
 			}
 			log.info(
 				`archive idle job archived file_id=${f.id} original_bytes=${original} stored_bytes=${stored} saved_bytes=${saved}`,
@@ -340,6 +344,7 @@ export async function archiveFileCore(
 					$id: blob.id,
 				},
 			);
+			rechunkBlob(db, blob.id, (await hashFile(src)).chunks);
 		}
 		recordAudit(db, {
 			actor,
@@ -455,6 +460,7 @@ export async function unarchiveFileCore(
 					$id: blob.id,
 				},
 			);
+			rechunkBlob(db, blob.id, (await hashFile(src)).chunks);
 		}
 		recordAudit(db, {
 			actor,

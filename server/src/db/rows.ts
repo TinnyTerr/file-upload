@@ -92,6 +92,34 @@ export interface ContentBlobRow {
 	created_at: string;
 }
 
+/** One entry of a blob's chunk manifest (cluster/placement.ts, §5.11). The
+ * chunk's bytes are the byte range of the blob's file starting at the sum of
+ * the preceding chunks' sizes. */
+export interface BlobChunkRow {
+	id: number;
+	uid: string | null;
+	blob_id: number;
+	idx: number;
+	chunk_sha256: string;
+	size_bytes: number;
+	created_at: string;
+}
+
+export type ChunkState = "present" | "wanted" | "evicted";
+
+/** Which node holds which chunk. Replicated, so every node can pick a source
+ * (or a push target) from a table read rather than by asking every peer. */
+export interface ChunkLocationRow {
+	id: number;
+	uid: string | null;
+	chunk_sha256: string;
+	node_id: string;
+	state: ChunkState;
+	size_bytes: number;
+	pinned: number;
+	updated_at: string;
+}
+
 export interface FileRow {
 	id: number;
 	/** Cluster-wide identity (cluster/identity.ts). NULL only on a row that

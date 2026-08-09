@@ -509,16 +509,73 @@ CREATE TABLE IF NOT EXISTS cluster_drift (
   settled_at             TEXT
 );
 
--- Local-only cache bookkeeping for REPLICATION_MODE=cache nodes. Deliberately
--- NOT in cluster/replication.ts's REPLICATED_TABLES -- content_blobs rows
--- (the metadata) are replicated everywhere, but whether THIS node physically
--- holds a given blob's bytes right now, and when it last served them, is a
--- per-node fact. Every locally-present blob is tracked here, not just
--- peer-fetched ones -- on a cache-mode node, even a blob that landed here via
--- a direct upload is just the newest cache entry, evictable like any other.
+-- Superseded by chunk_locations + local_chunk_cache below (Phase 8): presence
+-- and the LRU clock are per *chunk* now, not per blob. Nothing reads this
+-- table any more; it survives because SQLite cannot drop one in place.
 CREATE TABLE IF NOT EXISTS local_blob_cache (
   blob_id INTEGER PRIMARY KEY REFERENCES content_blobs(id) ON DELETE CASCADE,
   last_accessed_at TEXT NOT NULL
+);
+
+-- ── chunking (cluster/placement.ts, redesign §5.11) ─────────────────────────
+--
+-- Every blob is a manifest over N content-addressed chunks of its *stored*
+-- bytes, and every node's copy of the manifest agrees, because both tables
+-- replicate through the change log. That is what replaces the sequential
+-- "ask each peer in turn whether it has this blob" walk (D6) with a lookup:
+-- chunk_locations already says who holds what.
+--
+-- The bytes themselves are not a separate object store. A chunk is a byte
+-- RANGE of the blob's file at content_blobs.storage_path (which replicates, so
+-- every node agrees on the path too), and a node holding only some of a blob's
+-- chunks holds a sparse file. A node that happens to hold all of them holds
+-- exactly the file every read path already opens, which is what makes chunking
+-- an addition rather than a rewrite of the read path.
+
+CREATE TABLE IF NOT EXISTS blob_chunks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid TEXT,
+  blob_id INTEGER NOT NULL REFERENCES content_blobs(id) ON DELETE CASCADE,
+  idx INTEGER NOT NULL,
+  chunk_sha256 TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+-- (blob_id, idx) is the natural key and is deliberately NOT unique: a UNIQUE
+-- violation raised while applying a peer's entry halts the whole replication
+-- batch, and a manifest is written once by the node that created the blob and
+-- read everywhere else, so uniqueness is maintained by only ever minting one
+-- (cluster/placement.ts::recordManifest, which is a no-op when rows exist).
+CREATE INDEX IF NOT EXISTS ix_blob_chunks_blob ON blob_chunks(blob_id, idx);
+CREATE INDEX IF NOT EXISTS ix_blob_chunks_sha ON blob_chunks(chunk_sha256);
+
+CREATE TABLE IF NOT EXISTS chunk_locations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  uid TEXT,
+  chunk_sha256 TEXT NOT NULL,
+  -- The cluster node id (a string identity), never a cluster_nodes row id --
+  -- this row travels, and a local id would land on a peer meaning nothing.
+  node_id TEXT NOT NULL,
+  -- 'present' (the bytes are on that node) | 'evicted' (they were, and the
+  -- cache reclaimed them) | 'wanted' (placement has chosen that node and the
+  -- push has not landed yet).
+  state TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  -- 1 for a durability copy placed by the replication factor. Pinned chunks
+  -- are exempt from LRU eviction: they are not cache.
+  pinned INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_chunk_locations_sha ON chunk_locations(chunk_sha256, state);
+CREATE INDEX IF NOT EXISTS ix_chunk_locations_node ON chunk_locations(node_id, state);
+
+-- The LRU clock, node-local on purpose. `last_read_at` is the one fact about a
+-- chunk that changes on every read, and putting it in the replicated table
+-- would append a change-log entry -- and ship it cluster-wide -- every time
+-- somebody watched a video.
+CREATE TABLE IF NOT EXISTS local_chunk_cache (
+  chunk_sha256 TEXT PRIMARY KEY,
+  last_read_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS cluster_events (
@@ -764,3 +821,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_directories_uid ON directories(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_directory_links_uid ON directory_links(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_files_uid ON files(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_links_uid ON links(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_blob_chunks_uid ON blob_chunks(uid);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_chunk_locations_uid ON chunk_locations(uid);

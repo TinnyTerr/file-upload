@@ -966,24 +966,26 @@ correctness.
 
 ### Built so far (2026-08-09)
 
-Phases **0 through 7** are implemented and green — the door is walked through, the
-topology in this document actually exists, nothing is overwritten silently any more, and
-credential material no longer travels to nodes that have no use for it.
+Phases **0 through 8** are implemented and green — the door is walked through, the
+topology in this document actually exists, nothing is overwritten silently any more,
+credential material no longer travels to nodes that have no use for it, and a blob is no
+longer an object a node either holds whole or not at all.
 
 | Phase | Landed as |
 |---|---|
 | 0 | `server/tests/clusterHarness.ts` — `makeCluster({size})`, N real nodes on real ports |
 | 1 | `eventBus.seedSeq` + front-truncated `recent()`; `/admin/cluster/events` serves the durable table; local events persist synchronously |
-| 2 | `cluster/identity.ts` — ULID `uid` on all seven replicated tables, unique, backfilled at database open |
+| 2 | `cluster/identity.ts` — ULID `uid` on every replicated table (seven then, nine after Phase 8), unique, backfilled at database open |
 | 3 | `cluster/changelog.ts` (triggers + apply + cursors + seed), `cluster/replication.ts` rewritten as the pull, `GET /api/cluster/changes`, `cluster_replication_pull` job |
 | 4 | `cluster/tiering.ts` — `cluster_tiering` + `cluster_drift`, the deterministic leader function, region inference, generation minting and the hold-down drift counter. **`cluster/election.ts` deleted in full**, with epochs, votes, `cluster_self_state`, `/vote-request`, `/master-assumed`, `cluster_election_liveness` and `digest.ts`'s split-brain check |
 | 5 | `cluster/quota.ts` — the `quota_reservations` ledger, `/cluster/quota/{reserve,renew,commit,release}`, sliding TTL + sweep. `cluster/degraded.ts` + `middleware/degradedMode.ts` — reachability state machine, 5-minute grace, held-request queue, write gate. `promoteSelf` + `POST /cluster/promote` + the admin banner |
 | 6 | `cluster/conflicts.ts` — `replication_conflicts`, the total timestamp/node-id rule and the skew clamp, arbitrated inside `applyChanges` on the master alone; `/cluster/conflicts` + dismiss + re-apply, and the admin **Conflicts** tab. `cluster/revocation.ts` — `revocationMark`/`pushRevocation` + `POST /cluster/revocations`, wired into permission edits, user updates and deletion, share- and folder-link edits and deletes, and sealing |
 | 7 | `cluster/identityFetch.ts` — `password_hash` out of `TABLE_COLUMNS`, `users.credential_version` (replicated) + `credential_version_local` (not), `POST /cluster/identity/{fetch,publish}`, the login-time fetch, and the publish-to-master on every credential write. WebAuthn untouched, because it was already node-local |
+| 8 | `cluster/placement.ts` — `blob_chunks` + `chunk_locations` (both replicated, both in `UID_TABLES`), the manifest computed in the hash pass `finalizeStoredFile` already made, `GET/HEAD/POST /cluster/chunks/:sha`, registry-driven read-time fetch in `cluster/blobs.ts`, the `cluster_chunk_replication` push job, and `cacheEviction.ts` rewritten as LRU over *unpinned* chunks with the durability check as a table read plus one HEAD. `PUT /cluster/cache-cap` and the dashboard's pinned/cached/headroom line |
 
 Tests: `clusterEvents`, `clusterIdentity`, `clusterChangelog`, `clusterReplication`,
 `clusterTiering`, `clusterQuota`, `clusterConflicts`, `clusterRevocation`,
-`clusterTopology`, `clusterIdentityFetch`.
+`clusterTopology`, `clusterIdentityFetch`, `clusterChunks`.
 
 Three implementation decisions worth recording, because the text above does not predict
 them:
@@ -1072,7 +1074,7 @@ And four from Phase 6:
   that lost.
 - **Conflicts are read through to the master, not replicated.** The doc says the conflict
   row "ships down like any other row". Making that literally true would mean adding an
-  eighth table to `UID_TABLES` — with a `uid`, triggers and a boot backfill — for rows only
+  another table to `UID_TABLES` — with a `uid`, triggers and a boot backfill — for rows only
   the master ever writes. The panel on a non-master proxies to the master instead: one
   writer, one record, and no second thing that can disagree about a verdict.
 - **Arbitration is idempotent by construction.** A peer whose cursor slips re-delivers
@@ -1117,6 +1119,44 @@ And four from Phase 7:
   an arbitration against a real concurrent edit and discard it. Material learned from a
   peer is not this node's own write, so `replication_control.suppressed` is raised around
   it, on the same reasoning that raises it inside `applyChanges`.
+
+And five from Phase 8:
+
+- **A chunk is a byte range of the blob's file, not an object in a chunk store.** §5.11
+  describes chunks as if they were separately stored things. Storing them separately would
+  either double the disk of every complete blob or force every existing read path —
+  `routes/public.ts`, `storage/zip.ts`, `thumbnail.ts`, `rekey.ts`, ffprobe — through an
+  assembly layer. Instead the manifest *describes* the file that is already there:
+  `content_blobs.storage_path` replicates, so every node agrees on the path, and a node
+  holding a subset holds a sparse file with the ranges it has. A node holding all of them
+  holds exactly what every read path opens today, so chunking became an addition to the
+  read path rather than a rewrite of it.
+- **The registry decides partial holdings; the file decides complete ones.** A sparse
+  file's length reaches the end of the highest chunk written, so `existsSync` and even a
+  size check cannot distinguish a whole blob from one with holes. The rule is: believe a
+  location row whenever one exists, and with no rows at all believe a file of exactly
+  `stored_size_bytes` — which is every blob written before this phase, and every blob on a
+  node that has never evicted. That is also what keeps the read path's fast case one stat
+  and one indexed lookup instead of a walk over a 2,560-entry manifest.
+- **`last_read_at` is node-local, and neither natural key is UNIQUE.** The LRU clock moved
+  out of `chunk_locations` into `local_chunk_cache`, because a column that changes on every
+  read would append a change-log entry — and ship it cluster-wide — every time somebody
+  watched a video. And neither `(blob_id, idx)` nor `(chunk_sha256, node_id)` carries a
+  constraint: a UNIQUE violation raised while applying a peer's entry halts the whole
+  replication batch, so uniqueness is held by having one writer per row (the creating node
+  for a manifest, the owning node for a location) and by counting `DISTINCT node_id`
+  rather than rows.
+- **Legacy blobs are seeded as one whole-file chunk, by the master alone.** R-2's
+  recommendation, with the detail R-2 does not state: the seed is *free*, because a legacy
+  blob's single chunk hash is its `stored_sha256` and nothing has to be read — and it must
+  run on one node only, or two nodes would mint two manifests for the same blob and ship
+  both.
+- **An eviction that frees nothing is not recorded as one.** Evicting a chunk out of the
+  middle of a file that has to stay needs a hole punched in it, which no portable API
+  exposes; `fallocate --punch-hole` is attempted and its failure is an ordinary answer.
+  When it fails the chunk stays `present` and the pass moves on, because a cache that
+  believed it was under its cap while the disk said otherwise would evict its way down to
+  nothing.
 
 ---
 

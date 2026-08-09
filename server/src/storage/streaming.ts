@@ -9,20 +9,25 @@
 
 import { type Stats, statSync } from "node:fs";
 import type { AppState } from "../appState.ts";
-import { fetchBlobFromPeers } from "../cluster/blobs.ts";
+import { ensureBlobLocal } from "../cluster/blobs.ts";
 import { getMasterKey } from "../config.ts";
 import { decryptStream } from "../crypto/aead.ts";
 import { resolveFileEncryption } from "../crypto/effectiveEncryption.ts";
 import { openBox } from "../crypto/secretbox.ts";
-import type { FileRow } from "../db/rows.ts";
+import type { ContentBlobRow, FileRow } from "../db/rows.ts";
 import type { Db } from "../db/types.ts";
 import { decompressStream } from "./compress.ts";
 import { writeStreamToFile } from "./zip.ts";
 
 /** Read-time cluster failover: if this file is a deduped, content-addressed
- * blob (blob_id set) and the local bytes are missing, try pulling them from
- * any active peer that still has them (see server/src/cluster/blobs.ts).
- * Best-effort and silent on failure -- the caller re-checks existsSync and
+ * blob (blob_id set) and some of its bytes are not here, pull the missing
+ * chunks from whichever nodes the registry says hold them (see
+ * server/src/cluster/blobs.ts and cluster/placement.ts).
+ *
+ * "Not here" is a per-chunk question since Phase 8: a node may hold part of a
+ * blob, so this can no longer be answered by `existsSync` alone -- which is
+ * why the check moved inside `ensureBlobLocal` rather than staying at the call
+ * sites. Best-effort and silent on failure: the caller re-checks the file and
  * falls back to its usual "file missing from storage" 500. */
 export async function ensureBlobAvailable(
 	state: AppState,
@@ -30,18 +35,13 @@ export async function ensureBlobAvailable(
 	fullPath: string,
 ): Promise<void> {
 	if (!f.blob_id) return;
-	const blob = state.db.get<{ stored_sha256: string; transform_key: string }>(
-		"SELECT stored_sha256, transform_key FROM content_blobs WHERE id = $id",
+	const blob = state.db.get<ContentBlobRow>(
+		"SELECT * FROM content_blobs WHERE id = $id",
 		{ $id: f.blob_id },
 	);
 	if (!blob) return;
 	try {
-		await fetchBlobFromPeers(state, {
-			storedSha256: blob.stored_sha256,
-			transformKey: blob.transform_key,
-			dest: fullPath,
-			blobId: f.blob_id ?? undefined,
-		});
+		await ensureBlobLocal(state, blob, fullPath);
 	} catch {
 		// best-effort -- caller falls back to a 500 if this didn't help
 	}

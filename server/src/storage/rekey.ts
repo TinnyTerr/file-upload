@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { copyFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AppState } from "../appState.ts";
+import { pinsByDefault } from "../cluster/placement.ts";
 import { getMasterKey } from "../config.ts";
 import { encryptFile } from "../crypto/aead.ts";
 import type { EffectiveEncryption } from "../crypto/effectiveEncryption.ts";
@@ -166,9 +167,7 @@ export async function rewriteFileEncryption(
 	// browser-side conversion path -- which goes through GET /files/:id/content,
 	// and *does* fetch on miss -- keeps working. Pull the blob back first.
 	const localPath = safeJoin(storageRoot(), f.storage_path);
-	if (!existsSync(localPath)) {
-		await ensureBlobAvailable(state, f, localPath);
-	}
+	await ensureBlobAvailable(state, f, localPath);
 
 	const [plain, isTemp] = await memberSource(db, masterKey, f);
 	const relPath = newInternalRelPath();
@@ -189,6 +188,8 @@ export async function rewriteFileEncryption(
 			contentType: f.content_type,
 			hashes: plainHashes,
 			storedHashes,
+			storedChunks: storedHashes.chunks,
+			pinned: pinsByDefault(state),
 			transformKey: `${next.mode}:compressed=0`,
 		});
 		// Release before repointing: releaseBlob reads f.blob_id (still the old

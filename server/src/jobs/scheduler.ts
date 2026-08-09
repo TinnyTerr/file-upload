@@ -2,6 +2,7 @@ import type { AppState } from "../appState.ts";
 import { cacheEvictionJob } from "../cluster/cacheEviction.ts";
 import { syncCheckJob } from "../cluster/digest.ts";
 import { heartbeatJob } from "../cluster/membership.ts";
+import { chunkReplicationJob } from "../cluster/placement.ts";
 import { quotaSweepJob } from "../cluster/quota.ts";
 import { replicationPullJob } from "../cluster/replication.ts";
 import { tieringDriftJob } from "../cluster/tiering.ts";
@@ -114,6 +115,15 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 			id: "cluster_cache_eviction",
 			intervalMs: TEN_MIN_MS,
 			run: () => cacheEvictionJob(state),
+		},
+		// Places the replication factor's worth of copies of every chunk this
+		// node holds (§5.11). Background work with a per-tick budget: it is
+		// durability catching up, not a transfer anybody is waiting on. A node
+		// with no peers finds no target and does nothing.
+		{
+			id: "cluster_chunk_replication",
+			intervalMs: MINUTE_MS,
+			run: () => chunkReplicationJob(state),
 		},
 		// One qBittorrent request per tick (not per job), and zero requests at
 		// all when no job is in flight -- see torrents/poller.ts.

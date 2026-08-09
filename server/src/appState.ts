@@ -1,8 +1,13 @@
-import { seedChangeLog, setNodeIdentity } from "./cluster/changelog.ts";
+import {
+	isMasterNode,
+	seedChangeLog,
+	setNodeIdentity,
+} from "./cluster/changelog.ts";
 import { MasterReachability } from "./cluster/degraded.ts";
 import { EventBus } from "./cluster/eventBus.ts";
 import { ClusterEventWriter } from "./cluster/eventStore.ts";
 import { HaltRegistry } from "./cluster/halt.ts";
+import { seedLegacyManifests } from "./cluster/placement.ts";
 import type { Settings } from "./config.ts";
 import type { Db } from "./db/types.ts";
 import { LockoutPolicy } from "./security/lockout.ts";
@@ -43,6 +48,12 @@ export function createAppState(settings: Settings, db: Db): AppState {
 	// already holds, so a peer joining later receives the existing corpus
 	// through the ordinary pull path rather than a separate snapshot endpoint.
 	seedChangeLog(db);
+	// After the seed, never before: recording a manifest appends log entries,
+	// and a non-empty log is exactly what makes `seedChangeLog` decide it has
+	// already run. Master-only, because a manifest has one writer cluster-wide
+	// (cluster/placement.ts::recordManifest) and two nodes seeding the same
+	// legacy blob would ship two sets of rows for it.
+	if (isMasterNode(db)) seedLegacyManifests(db);
 	const eventBus = new EventBus(settings);
 	const eventWriter = new ClusterEventWriter(db);
 	// Locally-originated events persist synchronously (see eventWriter.write):

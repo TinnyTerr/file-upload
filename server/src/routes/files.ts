@@ -19,6 +19,10 @@ import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
 import {
+	chunkSize as blobChunkSize,
+	pinsByDefault,
+} from "../cluster/placement.ts";
+import {
 	commitQuota,
 	type Reservation,
 	type ReservationKind,
@@ -100,7 +104,6 @@ const log = getLogger("app.routes.files");
 
 const CHUNK = 256 * 1024;
 const REQUEST_OVERHEAD_ALLOWANCE = 1024 * 1024;
-const CHUNK_UPLOAD_SIZE = 16 * 1024 * 1024;
 const CHUNK_SESSION_TTL = 12 * 3600;
 
 /** Renew the session's quota reservation on one chunk in this many. See the
@@ -543,6 +546,8 @@ export async function finalizeStoredFile(
 			contentType: ct,
 			hashes: plainHashes,
 			storedHashes,
+			storedChunks: storedHashes.chunks,
+			pinned: pinsByDefault(state),
 			transformKey,
 		});
 
@@ -736,14 +741,14 @@ function openChunkToken(
 	return meta;
 }
 
-/** Exported for reuse by dropbox.ts. */
+/** Exported for reuse by dropbox.ts.
+ *
+ * Delegates to `cluster/placement.ts`, which owns the size because a blob's
+ * chunk manifest and an upload session's parts have to agree on it: 16 MiB is
+ * a whole multiple of the AEAD container's 2 MiB frame, and two definitions
+ * could drift apart into a boundary that bisects one. */
 export function chunkUploadSize(): number {
-	const raw = configValue("FILEUPLOAD_CHUNK_SIZE");
-	if (raw) {
-		const v = Number(raw);
-		if (v > 0) return v;
-	}
-	return CHUNK_UPLOAD_SIZE;
+	return blobChunkSize();
 }
 
 /** Exported for reuse by dropbox.ts. */
@@ -2405,9 +2410,7 @@ export function filesRouter(state: AppState): Router {
 				res.status(500).json({ detail: "invalid storage path" });
 				return;
 			}
-			if (!existsSync(fullPath)) {
-				await ensureBlobAvailable(state, fileObj, fullPath);
-			}
+			await ensureBlobAvailable(state, fileObj, fullPath);
 			if (!existsSync(fullPath)) {
 				res.status(500).json({ detail: "file missing from storage" });
 				return;

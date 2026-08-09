@@ -57,6 +57,7 @@ export const CONFIG_KEYS = [
 	"ARCHIVE_ENABLED",
 	"REPLICATION_MODE",
 	"CACHE_MAX_BYTES",
+	"REPLICATION_FACTOR",
 	"QBITTORRENT_URL",
 	"QBITTORRENT_USERNAME",
 	"QBITTORRENT_PASSWORD",
@@ -119,6 +120,10 @@ export interface Settings {
 	archiveEnabled: boolean;
 	replicationMode: string;
 	cacheMaxBytes: number;
+	/** Chunk copies the cluster keeps of every chunk (§5.11, D-11). 2 by
+	 * default; 1 means "wherever it was written and nowhere else", which is
+	 * also what a single-node deployment gets for free. */
+	replicationFactor: number;
 	/** qBittorrent WebUI base URL, e.g. http://127.0.0.1:8080. Empty = torrenting disabled. */
 	qbittorrentUrl: string;
 	qbittorrentUsername: string;
@@ -394,6 +399,7 @@ export function loadSettings(configPathArg?: string): Settings {
 			: true,
 		replicationMode: map.get("REPLICATION_MODE") || "full",
 		cacheMaxBytes: Number(map.get("CACHE_MAX_BYTES") || "0"),
+		replicationFactor: Number(map.get("REPLICATION_FACTOR") || "2"),
 		qbittorrentUrl: (map.get("QBITTORRENT_URL") || "").replace(/\/+$/, ""),
 		qbittorrentUsername: map.get("QBITTORRENT_USERNAME") || "",
 		qbittorrentPassword: map.get("QBITTORRENT_PASSWORD") || "",

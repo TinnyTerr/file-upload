@@ -13,12 +13,13 @@ Many source comments still say "Mirrors `app/routes/x.py`" or similar. Those ref
 Multi-node replication lives in `server/src/cluster/*.ts`:
 - `membership.ts` — join/heartbeat/enroll handshake, full-mesh peer topology
 - `tiering.ts` — leadership as a **pure function** of a master-minted membership snapshot: `cluster_tiering` generations, region inference, the deterministic leader/master computation, `upstreamOf` (the whole topology rule) and the `cluster_drift` hold-down counter. `initTiering` runs from `index.ts` **before** `createAppState`, because the change-log seed reads `replication_control.is_master`. It replaced `election.ts`, which is **deleted** — there are no votes, no epochs and no `cluster_self_state` any more
-- `identity.ts` — ULID row identity (`uid`) for replicated tables + the live-safe boot backfill. `UID_TABLES` is the canonical list of replicated tables: `users`, `permissions`, `content_blobs`, `directories`, `directory_links`, `files`, `links` — nothing else replicates
+- `identity.ts` — ULID row identity (`uid`) for replicated tables + the live-safe boot backfill. `UID_TABLES` is the canonical list of replicated tables: `users`, `permissions`, `content_blobs`, `blob_chunks`, `chunk_locations`, `directories`, `directory_links`, `files`, `links` — nothing else replicates
 - `changelog.ts` — the `replication_log`: trigger-generated, appended **inside the writing transaction**, and the only mechanism by which metadata leaves a node. Owns `CHANGELOG_TABLES` (= `UID_TABLES`), `TABLE_COLUMNS`, `BLOB_COLUMNS`, `FOREIGN_KEYS`, `installChangeLog`, `setNodeIdentity`, `seedChangeLog`, `readChanges`, `applyChanges`, and the cursor accessors
 - `replication.ts` — hierarchical pull of that log (`GET /api/cluster/changes`) + per-peer, per-direction cursors
 - `topology.ts` — the replication graph the cluster dashboard draws: every node this one knows of, its derived role, and its upstream. Built from the same `upstreamOf()` over the same generation that `pullTargets` uses, with the same liveness observation, so the picture cannot disagree with the pulls. `GET /api/cluster/topology`
-- `blobs.ts` — content-addressed blob fetch-on-miss from peers (read-time failover for `routes/public.ts`'s raw/preview handlers)
-- `cacheEviction.ts` — LRU eviction for `REPLICATION_MODE=cache` nodes; verifies durability on a full-replica peer before deleting anything
+- `placement.ts` — chunking (Phase 8, §5.11): the `blob_chunks` manifest, the `chunk_locations` registry, the local physical layer (`localChunk`, `writeChunkAt`, `reclaimChunk`), the LRU clock in node-local `local_chunk_cache`, `chunkReplicationJob` + `choosePlacementTarget`, `reconcileLocalChunks`/`gcOrphanChunks`, and `chunkSize()` — the one definition of 16 MiB, which `routes/files.ts::chunkUploadSize` now delegates to
+- `blobs.ts` — fetch-on-miss, per chunk and registry-driven: `ensureBlobLocal` pulls exactly the chunks this node lacks from whoever `chunk_locations` names, nearest-first by RTT, four at a time, verifying each against its own hash. `fetchBlobFromPeers` (the old whole-blob peer walk) survives for the two cases with no manifest to work from
+- `cacheEviction.ts` — LRU eviction over **unpinned** chunks for `REPLICATION_MODE=cache` nodes; durability is read off `chunk_locations` and confirmed with one HEAD against a node it names. Also runs the registry housekeeping (`gcOrphanChunks`, `reconcileLocalChunks`) on every node, cache or not
 - `halt.ts` — in-memory TTL'd upload halt registry (user-scope + global), gossiped over the event firehose
 - `quota.ts` — the master-side `quota_reservations` ledger and its client. **The only synchronous cross-node call on the write path.** Reserve → commit/release, sliding TTL, sweep. On the master (and on any single-node deployment) every call resolves in-process, so an unclustered server pays nothing
 - `degraded.ts` — master-reachability state machine: 5-minute restart grace during which writes are **held**, then degraded (reads only). `middleware/degradedMode.ts` is the write gate that enforces it
@@ -75,7 +76,7 @@ moved on, the two edits are concurrent.
   entry would clobber whatever later edit has since won the row.
 - **Conflicts are read through to the master, not replicated.** They are rows only
   the master writes, so the panel on any other node proxies `/cluster/conflicts`
-  to it rather than adding an eighth table to `UID_TABLES`.
+  to it rather than adding another table to `UID_TABLES`.
 - **Re-apply is a fresh edit on top of the winner, never a replay.** Replaying the
   original entry would re-enter the arbitration it already lost.
 
@@ -140,12 +141,63 @@ than per login.
   therefore share. They already must: `files.enc_key_blob` replicates and is
   sealed the same way.
 
+**Chunking: a blob is a manifest, and where its chunks live is a table (Phase
+8, §5.11, B10/D6/D-10/D-11).** Every blob is split into content-addressed
+chunks of its *stored* bytes — `chunkSize()`, 16 MiB, a whole multiple of the
+AEAD container's 2 MiB frame, so a boundary never bisects a GCM frame. The
+manifest (`blob_chunks`) and the registry of who holds what
+(`chunk_locations`) both replicate, so every node can pick a source, a push
+target or an eviction candidate from a table read instead of asking every peer
+in turn.
+
+- **The bytes are not a separate object store.** A chunk is a byte *range* of
+  the blob's file at `content_blobs.storage_path` — a replicated column, so
+  every node agrees on the path — and a node holding a subset holds a sparse
+  file. A node holding all of them holds exactly the file every existing read
+  path already opens, which is why chunking added to the read path rather than
+  rewriting it.
+- **Presence is a database fact for partial holdings and a file fact for whole
+  ones.** A sparse file's length reaches the end of the highest chunk written,
+  so size alone cannot spot a hole. `holdsChunkLocally`: believe a location row
+  whenever one exists; with none at all, believe a file of exactly
+  `stored_size_bytes`. `blobCompleteLocally` is the read path's fast case — one
+  stat and one indexed lookup, not a walk over a 2,560-entry manifest.
+- **The manifest has exactly one writer.** It is minted by the node that
+  created the blob, inside the hash pass `finalizeStoredFile` was already
+  making (`hashFile` returns chunk digests, so there is no second read of the
+  file), and every other node receives it. A dedup hit records *presence*, never
+  a manifest. Legacy blobs are seeded as one whole-file chunk — free, since a
+  legacy blob's chunk hash is its `stored_sha256` — and **only on the master**,
+  after `seedChangeLog`, or two nodes would ship two manifests for one blob.
+- **The archive job is the one thing that rewrites stored bytes in place**, so
+  it is the one thing that must call `rechunkBlob`; every hash in the old
+  manifest describes bytes that no longer exist.
+- **`pinned` separates durability from cache.** A copy placed by
+  `REPLICATION_FACTOR` (default 2) is pinned and never evicted, even on a cache
+  node; a read-time fetch on a cache node is not. `CACHE_MAX_BYTES` caps the
+  *unpinned* bytes only, and the dashboard shows the two apart because
+  conflating them is why cache mode has been hard to reason about.
+- **Eviction checks the registry, then confirms once.** `copyCount` must exceed
+  the factor and one HEAD against a node the registry names must succeed before
+  anything is deleted. If the reclaim frees nothing — a hole in a file that has
+  to stay, on a filesystem that won't punch one — the chunk stays `present`,
+  because a cache that thinks it is under its cap while the disk disagrees
+  evicts its way to nothing.
+- **Neither natural key is UNIQUE**, deliberately: a UNIQUE violation raised
+  while applying a peer's entry halts the whole replication batch. Uniqueness is
+  held by one-writer-per-row, and copies are counted with
+  `COUNT(DISTINCT node_id)`.
+- **`last_read_at` is node-local** (`local_chunk_cache`). In the replicated
+  table it would append a change-log entry, cluster-wide, every time somebody
+  watched a video. `touchBlobRead` throttles to once a minute per blob for the
+  same reason `sessions.last_seen_at` does.
+
 **Degraded mode (§5.5).** A node that cannot reach the master **holds** write-path requests for a 5-minute restart grace, then goes read-only. There is no automatic failover, by design: a node cannot tell "the master died" from "I got cut off", and promoting on the second reading is the split brain the deleted `election.ts` failed to prevent. Recovery is the master returning, or `POST /api/cluster/promote` — refused unless the node is genuinely degraded, and requiring the node's own name typed back as confirmation.
 
 - `middleware/degradedMode.ts` gates **by method with a short allowlist**, mounted once in `app.ts`, rather than enumerating write routes — so it fails closed and a route added later is refused unless deliberately allowlisted. `/api/cluster` is on that list because promotion is the only way out and gating it would make degraded mode unrecoverable.
 - Reads never gate. Every read here is local by construction, which is what makes a degraded node useful rather than merely up.
 
-`routes/cluster.ts` exports `clusterRouter` (mounted at `/api/cluster`: session-authenticated management endpoints — `/token`, `/token/rotate`, `/self`, `/topology`, `/conflicts` (+ `/:id/dismiss`, `/:id/reapply`), `/nodes` (GET/POST/PATCH/DELETE), `/retier`, enroll/unlink — **plus** cluster-token-authenticated node-to-node endpoints — `/join`, `/heartbeat`, `/ping`, `/blobs/:storedSha256`, `/digest`, `/changes`, `/tiering`, `/revocations`, `/identity/fetch`, `/identity/publish`) and `adminClusterRouter` (mounted at `/api/admin/cluster`: `/node-logs` + `/events`, the HTTP long-poll fallback for the websocket firehose). `server/src/ws.ts` attaches the websocket firehose directly to the `http.Server` returned by `app.listen()` in `index.ts`, since Express has no native websocket support.
+`routes/cluster.ts` exports `clusterRouter` (mounted at `/api/cluster`: session-authenticated management endpoints — `/token`, `/token/rotate`, `/self`, `/topology`, `/conflicts` (+ `/:id/dismiss`, `/:id/reapply`), `/nodes` (GET/POST/PATCH/DELETE), `/retier`, `/cache-cap`, enroll/unlink — **plus** cluster-token-authenticated node-to-node endpoints — `/join`, `/heartbeat`, `/ping`, `/blobs/:storedSha256`, `/chunks/:storedSha256` (GET/HEAD to serve, POST to accept a pushed durability copy), `/digest`, `/changes`, `/tiering`, `/revocations`, `/identity/fetch`, `/identity/publish`) and `adminClusterRouter` (mounted at `/api/admin/cluster`: `/node-logs` + `/events`, the HTTP long-poll fallback for the websocket firehose). `server/src/ws.ts` attaches the websocket firehose directly to the `http.Server` returned by `app.listen()` in `index.ts`, since Express has no native websocket support.
 
 **Invariant:** the in-memory event sequence counter in `eventBus.ts` assumes **one process per node** (this server makes a single `app.listen()` call and never forks workers). Colliding `origin_seq` values across workers is the exact bug class that broke logins under `uvicorn --workers=4` in the old deployment — see `cluster_events`' `UNIQUE(origin_node_id, origin_seq)`. Don't introduce multi-process scaling without redesigning event sequencing.
 
@@ -182,13 +234,15 @@ Phase 6 added `cluster/conflicts.ts` and `cluster/revocation.ts` — see
 "Conflicts" and "Revocations" below. Phase 7 added `cluster/identityFetch.ts` —
 see "Identity" below.
 
-**Phase 8 is next**: chunking — `blob_chunks`, `chunk_locations`, a
-configurable replication factor, push replication of chunks, and the LRU +
-pinned-exemption cache caps that go with it (B10, D6, D-10, D-11). It is
-separable: chunking is capability, not correctness.
-`cluster_nodes.epoch` and `throughput_bps` are dead columns today: the first is
-vestigial (SQLite cannot drop a column in place), the second is Phase 8's
-placement input.
+Phase 8 added `cluster/placement.ts` and rewrote `cluster/blobs.ts` and
+`cluster/cacheEviction.ts` around chunks — see "Chunking" below.
+`cluster_nodes.epoch` is a dead column (vestigial; SQLite cannot drop one in
+place). `throughput_bps` is now live: `placement.ts` samples it from real chunk
+pushes and feeds it into target selection.
+
+**Phase 9 is next**: per-node credentials — a short-lived one-use enrolment
+token minting a per-node-pair credential, rotation with an overlap window, and
+the node-to-node router split (S2, S3).
 
 ---
 
@@ -290,7 +344,9 @@ Environment variables:
 | `MASTER_URL` / `MASTER_TOKEN` | Coordinates a non-master node auto-joins at startup |
 | `CLUSTER_TOKEN` | Shared bearer token for node-to-node endpoints |
 | `REPLICATION_MODE` | `full` (default) or `cache` (bounded LRU over the cluster blob store) |
-| `CACHE_MAX_BYTES` | Cache-mode eviction cap. `0`/unset = never evict. |
+| `CACHE_MAX_BYTES` | Cache-mode eviction cap, over **unpinned** chunk bytes only. `0`/unset = never evict. Settable from the cluster dashboard (`PUT /api/cluster/cache-cap`). |
+| `REPLICATION_FACTOR` | Chunk copies kept cluster-wide (default `2`). `1` = wherever it was written and nowhere else |
+| `FILEUPLOAD_CHUNK_SIZE` | Chunk size for both upload sessions and blob manifests (default 16 MiB — a whole multiple of the AEAD 2 MiB frame) |
 | `ARCHIVE_ENABLED` | Advertised to peers; gates archive participation |
 | `REALDEBRID_API_KEY` | Real-Debrid API token. Set from the admin panel (Torrents tab), which validates it against `GET /user` before persisting. Empty = every torrent goes to qBittorrent. |
 | `REALDEBRID_ENABLED` | Admin kill switch (default `true`). `false` routes torrents to qBittorrent without discarding the saved token. |
@@ -330,7 +386,8 @@ swallowed rather than killing the timer.
 | `cluster_tiering_drift` | 1m | Drift counter + hold-down; re-tiers on threshold (`tiering.ts`). Master-only |
 | `cluster_quota_sweep` | 1h | Releases quota reservations idle for a full window (`quota.ts`). Master-only |
 | `cluster_replication_pull` | 1s | Pulls the change log from this node's targets |
-| `cluster_cache_eviction` | 10m | LRU eviction on `REPLICATION_MODE=cache` nodes |
+| `cluster_cache_eviction` | 10m | LRU chunk eviction on `REPLICATION_MODE=cache` nodes, plus registry housekeeping everywhere (`cacheEviction.ts`) |
+| `cluster_chunk_replication` | 1m | Pushes under-replicated chunks toward `REPLICATION_FACTOR` copies (`placement.ts`). 20 per tick |
 | `torrent_poll` | 5s | One qBittorrent list fetch per tick + Real-Debrid progress |
 
 `cluster_replication_pull` runs at 1s because one pull interval per hop is the
@@ -396,7 +453,8 @@ server/src/
     passwordKey.ts         # PBKDF2-HMAC-SHA256 (600k) for password-derived seal keys
   storage/
     paths.ts               # storageRoot/thumbnailRoot, safeJoin traversal guard, fan-out rel paths
-    blobs.ts               # Content-addressed dedup + ref counting (attachBlob / releaseBlob)
+    blobs.ts               # Content-addressed dedup + ref counting (attachBlob / releaseBlob).
+                           #   hashFile also returns the chunk manifest of the same pass.
     accounting.ts          # Quota + global cap + free-disk enforcement
     compress.ts            # zstd compress/decompress with zip-bomb guards
     zip.ts                 # safeArcname + memberSource (plaintext bytes for zip streaming)
@@ -840,7 +898,7 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - **Anything added to a replicated table must also be added to `cluster/changelog.ts`'s `TABLE_COLUMNS`**, or the column silently resets to its default on every peer. A new `BLOB` column additionally needs an entry in `BLOB_COLUMNS` (`json_object()` refuses to hold blob values, so they travel as hex) and a new id-valued column needs one in `FOREIGN_KEYS` — an untranslated id lands on a peer pointing at whatever row happens to occupy that number there.
 - **Don't call anything to replicate a write.** The change log is appended by a trigger inside the same transaction as the write itself (`cluster/changelog.ts`), which is the entire point of Phase 3 — the previous design asked every route handler to remember, and two of about forty did. A route that "also replicates" is a bug.
 - **`replication_control.suppressed` must be lowered on every path that raises it.** It is raised while applying a peer's entries so they aren't re-logged as local writes; left raised, this node silently stops logging its own. `installChangeLog` clears it at boot for exactly that reason.
-- **The change-log triggers do nothing until `setNodeIdentity` runs**, and that is load-bearing, not a startup race. It is what keeps `identity.ts`'s boot `uid` backfill — which rewrites every row in seven tables — out of the log. `createAppState` calls it, and nothing writes between `createDb` and there. Don't move a write earlier in `index.ts`.
+- **The change-log triggers do nothing until `setNodeIdentity` runs**, and that is load-bearing, not a startup race. It is what keeps `identity.ts`'s boot `uid` backfill — which rewrites every row in every replicated table — out of the log. `createAppState` calls it, and nothing writes between `createDb` and there. Don't move a write earlier in `index.ts`.
 - **`index.ts`'s startup order is a dependency chain, not a style choice.** `createDb` → `initTiering` (mints generation 1 from `NODE_ROLE` on first ever boot, and mirrors `replication_control.is_master`) → `createAppState` (`setNodeIdentity` + `seedChangeLog`, whose seed reads that column to decide whether this node assigns `master_seq`) → `ensureMaster` → workers → join. Reordering it either logs the backfill or seeds the log against the wrong role.
 - **`replication_control` carries `node_id`, `suppressed` and `is_master` as *columns* because a trigger cannot reach application state — only other tables.** `is_master` is mirrored there by `tiering.ts` on every generation change; a code path that changes who is master without going through `mirror()` silently stops (or starts) assigning `master_seq`.
 - **A replicated table is one in `identity.ts`'s `UID_TABLES`, and that list is `CHANGELOG_TABLES`.** Adding a table to one adds it to the other by construction — but it also needs a `TABLE_COLUMNS` entry, a `uid` column in `schema.sql`, and the backfill will rewrite every existing row on the next boot. Node-local tables (`sessions`, `media_play_keys`, `oauth_*`, `cluster_*`, `torrent_jobs`, `remote_upload_jobs`, `audit_log`) are absent **on purpose**; each has its own reason, recorded next to it.
@@ -861,6 +919,10 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - **`INSERT INTO users` must set `credential_version_local`.** A row inserted
   without it reads as "holds no material" on the node that just minted the hash,
   and that node will go looking for an upstream to fetch its own password from.
+- **A chunk manifest has one writer, and it is the node that created the blob.** `recordManifest` is a no-op when rows exist, and a dedup hit records presence only — minting a second manifest ships a duplicate set of `(blob_id, idx)` rows to every peer. The legacy seed (`seedLegacyManifests`) runs on the master alone, and *after* `seedChangeLog`, because appending entries is exactly what makes the seed pass think it has already run.
+- **Anything that rewrites a blob's stored bytes in place must call `rechunkBlob`.** Today that is only the archive/unarchive path in `jobs/lifecycle.ts`; every other rewrite mints a new blob through `attachBlob`. A stale manifest makes every peer's chunk fetch fail its hash check forever.
+- **Never add a UNIQUE constraint to `blob_chunks` or `chunk_locations`.** A UNIQUE violation raised while applying a peer's entry halts the replication batch at that entry, permanently. Count copies with `COUNT(DISTINCT node_id)` instead.
+- **Don't put a per-read column in a replicated table.** `chunk_locations.last_read_at` was the obvious place for the LRU clock and would have appended a change-log entry — shipped cluster-wide — on every read; it lives in node-local `local_chunk_cache` instead.
 - **A play key must never be trusted on a jti that isn't in `media_play_keys`.** Treating a missing row as valid would make the prune job a revocation-bypass.
 - **Deleting a file must also call `deleteThumbnail(fileId)`** — the thumbnail cache is keyed by file id and is not reference-counted.
 - **A debrid retry decides re-import vs. re-download by the `data/debrid/_sources/<tag>.complete` marker**, not by "the staging directory has files in it". A transfer aborted halfway also leaves files there, and importing those would silently store truncated content. The marker is written only after the last byte of the last link lands (`debrid.ts::markTransferComplete`), and lives outside the job directory so the importer never sees it as content.
@@ -908,6 +970,10 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - Don't write fetched credential material without raising `replication_control.suppressed` — it is a peer's write, and logging it can lose a real concurrent edit to arbitration
 - Don't invent a second invalidation channel for credentials — the replicated `credential_version` counter already is one, and it works for a node that was offline
 - Don't leave a revocation to the pull — a stale grant is a security hole and a stale denial is only an inconvenience, which is the whole reason the two are treated differently
+- Don't evict a `pinned` chunk — those are the durability copies the replication factor placed, and evicting them to make room for cache deletes the second copy the cluster just went to the trouble of making
+- Don't record an eviction that freed no bytes — the cache would believe it is under a cap the disk says it is over, and evict its way down to nothing
+- Don't mint a chunk manifest anywhere but the node that created the blob (and the master, for legacy blobs) — two manifests for one blob is two sets of rows on every peer
+- Don't walk the peer list to find a blob any more — `chunk_locations` says who holds it; the whole-blob walk survives only for a blob with no manifest at all
 - Don't poll qBittorrent once per job — one list fetch per tick, grouped by tag, covering downloading *and* seeding jobs
 - Don't refuse a torrent for being over the concurrency limit — park it in `pending` and let `promotePendingJobs` start it
 - Don't count `pending` toward `IN_FLIGHT_STATUSES` — that is the status a job sits in *because* it has no slot, so counting it deadlocks the queue

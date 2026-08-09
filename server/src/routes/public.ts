@@ -2,7 +2,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import { type Request, type Response, Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
-import { touchBlobAccess } from "../cluster/cacheEviction.ts";
+import { touchBlobRead } from "../cluster/placement.ts";
 import { getMasterKey } from "../config.ts";
 import { decryptStream } from "../crypto/aead.ts";
 import {
@@ -317,18 +317,17 @@ export function publicRouter(state: AppState): Router {
 				res.status(500).json({ detail: "invalid storage path" });
 				return;
 			}
-			if (!existsSync(fullPath)) {
-				// Cluster read-time failover: this node's copy is missing (e.g. a
-				// cache-mode node that never held it, or local disk loss) -- try
-				// pulling it from any active peer before giving up. No-op / cheap
-				// when unclustered (fetchBlobFromPeers iterates zero rows).
-				await ensureBlobAvailable(state, f, fullPath);
-			}
+			// Cluster read-time failover: whatever of this blob is not on this
+			// node (a cache-mode node that never held it, an evicted chunk, local
+			// disk loss) is pulled from whoever the chunk registry says holds it.
+			// Cheap when unclustered and cheap when complete -- one stat and one
+			// lookup (cluster/placement.ts::blobCompleteLocally).
+			await ensureBlobAvailable(state, f, fullPath);
 			if (!existsSync(fullPath)) {
 				res.status(500).json({ detail: "file missing from storage" });
 				return;
 			}
-			touchBlobAccess(db, f.blob_id);
+			touchBlobRead(db, f.blob_id);
 
 			const needsDecrypt = eff.mode === "server";
 			const needsDecompress = !!(f.compressed || f.archived);
@@ -528,14 +527,12 @@ export function publicRouter(state: AppState): Router {
 				res.status(500).json({ detail: "invalid storage path" });
 				return;
 			}
-			if (!existsSync(fullPath)) {
-				await ensureBlobAvailable(state, f, fullPath);
-			}
+			await ensureBlobAvailable(state, f, fullPath);
 			if (!existsSync(fullPath)) {
 				res.status(500).json({ detail: "file missing from storage" });
 				return;
 			}
-			touchBlobAccess(db, f.blob_id);
+			touchBlobRead(db, f.blob_id);
 
 			// Anything stored transformed has to be reproduced from byte zero, so
 			// it goes out 200-only with no Accept-Ranges -- the same rule the media

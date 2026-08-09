@@ -40,6 +40,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
 		archiveEnabled: false,
 		replicationMode: "full",
 		cacheMaxBytes: 0,
+		replicationFactor: 2,
 		qbittorrentUrl: "",
 		qbittorrentUsername: "",
 		qbittorrentPassword: "",

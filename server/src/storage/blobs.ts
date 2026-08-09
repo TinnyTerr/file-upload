@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, statSync, unlinkSync } from "node:fs";
-import { touchBlobAccess } from "../cluster/cacheEviction.ts";
+import {
+	type ChunkDigest,
+	chunkSize,
+	markBlobLocal,
+	recordManifest,
+} from "../cluster/placement.ts";
 import { type ContentBlobRow, type FileRow, nowIso } from "../db/rows.ts";
 import type { Db } from "../db/types.ts";
 import { safeJoin, storageRoot } from "./paths.ts";
@@ -14,24 +19,56 @@ export interface FileHashes {
 	blake2b: string;
 }
 
-export async function hashFile(path: string): Promise<FileHashes> {
+export interface HashedFile extends FileHashes {
+	/** The chunk manifest of the same bytes (cluster/placement.ts, §5.11),
+	 * computed in this pass rather than in a second read of the file. */
+	chunks: ChunkDigest[];
+}
+
+export async function hashFile(
+	path: string,
+	opts: { chunkSize?: number } = {},
+): Promise<HashedFile> {
 	const sha256 = createHash("sha256");
 	const sha1 = createHash("sha1");
 	const md5 = createHash("md5");
 	// Python hashlib.blake2b defaults to a 64-byte digest == blake2b512.
 	const blake2b = createHash("blake2b512");
+	const size = opts.chunkSize ?? chunkSize();
+	const chunks: ChunkDigest[] = [];
+	let chunkHash = createHash("sha256");
+	let chunkBytes = 0;
+
 	const stream = createReadStream(path, { highWaterMark: 1024 * 1024 });
 	for await (const chunk of stream as AsyncIterable<Buffer>) {
 		sha256.update(chunk);
 		sha1.update(chunk);
 		md5.update(chunk);
 		blake2b.update(chunk);
+		// A read is 1 MiB and a chunk is 16 MiB, but nothing guarantees the
+		// alignment, so the boundary is cut here rather than assumed.
+		let cursor = 0;
+		while (cursor < chunk.length) {
+			const take = Math.min(size - chunkBytes, chunk.length - cursor);
+			chunkHash.update(chunk.subarray(cursor, cursor + take));
+			chunkBytes += take;
+			cursor += take;
+			if (chunkBytes === size) {
+				chunks.push({ sha256: chunkHash.digest("hex"), size: chunkBytes });
+				chunkHash = createHash("sha256");
+				chunkBytes = 0;
+			}
+		}
+	}
+	if (chunkBytes > 0) {
+		chunks.push({ sha256: chunkHash.digest("hex"), size: chunkBytes });
 	}
 	return {
 		sha256: sha256.digest("hex"),
 		sha1: sha1.digest("hex"),
 		md5: md5.digest("hex"),
 		blake2b: blake2b.digest("hex"),
+		chunks,
 	};
 }
 
@@ -49,6 +86,15 @@ export function attachBlob(
 		hashes: FileHashes;
 		storedHashes?: FileHashes;
 		transformKey?: string;
+		/** The stored bytes' chunk manifest (§5.11), from the same pass that
+		 * produced `storedHashes`. Absent means the caller doesn't chunk — the
+		 * blob is then recorded as a single whole-file chunk by the legacy seed
+		 * pass, exactly like a blob that predates this phase. */
+		storedChunks?: ChunkDigest[];
+		/** Whether the bytes this node just wrote are a durability copy. True
+		 * everywhere except a `REPLICATION_MODE=cache` node, where a fresh
+		 * upload is simply the newest cache entry. */
+		pinned?: boolean;
 	},
 ): ContentBlobRow {
 	const transformKey = opts.transformKey ?? "plain";
@@ -74,7 +120,14 @@ export function attachBlob(
 			// best-effort cleanup; orphaned bytes are reconciled by lifecycle jobs
 		}
 		existing.ref_count += 1;
-		touchBlobAccess(db, existing.id);
+		// The duplicate's bytes were just deleted; the canonical blob's are what
+		// this node now holds a second reference to. Marking presence (rather
+		// than a manifest) is all a dedup hit may do -- the manifest belongs to
+		// whoever created the blob, and minting a second one here would ship a
+		// duplicate set of rows to every peer.
+		if (blobBytesComplete(existing)) {
+			markBlobLocal(db, existing.id, { pinned: opts.pinned !== false });
+		}
 		return existing;
 	}
 
@@ -100,8 +153,27 @@ export function attachBlob(
 	const created = db.get<ContentBlobRow>(
 		"SELECT * FROM content_blobs WHERE id = last_insert_rowid()",
 	)!;
-	touchBlobAccess(db, created.id);
+	// The manifest is minted here, on the node that created the blob, and
+	// replicates from here. Every other node reads it rather than computing
+	// it, which is what keeps one manifest per blob cluster-wide.
+	if (opts.storedChunks?.length) {
+		recordManifest(db, created.id, opts.storedChunks);
+		markBlobLocal(db, created.id, { pinned: opts.pinned !== false });
+	}
 	return created;
+}
+
+/** Whether this node's copy of a blob's bytes is whole — the file exists and
+ * is exactly as long as the row says. */
+function blobBytesComplete(blob: ContentBlobRow): boolean {
+	let path: string;
+	try {
+		path = safeJoin(storageRoot(), blob.storage_path);
+	} catch {
+		return false;
+	}
+	if (!existsSync(path)) return false;
+	return statSync(path).size === blob.stored_size_bytes;
 }
 
 export function fileHashes(db: Db, file: FileRow): Partial<FileHashes> {
@@ -151,6 +223,14 @@ export function releaseBlob(db: Db, file: FileRow): string | null {
 	// Clear the file's FK before deleting the blob row so SQLite never sees a
 	// live files.blob_id reference during blob deletion.
 	db.run("UPDATE files SET blob_id = NULL WHERE id = $id", { $id: file.id });
+	// Explicitly, not by the ON DELETE CASCADE the schema also declares: a
+	// cascade only fires the change-log triggers with recursive_triggers on, and
+	// a manifest that is deleted here but nowhere else would leave every peer
+	// pointing at chunks of a blob that no longer exists. The location rows
+	// stay: each node deletes its own once the manifest is gone
+	// (cluster/placement.ts::gcOrphanChunks), because they are the only rows it
+	// may write.
+	db.run("DELETE FROM blob_chunks WHERE blob_id = $id", { $id: blob.id });
 	db.run("DELETE FROM content_blobs WHERE id = $id", { $id: blob.id });
 	return full;
 }

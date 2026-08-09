@@ -155,6 +155,25 @@ export interface MasterStatus {
 	held: number;
 }
 
+/** This node's share of the cluster's chunk store (§5.11). Pinned and cached
+ * are separate numbers on purpose: pinned chunks are durability copies placed
+ * by the replication factor and are never evicted, cached ones are what
+ * `CACHE_MAX_BYTES` caps. Conflating them is why REPLICATION_MODE=cache has
+ * been hard to reason about. */
+export interface ChunkStorage {
+	pinnedBytes: number;
+	cachedBytes: number;
+	pinnedChunks: number;
+	cachedChunks: number;
+	/** 0 means uncapped — this node never evicts. */
+	capBytes: number;
+	/** Cap minus cached bytes. Null when uncapped. */
+	headroomBytes: number | null;
+	/** Chunks held here that the cluster has fewer than REPLICATION_FACTOR
+	 * copies of — placement's backlog, not an error. */
+	underReplicated: number;
+}
+
 export interface ClusterSelf {
 	node_id: string;
 	name: string;
@@ -184,5 +203,6 @@ export interface ClusterSelf {
 	disk_total_bytes: number;
 	disk_free_bytes: number;
 	used_bytes: number;
+	chunk_storage: ChunkStorage;
 	halts: ClusterHalt[];
 }

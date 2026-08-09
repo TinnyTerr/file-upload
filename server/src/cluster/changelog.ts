@@ -110,6 +110,28 @@ export const TABLE_COLUMNS: Record<UidTable, string[]> = {
 		"media_duration_seconds",
 		"created_at",
 	],
+	blob_chunks: [
+		"uid",
+		"blob_id",
+		"idx",
+		"chunk_sha256",
+		"size_bytes",
+		"created_at",
+	],
+	chunk_locations: [
+		"uid",
+		"chunk_sha256",
+		// The cluster node id, not a cluster_nodes row id: it is a name every
+		// node already agrees on, so it needs no translation and appears in no
+		// FOREIGN_KEYS entry.
+		"node_id",
+		"state",
+		"size_bytes",
+		"pinned",
+		"updated_at",
+		// `last_read_at` is deliberately absent -- it lives in the node-local
+		// `local_chunk_cache`, because an LRU touch must not append a log entry.
+	],
 	directories: [
 		"uid",
 		"owner_id",
@@ -237,6 +259,10 @@ export const FOREIGN_KEYS: Partial<
 	Record<UidTable, Record<string, ForeignKey>>
 > = {
 	permissions: { user_id: { parent: "users", required: true } },
+	// A manifest entry without its blob is meaningless, so the parent is
+	// required: the batch halts until the `content_blobs` row lands, which the
+	// origin appended first.
+	blob_chunks: { blob_id: { parent: "content_blobs", required: true } },
 	directories: {
 		owner_id: { parent: "users", required: true },
 		parent_directory_id: { parent: "directories", required: true },
@@ -680,7 +706,7 @@ function upsertRow(
 
 /** Read from `replication_control` for the same reason the triggers do: it is
  * the one place "am I the master" is available without application state. */
-function isMasterNode(db: Db): boolean {
+export function isMasterNode(db: Db): boolean {
 	return (
 		(db.get<{ is_master: number }>(
 			"SELECT is_master FROM replication_control WHERE id = 1",

@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import type { NextFunction, Request, Response } from "express";
 import { Router } from "express";
@@ -31,6 +31,15 @@ import {
 	materialSummary,
 } from "../cluster/identityFetch.ts";
 import { enrollWithMaster, upsertPeer } from "../cluster/membership.ts";
+import {
+	blobPath,
+	chunkStorageStats,
+	localChunk,
+	manifestOf,
+	markChunk,
+	touchChunk,
+	writeChunkAt,
+} from "../cluster/placement.ts";
 import {
 	type GrantRequest,
 	grantReservation,
@@ -77,6 +86,24 @@ interface ContentBlobRow {
 	transform_key: string;
 }
 
+/** Read a pushed chunk's raw body, refusing anything that is not exactly the
+ * length the manifest says. The cap is the point: a body is trusted only after
+ * its hash matches, and an unbounded read would let a peer decide how much
+ * memory this handler allocates. */
+async function readBody(
+	req: Request,
+	expected: number,
+): Promise<Buffer | null> {
+	const pieces: Buffer[] = [];
+	let total = 0;
+	for await (const piece of req as AsyncIterable<Buffer>) {
+		total += piece.length;
+		if (total > expected) return null;
+		pieces.push(piece);
+	}
+	return total === expected ? Buffer.concat(pieces) : null;
+}
+
 function selfStats(state: AppState) {
 	const usage = diskUsageBytes();
 	const tiering = currentTiering(state.db);
@@ -101,6 +128,10 @@ function selfStats(state: AppState) {
 		tiering_generation: tiering?.generation ?? 0,
 		master_node_id: masterId,
 		master_node_url: masterUrl,
+		// Pinned and cached kept apart, deliberately (§5.11): they are what makes
+		// REPLICATION_MODE=cache legible, and the panel conflating them is part of
+		// why it has not been.
+		chunk_storage: chunkStorageStats(state),
 		// The whole record, so a peer's handshake either learns nothing new or
 		// adopts a newer generation without a second request (cluster/tiering.ts).
 		tiering,
@@ -256,6 +287,42 @@ export function clusterRouter(state: AppState): Router {
 				ip: clientIp(state, req),
 			});
 			res.json({ token: newToken });
+		},
+	);
+
+	// ── the local chunk cache (§5.11) ───────────────────────────────────────
+	//
+	// The cap is an operator decision about *this* node's disk, so it is set
+	// here rather than replicated: a cluster-wide cache size would be a number
+	// that is wrong for every node but one.
+
+	router.put(
+		"/cache-cap",
+		requireSession(state),
+		requireCsrf,
+		requireCluster,
+		(req, res) => {
+			const raw = (req.body as { cache_max_bytes?: unknown }).cache_max_bytes;
+			const value = Number(raw);
+			if (!Number.isFinite(value) || value < 0) {
+				throw new HttpError(400, "cache_max_bytes must be a positive number");
+			}
+			// Persist first, apply second: setEnvValue refuses a key the
+			// environment fixes (409), and applying first would leave this process
+			// holding a value the file rejected.
+			setEnvValue(
+				state.settings.configPath,
+				"CACHE_MAX_BYTES",
+				String(Math.trunc(value)),
+			);
+			state.settings.cacheMaxBytes = Math.trunc(value);
+			recordAudit(db, {
+				actor: req.currentUser!.username,
+				action: "cluster.cache_cap_set",
+				target: `bytes:${Math.trunc(value)}`,
+				ip: clientIp(state, req),
+			});
+			res.json(chunkStorageStats(state));
 		},
 	);
 
@@ -785,6 +852,95 @@ export function clusterRouter(state: AppState): Router {
 		});
 		createReadStream(path).pipe(res);
 	});
+
+	// ── chunks (redesign §5.11) ─────────────────────────────────────────────
+	//
+	// The blob endpoints above move a whole file; these move one chunk of one,
+	// which is what lets a node hold part of something bigger than its disk and
+	// what makes a read cost a request to a node that has the bytes instead of
+	// a walk down the peer list. Both directions live here: GET is a read-time
+	// fetch or an eviction's durability probe, POST is placement pushing a
+	// durability copy onto this node.
+
+	router.head("/chunks/:storedSha256", clusterAuth, (req, res) => {
+		res.status(localChunk(db, req.params.storedSha256) ? 200 : 404).end();
+	});
+
+	router.get("/chunks/:storedSha256", clusterAuth, (req, res) => {
+		const sha256 = req.params.storedSha256;
+		const local = localChunk(db, sha256);
+		if (!local) {
+			res.status(404).json({ detail: "chunk not held on this node" });
+			return;
+		}
+		res.writeHead(200, {
+			"Content-Type": "application/octet-stream",
+			"Content-Length": String(local.size),
+			"X-Chunk-Sha256": sha256,
+		});
+		// A byte range of the blob's file -- the chunk store *is* the blob store
+		// (cluster/placement.ts), so serving one is a positional read.
+		createReadStream(local.path, {
+			start: local.offset,
+			end: local.offset + local.size - 1,
+		}).pipe(res);
+		touchChunk(db, sha256);
+	});
+
+	router.post(
+		"/chunks/:storedSha256",
+		clusterAuth,
+		asyncHandler(async (req, res) => {
+			const sha256 = req.params.storedSha256;
+			const blobUid = typeof req.query.blob === "string" ? req.query.blob : "";
+			const blob = blobUid
+				? db.get<ContentBlobRow & { id: number }>(
+						"SELECT * FROM content_blobs WHERE uid = $uid",
+						{ $uid: blobUid },
+					)
+				: undefined;
+			if (!blob) {
+				// The row is on its way through the change log. 409 rather than 404
+				// because the right response is for the pusher to try again later,
+				// not to conclude the chunk is unwanted.
+				res.status(409).json({ detail: "blob not replicated here yet" });
+				return;
+			}
+			const slot = manifestOf(db, blob.id).find((s) => s.sha256 === sha256);
+			if (!slot) {
+				res.status(409).json({ detail: "chunk is not part of that blob here" });
+				return;
+			}
+			const path = blobPath(blob);
+			if (!path) {
+				res.status(500).json({ detail: "invalid storage path" });
+				return;
+			}
+
+			const body = await readBody(req, slot.size);
+			if (!body) {
+				res.status(400).json({ detail: "chunk body is the wrong length" });
+				return;
+			}
+			// Content-addressed means the address is checkable, so it is checked:
+			// these bytes are about to be written into the middle of a file the
+			// read path will decrypt, where a corrupt range has no other signal.
+			if (createHash("sha256").update(body).digest("hex") !== sha256) {
+				res.status(400).json({ detail: "chunk failed its hash check" });
+				return;
+			}
+			writeChunkAt(path, slot.offset, body);
+			// Pinned: a placement push is a durability copy by definition, even
+			// onto a cache node, and the eviction pass must leave it alone.
+			markChunk(db, state.settings.nodeId, sha256, {
+				state: "present",
+				size: slot.size,
+				pinned: true,
+			});
+			touchChunk(db, sha256);
+			res.json({ stored: true, chunk_sha256: sha256, size_bytes: slot.size });
+		}),
+	);
 
 	router.get("/digest", clusterAuth, (_req, res) => {
 		res.json(computeDigest(state));

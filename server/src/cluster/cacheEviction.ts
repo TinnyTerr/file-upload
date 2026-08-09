@@ -1,63 +1,59 @@
-import { existsSync, unlinkSync } from "node:fs";
 import type { AppState } from "../appState.ts";
-import type { ClusterNodeRow, ContentBlobRow } from "../db/rows.ts";
-import { nowIso } from "../db/rows.ts";
-import type { Db } from "../db/types.ts";
+import type { ClusterNodeRow } from "../db/rows.ts";
 import { getLogger } from "../logging.ts";
 import { fetchLogged } from "../outbound.ts";
-import { safeJoin, storageRoot } from "../storage/paths.ts";
+import {
+	copyCount,
+	gcOrphanChunks,
+	holdersOf,
+	localNodeId,
+	markChunk,
+	reclaimChunk,
+	reconcileLocalChunks,
+	replicationFactor,
+} from "./placement.ts";
 
-/** LRU eviction for REPLICATION_MODE=cache nodes.
+/** LRU chunk eviction for REPLICATION_MODE=cache nodes (redesign §5.11).
  *
- * content_blobs rows are replicated everywhere (cluster/replication.ts), but
- * whether THIS node physically holds a blob's bytes is a per-node fact
- * (local_blob_cache, schema.sql). A cache-mode node treats its local disk as
- * a bounded LRU over the cluster's blob store: every locally-present blob is
- * a cache entry -- including ones uploaded directly here -- and once total
- * cached bytes exceed CACHE_MAX_BYTES, the least-recently-accessed entries
- * are evicted (bytes deleted, content_blobs row left alone -- the metadata
- * stays valid, and a later read pulls the bytes back via
- * cluster/blobs.ts's fetchBlobFromPeers).
+ * A cache node treats its disk as a bounded cache over the cluster's chunk
+ * store, and Phase 8 changes three things about how that works:
  *
- * Deleting the only copy of a file cluster-wide would be silent data loss,
- * and this node has no location registry to know who else holds it (see
- * blobs.ts's fetch loop, which iterates peers rather than consulting one).
- * So eviction verifies durability live, right before deleting: it HEAD-checks
- * the blob against active REPLICATION_MODE=full peers and only evicts once
- * one of them confirms it already has the bytes. A blob nobody else has yet
- * is left alone -- it'll typically get pulled onto a full node by ordinary
- * read traffic soon, at which point a later eviction pass can reclaim it. */
+ * - **The unit is a chunk, not a blob.** A node can hold and drop part of a
+ *   file, which is what lets a small node serve a large one.
+ * - **`pinned` chunks are exempt.** Those are the durability copies placement
+ *   put here (`cluster/placement.ts`), and they are not cache. Evicting them
+ *   to make room for cache would delete the copy the replication factor just
+ *   went to the trouble of placing. `CACHE_MAX_BYTES` therefore caps the
+ *   *unpinned* bytes only.
+ * - **Durability is a table read.** `chunk_locations` already says how many
+ *   nodes hold these bytes, so the pass checks the registry first and spends
+ *   exactly one HEAD confirming the copy it intends to rely on — rather than
+ *   the N-peer walk per blob this file used to do (D6). The HEAD stays because
+ *   a registry row is a claim about somebody else's disk, and deleting the
+ *   last copy of anything on the strength of a stale row is not a mistake that
+ *   can be undone.
+ *
+ * The GC half runs on every node, cache or not: a location row for a chunk no
+ * manifest references any more names bytes that went with their blob, and
+ * leaving it would make this node a source for a fetch that can only fail.
+ */
 
 const log = getLogger("app.cluster.cache_eviction");
 
-export function touchBlobAccess(
-	db: Db,
-	blobId: number | null | undefined,
-): void {
-	if (!blobId) return;
-	db.run(
-		`INSERT INTO local_blob_cache (blob_id, last_accessed_at) VALUES ($id, $now)
-     ON CONFLICT(blob_id) DO UPDATE SET last_accessed_at = excluded.last_accessed_at`,
-		{ $id: blobId, $now: nowIso() },
-	);
-}
-
-function fullReplicaPeers(db: Db): ClusterNodeRow[] {
-	return db
-		.all<ClusterNodeRow>(
-			"SELECT * FROM cluster_nodes WHERE active = 1 AND replication_mode = 'full'",
-		)
+function reachablePeers(state: AppState): ClusterNodeRow[] {
+	return state.db
+		.all<ClusterNodeRow>("SELECT * FROM cluster_nodes WHERE active = 1")
 		.filter((n) => n.base_url && n.token);
 }
 
-/** HEAD the blob against one peer; true if that peer confirms it already has
- * these exact bytes (same stored_sha256 + transform_key). */
-async function peerHasBlob(
+/** One HEAD against a node the registry says holds the chunk. True only if it
+ * confirms. Anything else — 404, a timeout, a refused connection — reads as
+ * "cannot confirm", which is what keeps the bytes here. */
+async function peerHasChunk(
 	peer: ClusterNodeRow,
-	storedSha256: string,
-	transformKey: string,
+	sha256: string,
 ): Promise<boolean> {
-	const url = `${peer.base_url.replace(/\/$/, "")}/api/cluster/blobs/${storedSha256}?transform=${encodeURIComponent(transformKey)}`;
+	const url = `${peer.base_url.replace(/\/$/, "")}/api/cluster/chunks/${sha256}`;
 	try {
 		const resp = await fetchLogged("cluster", url, {
 			method: "HEAD",
@@ -69,79 +65,83 @@ async function peerHasBlob(
 	}
 }
 
-async function confirmedElsewhere(
-	peers: ClusterNodeRow[],
-	blob: { stored_sha256: string; transform_key: string },
-): Promise<boolean> {
-	for (const peer of peers) {
-		if (await peerHasBlob(peer, blob.stored_sha256, blob.transform_key))
-			return true;
-	}
-	return false;
+interface EvictionCandidate {
+	chunk_sha256: string;
+	size_bytes: number;
+	last_read_at: string | null;
 }
 
-interface CacheRow extends ContentBlobRow {
-	last_accessed_at: string;
-}
-
-/** Evict least-recently-used locally-cached blobs until under
- * settings.cacheMaxBytes. No-op unless this node is REPLICATION_MODE=cache
- * with a positive CACHE_MAX_BYTES configured (both opt-in -- an unset cap
- * means "don't evict", matching today's append-only behavior). */
 export async function cacheEvictionJob(state: AppState): Promise<void> {
+	const db = state.db;
+	const nodeId = localNodeId(db);
+	if (!nodeId) return;
+
+	// Housekeeping first, and on every node: it is what keeps the registry from
+	// advertising bytes that are gone, and it can only ever free space.
+	gcOrphanChunks(db);
+	reconcileLocalChunks(state);
+
 	if (state.settings.replicationMode !== "cache") return;
 	const cap = state.settings.cacheMaxBytes;
 	if (!(cap > 0)) return;
 
-	const rows = state.db.all<CacheRow>(
-		`SELECT cb.*, lbc.last_accessed_at as last_accessed_at
-     FROM local_blob_cache lbc JOIN content_blobs cb ON cb.id = lbc.blob_id
-     ORDER BY lbc.last_accessed_at ASC`,
+	const rows = db.all<EvictionCandidate>(
+		`SELECT cl.chunk_sha256, cl.size_bytes, lcc.last_read_at
+       FROM chunk_locations cl
+       LEFT JOIN local_chunk_cache lcc ON lcc.chunk_sha256 = cl.chunk_sha256
+      WHERE cl.node_id = $node AND cl.state = 'present' AND cl.pinned = 0
+      ORDER BY lcc.last_read_at IS NULL DESC, lcc.last_read_at ASC`,
+		{ $node: nodeId },
 	);
-	let total = rows.reduce((sum, r) => sum + r.stored_size_bytes, 0);
+	let total = rows.reduce((sum, r) => sum + r.size_bytes, 0);
 	if (total <= cap) return;
 
-	const peers = fullReplicaPeers(state.db);
-	if (peers.length === 0) {
-		log.warning(
-			`cache over cap (${total}/${cap} bytes) but no active REPLICATION_MODE=full peer is known -- ` +
-				"skipping eviction to avoid deleting the only copy of anything",
-		);
-		return;
-	}
-
+	const factor = replicationFactor(state);
+	const peers = reachablePeers(state);
 	let evicted = 0;
 	let skipped = 0;
 	for (const row of rows) {
 		if (total <= cap) break;
-		const ok = await confirmedElsewhere(peers, row);
-		if (!ok) {
+		// `copyCount` counts this node too, so the durability requirement is
+		// "the factor's worth of copies survive losing this one".
+		if (copyCount(db, row.chunk_sha256) <= factor) {
 			skipped++;
 			continue;
 		}
-		let path: string;
-		try {
-			path = safeJoin(storageRoot(), row.storage_path);
-		} catch {
+		// The witness has to be a node the registry names as a holder — asking
+		// an arbitrary peer would confirm nothing about these bytes.
+		const holders = new Set(
+			holdersOf(db, row.chunk_sha256, { exclude: nodeId }),
+		);
+		const witness = peers.find(
+			(peer) => peer.node_id && holders.has(peer.node_id),
+		);
+		if (!witness || !(await peerHasChunk(witness, row.chunk_sha256))) {
+			skipped++;
 			continue;
 		}
-		try {
-			if (existsSync(path)) unlinkSync(path);
-		} catch (err) {
-			log.warning(
-				`failed to evict blob id=${row.id}: ${err instanceof Error ? err.message : String(err)}`,
-			);
+		const { freed } = reclaimChunk(db, nodeId, row.chunk_sha256);
+		if (freed === 0) {
+			// The bytes are a hole inside a file that has to stay and the
+			// filesystem would not punch it. Recording an eviction that freed
+			// nothing would leave the cache believing it is under a cap the disk
+			// says it is over.
+			skipped++;
 			continue;
 		}
-		state.db.run("DELETE FROM local_blob_cache WHERE blob_id = $id", {
-			$id: row.id,
+		markChunk(db, nodeId, row.chunk_sha256, {
+			state: "evicted",
+			size: row.size_bytes,
 		});
-		total -= row.stored_size_bytes;
+		db.run("DELETE FROM local_chunk_cache WHERE chunk_sha256 = $sha", {
+			$sha: row.chunk_sha256,
+		});
+		total -= row.size_bytes;
 		evicted++;
 	}
 	if (evicted > 0 || skipped > 0) {
 		log.info(
-			`cache eviction: evicted=${evicted} skipped_unconfirmed=${skipped} remaining_bytes=${total} cap=${cap}`,
+			`chunk cache eviction: evicted=${evicted} skipped=${skipped} cached_bytes=${total} cap=${cap}`,
 		);
 	}
 }

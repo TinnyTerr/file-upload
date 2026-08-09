@@ -1,5 +1,6 @@
 import { api } from "@/config/api";
 import type {
+	ChunkStorage,
 	ClusterNode,
 	ClusterNodeUpdate,
 	ClusterSelf,
@@ -58,6 +59,14 @@ export const clusterService = {
 	 * degraded, and `confirm` must be the node's own name typed out — promoting
 	 * while the old master is alive splits the cluster, and that is a decision
 	 * only a human with out-of-band knowledge can make. */
+	/** The chunk cache cap, in bytes; 0 disables eviction. Node-local, like the
+	 * disk it describes — there is no cluster-wide answer to how big this
+	 * node's cache should be. */
+	setCacheCap: (bytes: number) =>
+		api.put<ChunkStorage>("/cluster/cache-cap", {
+			json: { cache_max_bytes: bytes },
+		}),
+
 	promote: (confirm: string, force = false) =>
 		api.post<{ tiering: { generation: number } }>("/cluster/promote", {
 			json: { confirm, force },

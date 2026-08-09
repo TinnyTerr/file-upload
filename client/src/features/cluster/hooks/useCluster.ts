@@ -175,6 +175,27 @@ export function usePromote() {
 	});
 }
 
+/** The local chunk cache cap. Invalidates `self`, which is where the pinned /
+ * cached / headroom numbers come from. */
+export function useCacheCap() {
+	const qc = useQueryClient();
+	return useMutation({
+		mutationFn: (bytes: number) => clusterService.setCacheCap(bytes),
+		onSuccess: (stats) => {
+			toast.success(
+				stats.capBytes > 0
+					? "Cache cap updated"
+					: "Cache cap removed — this node will not evict",
+			);
+			qc.invalidateQueries({ queryKey: SELF_QUERY });
+		},
+		onError: (err) =>
+			toast.error("Couldn't set the cache cap", {
+				description: errorMessage(err),
+			}),
+	});
+}
+
 export function useClusterToken() {
 	const reveal = useMutation({
 		mutationFn: () => clusterService.revealToken(),

@@ -1,6 +1,7 @@
 import {
 	AlertTriangle,
 	Archive,
+	Boxes,
 	Crown,
 	Database,
 	Eye,
@@ -37,13 +38,19 @@ import { formatBytes } from "@/lib/bytes";
 import { formatDate, relativeTime } from "@/lib/time";
 import { useDialogs } from "@/providers/DialogProvider";
 import {
+	useCacheCap,
 	useClusterNodes,
 	useClusterSelf,
 	useClusterToken,
 	usePromote,
 	useRetier,
 } from "../hooks/useCluster";
-import type { ClusterHalt, ClusterSelf, NodeRole } from "../types";
+import type {
+	ChunkStorage,
+	ClusterHalt,
+	ClusterSelf,
+	NodeRole,
+} from "../types";
 import { TopologyCard } from "./TopologyCard";
 
 function haltLabel(scope: string): string {
@@ -137,11 +144,103 @@ function ThisServerCard() {
 							outstanding={data.outstanding_reservations}
 						/>
 						<IdentityLine identity={data.identity} />
+						<ChunkStorageLine storage={data.chunk_storage} />
 						<HaltList halts={data.halts} />
 					</>
 				)}
 			</CardContent>
 		</Card>
+	);
+}
+
+/** What this node's disk is actually doing on behalf of the cluster (§5.11).
+ *
+ * Pinned and cached are shown as separate numbers because they are separate
+ * things: pinned chunks are durability copies the replication factor placed
+ * here and are never evicted, cached ones are opportunistic and are what the
+ * cap governs. An operator who cannot tell them apart cannot tell "my disk is
+ * full of other people's durability" from "my cache needs trimming". */
+function ChunkStorageLine({ storage }: { storage: ChunkStorage }) {
+	const setCap = useCacheCap();
+	const [editing, setEditing] = useState(false);
+	const [draft, setDraft] = useState(String(storage.capBytes));
+
+	const total = storage.pinnedChunks + storage.cachedChunks;
+	if (total === 0 && storage.capBytes === 0) return null;
+
+	return (
+		<div className="space-y-1.5 rounded-md border bg-muted/30 px-2.5 py-2 text-xs">
+			<div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+				<span className="inline-flex items-center gap-1 font-medium">
+					<Boxes className="size-3.5" /> chunks
+				</span>
+				<span className="text-muted-foreground">
+					<Pin className="mr-1 inline size-3" />
+					{formatBytes(storage.pinnedBytes)} pinned ({storage.pinnedChunks})
+				</span>
+				<span className="text-muted-foreground">
+					{formatBytes(storage.cachedBytes)} cached ({storage.cachedChunks})
+				</span>
+				<span className="text-muted-foreground">
+					{storage.capBytes > 0
+						? `cap ${formatBytes(storage.capBytes)} · ${formatBytes(
+								storage.headroomBytes ?? 0,
+							)} headroom`
+						: "uncapped — never evicts"}
+				</span>
+				{storage.underReplicated > 0 && (
+					<Badge variant="outline">
+						{storage.underReplicated} awaiting a second copy
+					</Badge>
+				)}
+				{!editing && (
+					<Button
+						variant="ghost"
+						size="sm"
+						className="h-6 px-2"
+						onClick={() => {
+							setDraft(String(storage.capBytes));
+							setEditing(true);
+						}}
+					>
+						Set cap
+					</Button>
+				)}
+			</div>
+			{editing && (
+				<div className="flex flex-wrap items-center gap-2">
+					<Input
+						className="h-7 w-44"
+						value={draft}
+						onChange={(e) => setDraft(e.target.value)}
+						placeholder="bytes (0 = uncapped)"
+					/>
+					<Button
+						size="sm"
+						className="h-7"
+						loading={setCap.isPending}
+						onClick={() =>
+							setCap.mutate(Number(draft) || 0, {
+								onSuccess: () => setEditing(false),
+							})
+						}
+					>
+						Save
+					</Button>
+					<Button
+						variant="ghost"
+						size="sm"
+						className="h-7"
+						onClick={() => setEditing(false)}
+					>
+						Cancel
+					</Button>
+					<span className="text-muted-foreground">
+						Caps cached bytes only; pinned durability copies are exempt.
+					</span>
+				</div>
+			)}
+		</div>
 	);
 }
 

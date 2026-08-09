@@ -12,9 +12,15 @@
  *
  * LIMITATION — blob bytes: `storage/paths.ts` resolves the storage root from
  * `process.env.FILEUPLOAD_STORAGE`, which is process-global, so every node in
- * one cluster harness shares one root. This harness is therefore for the
- * control plane and metadata replication. Chunk placement (Phase 8) needs the
- * storage root to become per-node state first.
+ * one cluster harness shares one root. Physically, a peer's file is therefore
+ * visible to every node here in a way it never is in production.
+ *
+ * Phase 8's chunk tests work within that because presence is a *database*
+ * fact: a node serves, fetches, places and evicts on the strength of its own
+ * `chunk_locations` rows (cluster/placement.ts), so staging a divergence in
+ * the registry exercises exactly the code a physical divergence would. What is
+ * still out of reach is a test that a node genuinely cannot read another's
+ * bytes — that needs the storage root to become per-node state.
  */
 
 import { randomBytes } from "node:crypto";

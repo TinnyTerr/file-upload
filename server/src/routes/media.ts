@@ -28,7 +28,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { type Request, Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
-import { touchBlobAccess } from "../cluster/cacheEviction.ts";
+import { touchBlobRead } from "../cluster/placement.ts";
 import { resolveFileEncryption } from "../crypto/effectiveEncryption.ts";
 import {
 	type DirectoryRow,
@@ -358,7 +358,7 @@ async function localPath(state: AppState, f: FileRow): Promise<string | null> {
 	} catch {
 		return null;
 	}
-	if (!existsSync(fullPath)) await ensureBlobAvailable(state, f, fullPath);
+	await ensureBlobAvailable(state, f, fullPath);
 	return existsSync(fullPath) ? fullPath : null;
 }
 
@@ -530,7 +530,7 @@ export function mediaRouter(state: AppState): Router {
 
 			const fullPath = await localPath(state, f);
 			if (!fullPath) throw new HttpError(500, "file missing from storage");
-			touchBlobAccess(db, f.blob_id);
+			touchBlobRead(db, f.blob_id);
 			db.run("UPDATE files SET last_downloaded_at = $now WHERE id = $id", {
 				$now: nowIso(),
 				$id: f.id,

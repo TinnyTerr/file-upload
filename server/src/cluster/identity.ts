@@ -39,6 +39,12 @@ export const UID_TABLES = [
 	"users",
 	"permissions",
 	"content_blobs",
+	// The chunk manifest and the location registry (§5.11). They replicate for
+	// the same reason `content_blobs` does — a node that cannot see the
+	// manifest cannot serve, place or evict a chunk — and they sit after their
+	// parent here because the seed pass applies in this order.
+	"blob_chunks",
+	"chunk_locations",
 	"directories",
 	"directory_links",
 	"files",
