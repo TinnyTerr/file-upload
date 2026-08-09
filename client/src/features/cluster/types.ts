@@ -8,8 +8,13 @@ export interface ClusterNode {
 	node_id: string | null;
 	name: string;
 	base_url: string;
-	/** Masked form of the remote token, e.g. ••••a1b2. The full token is never returned. */
+	/** Masked form of the secret we present to that node, e.g. ••••a1b2. The
+	 * full value is never returned. */
 	token_preview: string;
+	/** When that secret became a credential shared with this peer alone (§5.13).
+	 * Null means we are still calling it with the shared cluster token — the
+	 * migration state, which the `cluster_credentials` job clears on its own. */
+	credential_at: string | null;
 	active: boolean;
 	is_master: boolean;
 	role: NodeRole;
@@ -30,6 +35,23 @@ export interface ClusterNode {
 	created_at: string | null;
 	last_seen_at: string | null;
 	last_heartbeat_at: string | null;
+}
+
+export interface ClusterCredentialSummary {
+	peers: number;
+	credentialed: number;
+	legacy_token_accepted: boolean;
+	/** Live inbound verifiers, counting the ones inside a rotation overlap. */
+	inbound_secrets?: number;
+}
+
+/** A one-use, short-lived token authorizing exactly one credential exchange. */
+export interface EnrollmentToken {
+	token: string;
+	expires_at: string;
+	node_id: string;
+	name: string;
+	base_url: string;
 }
 
 export interface NewClusterNode {
@@ -198,6 +220,10 @@ export interface ClusterSelf {
 		material_held: number;
 		material_stale: number;
 	};
+	/** §5.13: how far this node is from having retired the shared cluster
+	 * token. Once `credentialed === peers`, `legacy_token_accepted` goes false
+	 * by itself and CLUSTER_TOKEN is only good for enrolling a new node. */
+	credentials: ClusterCredentialSummary;
 	archive_enabled: boolean;
 	replication_mode: string;
 	disk_total_bytes: number;

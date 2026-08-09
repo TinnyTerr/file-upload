@@ -6,6 +6,7 @@ import {
 	Database,
 	Eye,
 	HardDrive,
+	KeyRound,
 	Network,
 	PauseCircle,
 	Pin,
@@ -49,6 +50,7 @@ import type {
 	ChunkStorage,
 	ClusterHalt,
 	ClusterSelf,
+	EnrollmentToken,
 	NodeRole,
 } from "../types";
 import { TopologyCard } from "./TopologyCard";
@@ -329,61 +331,111 @@ function HaltList({ halts }: { halts: ClusterHalt[] }) {
 	);
 }
 
-function LocalTokenCard() {
-	const { reveal, rotate } = useClusterToken();
+/** Enrolment and the bootstrap token (§5.13).
+ *
+ * The shared token is no longer how nodes talk to each other: each pair holds a
+ * secret of its own, and this one is only honoured until the last peer has
+ * established theirs. So the primary action here is minting an enrolment token
+ * — one use, fifteen minutes, one credential exchange and nothing else — and
+ * the shared token is the fallback below it. */
+function EnrollmentCard() {
+	const { data: self } = useClusterSelf();
+	const { reveal, rotate, mintEnrollment } = useClusterToken();
 	const { confirm } = useDialogs();
 	const [token, setToken] = useState<string | null>(null);
+	const [invitation, setInvitation] = useState<EnrollmentToken | null>(null);
 
-	const onReveal = async () => setToken(await reveal.mutateAsync());
+	const creds = self?.credentials;
+	const migrating = !!creds?.legacy_token_accepted && (creds?.peers ?? 0) > 0;
+
+	const onMint = async () => {
+		setToken(null);
+		setInvitation(await mintEnrollment.mutateAsync());
+	};
+
+	const onReveal = async () => {
+		setInvitation(null);
+		setToken(await reveal.mutateAsync());
+	};
 
 	const onRotate = async () => {
 		const ok = await confirm({
-			title: "Rotate cluster token?",
+			title: "Rotate the bootstrap token?",
 			description:
-				"The current token stops working immediately. Every node and monitor subscribed to this server's firehose must be updated with the new token.",
+				"Established peers are unaffected — they authenticate with their own per-pair credential. This only changes the value a brand-new node may enrol with, and any monitor subscribed to the firehose with the old one.",
 			confirmText: "Rotate",
 			destructive: true,
 		});
-		if (ok) setToken(await rotate.mutateAsync());
+		if (ok) {
+			setInvitation(null);
+			setToken(await rotate.mutateAsync());
+		}
 	};
 
 	return (
-		<Card className="border-destructive/30 bg-destructive/5">
-			<CardHeader className="flex-row items-center justify-between gap-2 space-y-0">
-				<div>
-					<CardTitle className="flex items-center gap-2">
-						<ShieldCheck className="size-4 text-destructive" />
-						This server's cluster token
-					</CardTitle>
-					<CardDescription>
-						Hand this token to another node so it can subscribe to our event
-						firehose. It grants read access to <strong>every</strong> event on
-						this server — treat it like a root credential.
-					</CardDescription>
-				</div>
+		<Card>
+			<CardHeader>
+				<CardTitle className="flex items-center gap-2">
+					<ShieldCheck className="size-4 text-primary" />
+					Enrolling a node
+				</CardTitle>
+				<CardDescription>
+					Mint a one-use token here, then paste it into the server that is doing
+					the linking. It buys exactly one credential exchange — after that the
+					two nodes hold a secret shared with each other and nobody else.
+				</CardDescription>
 			</CardHeader>
 			<CardContent className="space-y-3">
-				{token ? (
-					<div className="flex items-center gap-2 rounded-lg border border-border bg-background/50 p-3">
+				{creds && (
+					<p className="text-sm text-muted-foreground">
+						{creds.peers === 0 ? (
+							"No peers yet. The shared token below is how the first one gets in."
+						) : (
+							<>
+								<strong className="text-foreground">
+									{creds.credentialed} of {creds.peers}
+								</strong>{" "}
+								{creds.peers === 1 ? "peer holds" : "peers hold"} a per-pair
+								credential.{" "}
+								{creds.legacy_token_accepted
+									? "The shared token is still accepted until the rest have exchanged — that happens on its own, within a few minutes."
+									: "The shared token is no longer accepted from peers."}
+							</>
+						)}
+					</p>
+				)}
+				{invitation && (
+					<div className="space-y-1.5 rounded-lg border border-border bg-background/50 p-3">
+						<div className="flex items-center gap-2">
+							<code className="min-w-0 flex-1 truncate font-mono text-sm">
+								{invitation.token}
+							</code>
+							<CopyButton value={invitation.token} />
+						</div>
+						<p className="text-xs text-muted-foreground">
+							One use, expires {formatDate(invitation.expires_at)}. Shown once.
+						</p>
+					</div>
+				)}
+				{token && (
+					<div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
 						<code className="min-w-0 flex-1 truncate font-mono text-sm">
 							{token}
 						</code>
 						<CopyButton value={token} />
 					</div>
-				) : (
-					<p className="text-sm text-muted-foreground">
-						The token is hidden. Reveal it to copy, or rotate to generate a
-						fresh one.
-					</p>
 				)}
 				<div className="flex flex-wrap gap-2">
+					<Button size="sm" onClick={onMint} loading={mintEnrollment.isPending}>
+						<Plus /> Generate enrolment token
+					</Button>
 					<Button
 						variant="outline"
 						size="sm"
 						onClick={onReveal}
 						loading={reveal.isPending}
 					>
-						<Eye /> Reveal token
+						<Eye /> Reveal bootstrap token
 					</Button>
 					<Button
 						variant="outline"
@@ -392,9 +444,17 @@ function LocalTokenCard() {
 						onClick={onRotate}
 						loading={rotate.isPending}
 					>
-						<RotateCcw /> Rotate token
+						<RotateCcw /> Rotate bootstrap token
 					</Button>
 				</div>
+				<p className="text-xs text-muted-foreground">
+					The bootstrap token also authenticates the event firehose, and keeps
+					doing so after peers have stopped accepting it — so an external
+					monitor using it goes on working.
+					{migrating
+						? " Rotating it while peers are still migrating will interrupt any that have not exchanged yet."
+						: ""}
+				</p>
 			</CardContent>
 		</Card>
 	);
@@ -446,15 +506,19 @@ function LinkNodeForm({ onDone }: { onDone: () => void }) {
 				</div>
 			</div>
 			<div className="space-y-1.5">
-				<Label htmlFor="node-token">Remote cluster token</Label>
+				<Label htmlFor="node-token">Enrolment token</Label>
 				<Input
 					id="node-token"
 					type="password"
-					placeholder="The other server's cluster token"
+					placeholder="Generated on the other server"
 					value={token}
 					onChange={(e) => setToken(e.target.value)}
 					className="font-mono"
 				/>
+				<p className="text-xs text-muted-foreground">
+					From the other server's cluster page — one use, fifteen minutes. Its
+					bootstrap token works too, while that node still accepts one.
+				</p>
 			</div>
 			<div className="flex justify-end gap-2">
 				<Button type="button" variant="ghost" size="sm" onClick={onDone}>
@@ -469,7 +533,7 @@ function LinkNodeForm({ onDone }: { onDone: () => void }) {
 }
 
 function LinkedNodesCard() {
-	const { list, unlink, update } = useClusterNodes();
+	const { list, unlink, update, rotateCredential } = useClusterNodes();
 	const { confirm } = useDialogs();
 	const [adding, setAdding] = useState(false);
 
@@ -490,7 +554,7 @@ function LinkedNodesCard() {
 					<CardTitle>Linked nodes</CardTitle>
 					<CardDescription>
 						Remote servers this node connects to. Paste another server's base
-						URL and cluster token to link it.
+						URL and an enrolment token minted there to link it.
 					</CardDescription>
 				</div>
 				{!adding && (
@@ -555,9 +619,24 @@ function LinkedNodesCard() {
 											{node.archive_enabled ? "archival" : "no archival"}
 										</Badge>
 										<Badge variant="outline">{node.replication_mode}</Badge>
+										{/* §5.13. `shared token` is the migration state, not a
+										    fault — the maintenance job clears it within minutes
+										    of both nodes being up. */}
+										{node.credential_at ? (
+											<Badge variant="success" className="gap-1">
+												<KeyRound className="size-3" /> paired
+											</Badge>
+										) : (
+											<Badge variant="warning" className="gap-1">
+												<KeyRound className="size-3" /> shared token
+											</Badge>
+										)}
 									</div>
 									<p className="mt-0.5 truncate text-xs text-muted-foreground">
-										{node.base_url} · token {node.token_preview}
+										{node.base_url} · secret {node.token_preview}
+										{node.credential_at
+											? ` · paired ${formatDate(node.credential_at)}`
+											: ""}
 									</p>
 									{node.disk_total_bytes > 0 && (
 										<p className="mt-0.5 text-xs text-muted-foreground">
@@ -598,6 +677,16 @@ function LinkedNodesCard() {
 								<Button
 									variant="ghost"
 									size="icon"
+									onClick={() => rotateCredential.mutate(node.id)}
+									disabled={rotateCredential.isPending}
+									aria-label={`Rotate the credential shared with ${node.name}`}
+									title="Re-key this pair. The old secret keeps working for ten minutes, so nothing in flight fails."
+								>
+									<KeyRound />
+								</Button>
+								<Button
+									variant="ghost"
+									size="icon"
 									className="text-destructive"
 									onClick={() => onUnlink(node.id, node.name)}
 									aria-label={`Unlink node ${node.name}`}
@@ -624,8 +713,8 @@ function ConnectingInfoCard() {
 					Connecting nodes
 				</CardTitle>
 				<CardDescription>
-					A linked node authenticates with the remote server's cluster token,
-					then streams or polls its events.
+					A linked node authenticates with the credential it established with
+					the remote server, then streams or polls its events.
 				</CardDescription>
 			</CardHeader>
 			<CardContent className="space-y-4 text-sm text-muted-foreground">
@@ -744,14 +833,14 @@ export function ClusterPage() {
 		<div className="space-y-6">
 			<PageHeader
 				title="Cluster"
-				subtitle="Link this server to other nodes and manage cluster tokens."
+				subtitle="Link this server to other nodes and manage their credentials."
 				icon={Network}
 			/>
 
 			<MasterStatusBanner />
 			<ThisServerCard />
 			<TopologyCard />
-			<LocalTokenCard />
+			<EnrollmentCard />
 			<LinkedNodesCard />
 			<ConnectingInfoCard />
 		</div>

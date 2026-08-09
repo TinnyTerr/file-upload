@@ -966,10 +966,11 @@ correctness.
 
 ### Built so far (2026-08-09)
 
-Phases **0 through 8** are implemented and green — the door is walked through, the
-topology in this document actually exists, nothing is overwritten silently any more,
-credential material no longer travels to nodes that have no use for it, and a blob is no
-longer an object a node either holds whole or not at all.
+Phases **0 through 9** are implemented and green — the whole plan. The door is walked
+through, the topology in this document actually exists, nothing is overwritten silently
+any more, credential material no longer travels to nodes that have no use for it, a blob
+is no longer an object a node either holds whole or not at all, and no single value
+authenticates every node to every other node.
 
 | Phase | Landed as |
 |---|---|
@@ -981,11 +982,12 @@ longer an object a node either holds whole or not at all.
 | 5 | `cluster/quota.ts` — the `quota_reservations` ledger, `/cluster/quota/{reserve,renew,commit,release}`, sliding TTL + sweep. `cluster/degraded.ts` + `middleware/degradedMode.ts` — reachability state machine, 5-minute grace, held-request queue, write gate. `promoteSelf` + `POST /cluster/promote` + the admin banner |
 | 6 | `cluster/conflicts.ts` — `replication_conflicts`, the total timestamp/node-id rule and the skew clamp, arbitrated inside `applyChanges` on the master alone; `/cluster/conflicts` + dismiss + re-apply, and the admin **Conflicts** tab. `cluster/revocation.ts` — `revocationMark`/`pushRevocation` + `POST /cluster/revocations`, wired into permission edits, user updates and deletion, share- and folder-link edits and deletes, and sealing |
 | 7 | `cluster/identityFetch.ts` — `password_hash` out of `TABLE_COLUMNS`, `users.credential_version` (replicated) + `credential_version_local` (not), `POST /cluster/identity/{fetch,publish}`, the login-time fetch, and the publish-to-master on every credential write. WebAuthn untouched, because it was already node-local |
+| 9 | `cluster/credentials.ts` — a secret per ordered pair, outbound in `cluster_nodes.token` and inbound hashed in `cluster_peer_credentials`; `POST /cluster/credentials/{exchange,introduce}`; one-use `cluster_enrollment_tokens`; `credentialMaintenanceJob` (the `cluster_credentials` job) doing establish + rotate + sweep at one cadence; `routes/clusterNode.ts` split out of `routes/cluster.ts` |
 | 8 | `cluster/placement.ts` — `blob_chunks` + `chunk_locations` (both replicated, both in `UID_TABLES`), the manifest computed in the hash pass `finalizeStoredFile` already made, `GET/HEAD/POST /cluster/chunks/:sha`, registry-driven read-time fetch in `cluster/blobs.ts`, the `cluster_chunk_replication` push job, and `cacheEviction.ts` rewritten as LRU over *unpinned* chunks with the durability check as a table read plus one HEAD. `PUT /cluster/cache-cap` and the dashboard's pinned/cached/headroom line |
 
 Tests: `clusterEvents`, `clusterIdentity`, `clusterChangelog`, `clusterReplication`,
 `clusterTiering`, `clusterQuota`, `clusterConflicts`, `clusterRevocation`,
-`clusterTopology`, `clusterIdentityFetch`, `clusterChunks`.
+`clusterTopology`, `clusterIdentityFetch`, `clusterChunks`, `clusterCredentials`.
 
 Three implementation decisions worth recording, because the text above does not predict
 them:
@@ -1157,6 +1159,48 @@ And five from Phase 8:
   When it fails the chunk stays `present` and the pass moves on, because a cache that
   believed it was under its cap while the disk said otherwise would evict its way down to
   nothing.
+
+And six from Phase 9:
+
+- **The outbound half stayed in `cluster_nodes.token`.** §5.13 says peer credentials are
+  "stored hashed where they are verified", which is only half a scheme: a secret you have
+  to *present* cannot be hashed. So the pair splits by direction — the inbound half (what a
+  peer presents to us) is hashed in `cluster_peer_credentials`, and the outbound half stays
+  in the column that already meant "what we present to that peer". What changed is the
+  value, not the storage: a secret shared with one peer, so reading a node's database now
+  yields the ability to act as *that node* and as nobody else. That is what S2 was actually
+  about, and it also meant every existing caller — replication, blobs, quota, revocation,
+  the firehose — needed no change at all.
+- **Establishment, migration and rotation are one endpoint.** `POST
+  /cluster/credentials/exchange` re-mints *both* directions in one round-trip; what differs
+  between the three cases is only what authorized the call — an existing pair credential, a
+  one-use enrolment token, or the shared token while it is still honoured. A second
+  "rotate" path would be a second thing to get wrong, and rotation is precisely where the
+  old design got it wrong.
+- **The shared token retires itself.** D-14 rules out a flag day, and an operator step that
+  must happen on every node before the old credential dies is a step that does not happen.
+  So `legacyTokenAcceptable()` is a query, not a setting: the shared token is honoured
+  while any linked peer has yet to exchange, and stops the moment the last one has. There
+  is no window in which a node is locked out, because the exchange establishes both
+  directions at once — our inbound set is complete exactly when every peer already holds a
+  credential to call us with. A peer that is *down* keeps its node on the legacy token
+  until it returns, which is a smaller failure than locking it out.
+- **A joiner is handed introductions, not credentials.** The `/join` response used to
+  contain `peers[].token`, every peer's standing credential, to anything holding the shared
+  one — the third bullet of S1. It now contains `peers[].enrollment_token`: the master asks
+  each peer, over its own pair credential, to mint a one-use token scoped to the joiner's
+  node id, and relays that. Even intercepted, it buys one exchange as one named node and
+  expires in fifteen minutes.
+- **The event firehose is exempt from the retirement, and only it.** The token
+  authenticates two different things: peers, and whatever an operator has pointed at
+  `/admin/cluster/firehose`. Retiring it for the second would take a monitoring collector
+  down silently, weeks after the upgrade, for a read-only stream — so that one surface
+  keeps honouring it (`allowBootstrapToken`), and rotating it is now a real remedy because
+  the peers do not use it. Everything that reads or writes cluster state retires it.
+- **An enrolment token is burnt on success, not on presentation.** One-use is the property
+  worth having; consuming it in the guard would mean a transient failure anywhere in the
+  handler leaves the operator holding a dead token and no way to retry. Verify in the
+  guard, consume in the handler once the exchange has actually landed.
 
 ---
 

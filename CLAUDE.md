@@ -28,7 +28,9 @@ Multi-node replication lives in `server/src/cluster/*.ts`:
 - `identityFetch.ts` — §5.10's identity split: `password_hash` and TOTP seeds are fetched from a peer at first login rather than replicated. `materialState` (held/stale/absent), `ensureCredentialMaterial` (the login path's one entry point), `bumpCredentialVersion` + `publishCredentialChange` (the write path's), `POST /api/cluster/identity/{fetch,publish}`. Not to be confused with `identity.ts`, which is about *row* identity
 - `digest.ts` — cluster state digest + divergence alerting (`syncCheckJob`). No split-brain cross-check: role is derived from a generation only the master mints, so "two nodes both believe they are master" is not a state the data model can express
 - `eventBus.ts` / `eventStore.ts` / `firehoseClient.ts` — in-memory live event bus, durable `cluster_events` mirror, peer-polling consumer
-- `http.ts` — node-to-node fetch helpers (cluster-token auth, timeouts)
+- `credentials.ts` — Phase 9's per-node credentials: a secret per **ordered pair**, outbound (recoverable) in `cluster_nodes.token` and inbound **hashed** in `cluster_peer_credentials`; `requirePeer` (the node-to-node guard), one-use `cluster_enrollment_tokens`, the single `performExchange`/`acceptExchange` round-trip that establishes *and* rotates, and `credentialMaintenanceJob`. `legacyTokenAcceptable()` is what retires `CLUSTER_TOKEN` without an operator step
+- `selfStats.ts` — the one producer of "what this node says about itself", shared by `/ping`, `/heartbeat`, `/join` and `/self` since the router split
+- `http.ts` — node-to-node fetch helpers (bearer credential, timeouts)
 
 **Leadership (Phase 4).** Three tiers — `master` (tier 0: quota + write ordering), `leader` (tier 1: one per region, a relay and cache), `follower`. Nothing is elected. The master computes a snapshot of the cluster, runs `computePlan` over it (`master = argmax(disk_total_bytes, then node_id ASC)` over eligible nodes; each region's leader is the same argmax *minus the master*, so tier 0 and tier 1 are never the same box) and mints a numbered **generation** into `cluster_tiering`. Every other node adopts the highest generation it has seen and derives its role from it, so agreement on *who leads* reduces to agreement on *what the snapshot is* — which is one writer's output, not a quorum's.
 
@@ -141,6 +143,57 @@ than per login.
   therefore share. They already must: `files.enc_key_blob` replicates and is
   sealed the same way.
 
+**Per-node credentials: one secret per ordered pair, and the shared token
+retires itself (Phase 9, §5.13, S2/S3).** `CLUSTER_TOKEN` used to be the
+cluster's standing auth: one value every node accepted, every peer's copy stored
+in plaintext, handed out whole in the `/join` response. Now each *pair* holds its
+own secret, in two halves — **outbound** (what this node presents to a peer) stays
+recoverable in `cluster_nodes.token`, and **inbound** (what a peer presents to
+us) is stored hashed in `cluster_peer_credentials`. Reading a node's database
+yields the ability to act as *that node* and nobody else.
+
+- **One endpoint establishes, migrates and rotates.** `POST
+  /cluster/credentials/exchange` re-mints both directions in a single round-trip;
+  only the authorization differs — an existing pair credential (a rotation), a
+  one-use enrolment token (a link or an introduction), or the shared token while
+  it is still honoured (the migration). A separate rotate path would be a second
+  thing to get wrong, and rotation is exactly what the old design got wrong.
+- **Rotation never withdraws the old secret first.** The retired inbound verifier
+  keeps being accepted for `ROTATION_OVERLAP_MS` (10 minutes) *after* the
+  replacement has been acknowledged; more than one live row per peer is the
+  overlap, not a bug. Nothing in flight 401s, which is what S3 was.
+- **`legacyTokenAcceptable()` is a query, not a setting.** The shared token is
+  honoured while any linked peer has yet to exchange, and stops the moment the
+  last one has — no flag day, no operator step. There is no lock-out window
+  because the exchange establishes both directions at once: our inbound set is
+  complete exactly when every peer already holds a credential to call us with. A
+  standalone node with no peers and no credentials it has ever established also
+  honours it, because that is the bootstrap.
+- **`cluster_credentials` (5 min) is the whole migration.** Establish where we
+  are still calling a peer with the shared token, re-mint anything past
+  `CREDENTIAL_MAX_AGE_MS` (30 days), sweep what the overlap has finished with. A
+  peer that is down keeps its edge on the legacy token until it returns, which is
+  a smaller failure than locking it out.
+- **A joiner gets introductions, never credentials.** `/join` answers with
+  `peers[].enrollment_token` — the master asks each peer, over its own pair
+  credential, to mint a one-use token scoped to the joiner's node id. The old
+  `peers[].token` was S1.
+- **An enrolment token buys one exchange and nothing else.** Fifteen minutes,
+  one use, refused on `/changes`, `/ping`, `/join` and everything else; the guard
+  verifies it and the *handler* burns it on success, so a failed attempt leaves
+  the operator something to retry with.
+- **A credential may only re-key its own node.** Otherwise any peer could rotate
+  what a third node presents to a fourth and cut it out of the mesh.
+- **`CLUSTER_TOKEN` is now a bootstrap value**, and rotating it no longer breaks
+  the cluster: established peers authenticate with their own secret, which
+  rotation does not touch. **The event firehose is the one surface that keeps
+  honouring it after retirement** (`requirePeer(state, {allowBootstrapToken:
+  true})` on `/api/admin/cluster/events`, and the matching branch in `ws.ts`) —
+  it is an operator's monitoring endpoint as much as a peer's, and going dark on
+  its own weeks after an upgrade is a worse failure than a read-only token
+  outliving the handshake. Nothing that reads or writes cluster *state* takes
+  that option.
+
 **Chunking: a blob is a manifest, and where its chunks live is a table (Phase
 8, §5.11, B10/D6/D-10/D-11).** Every blob is split into content-addressed
 chunks of its *stored* bytes — `chunkSize()`, 16 MiB, a whole multiple of the
@@ -197,7 +250,7 @@ in turn.
 - `middleware/degradedMode.ts` gates **by method with a short allowlist**, mounted once in `app.ts`, rather than enumerating write routes — so it fails closed and a route added later is refused unless deliberately allowlisted. `/api/cluster` is on that list because promotion is the only way out and gating it would make degraded mode unrecoverable.
 - Reads never gate. Every read here is local by construction, which is what makes a degraded node useful rather than merely up.
 
-`routes/cluster.ts` exports `clusterRouter` (mounted at `/api/cluster`: session-authenticated management endpoints — `/token`, `/token/rotate`, `/self`, `/topology`, `/conflicts` (+ `/:id/dismiss`, `/:id/reapply`), `/nodes` (GET/POST/PATCH/DELETE), `/retier`, `/cache-cap`, enroll/unlink — **plus** cluster-token-authenticated node-to-node endpoints — `/join`, `/heartbeat`, `/ping`, `/blobs/:storedSha256`, `/chunks/:storedSha256` (GET/HEAD to serve, POST to accept a pushed durability copy), `/digest`, `/changes`, `/tiering`, `/revocations`, `/identity/fetch`, `/identity/publish`) and `adminClusterRouter` (mounted at `/api/admin/cluster`: `/node-logs` + `/events`, the HTTP long-poll fallback for the websocket firehose). `server/src/ws.ts` attaches the websocket firehose directly to the `http.Server` returned by `app.listen()` in `index.ts`, since Express has no native websocket support.
+**The cluster surface is two routers at one prefix, one auth model each (Phase 9, S-operability).** `routes/cluster.ts` exports `clusterRouter` — session-authenticated management only: `/token`, `/token/rotate`, `/enrollment-tokens`, `/self`, `/topology`, `/conflicts` (+ `/:id/dismiss`, `/:id/reapply`), `/nodes` (GET/POST/PATCH/DELETE) + `/nodes/:id/rotate-credential`, `/retier`, `/promote`, `/cache-cap`. `routes/clusterNode.ts` exports `clusterNodeRouter` — node-authenticated only, every route behind `requirePeer`: `/credentials/exchange`, `/credentials/introduce`, `/join`, `/enroll`, `/heartbeat`, `/ping`, `/blobs/:storedSha256`, `/chunks/:storedSha256` (GET/HEAD to serve, POST to accept a pushed durability copy), `/digest`, `/changes`, `/tiering`, `/revocations`, `/identity/fetch`, `/identity/publish`, `/quota/*`. Both mount at `/api/cluster` (node router first); they share no path. `/conflicts` is the one dual-auth route and it is marked — a peer there is relaying an operator's own read-through. `adminClusterRouter` (mounted at `/api/admin/cluster`: `/node-logs` + `/events`, the HTTP long-poll fallback for the websocket firehose) is node-authenticated too. `server/src/ws.ts` attaches the websocket firehose directly to the `http.Server` returned by `app.listen()` in `index.ts`, since Express has no native websocket support.
 
 **Invariant:** the in-memory event sequence counter in `eventBus.ts` assumes **one process per node** (this server makes a single `app.listen()` call and never forks workers). Colliding `origin_seq` values across workers is the exact bug class that broke logins under `uvicorn --workers=4` in the old deployment — see `cluster_events`' `UNIQUE(origin_node_id, origin_seq)`. Don't introduce multi-process scaling without redesigning event sequencing.
 
@@ -207,10 +260,10 @@ in turn.
 Parts 1–3 are the defect inventory, Part 5 the target architecture, Part 7 the
 phasing. Work happens on the `cluster-rework` branch.
 
-**Phases 0–7 are built and green** (`clusterEvents`, `clusterIdentity`,
+**Phases 0–9 are built and green** (`clusterEvents`, `clusterIdentity`,
 `clusterChangelog`, `clusterReplication`, `clusterTiering`, `clusterQuota`,
 `clusterConflicts`, `clusterRevocation`, `clusterTopology`,
-`clusterIdentityFetch` tests): the
+`clusterIdentityFetch`, `clusterChunks`, `clusterCredentials` tests): the
 multi-node test harness, the event-pipeline fixes, ULID `uid` identity, the
 trigger-driven change log with hierarchical pull, tiering, master-gated quota +
 degraded mode, conflict arbitration + the synchronous revocation path, and the
@@ -240,9 +293,12 @@ Phase 8 added `cluster/placement.ts` and rewrote `cluster/blobs.ts` and
 place). `throughput_bps` is now live: `placement.ts` samples it from real chunk
 pushes and feeds it into target selection.
 
-**Phase 9 is next**: per-node credentials — a short-lived one-use enrolment
-token minting a per-node-pair credential, rotation with an overlap window, and
-the node-to-node router split (S2, S3).
+Phase 9 added `cluster/credentials.ts` and split `routes/clusterNode.ts` out of
+`routes/cluster.ts` — see "Per-node credentials" below.
+
+**The rework is complete: Phases 0–9 are all built and green.** What is left is
+operational rather than structural — the residual questions in `Part 8` of the
+design doc, and anything the deployment turns up.
 
 ---
 
@@ -300,6 +356,10 @@ behaviour that isn't exercised through `makeCluster` isn't tested.
 everyone — because a linked but untiered node has no upstream and replicates
 with nobody. Call `tier()` again after changing what the leader computation
 reads (capacity, eligibility, liveness) to see the new plan take effect.
+`linkAll()` leaves every pair on the shared token, which is the migration state
+an upgraded deployment boots into; `await credentialAll()` runs the Phase 9
+exchange across every edge, after which the shared token is refused everywhere.
+`asPeer(path, {secret})` makes a call with a specific credential.
 
 Config lives in `./data/app.env`, auto-generated on first run (mode `0600`).
 
@@ -341,8 +401,8 @@ Environment variables:
 | `NODE_ROLE` | Bootstrap role on *first ever* boot only — it decides whether this node mints tiering generation 1. Afterwards the role derived from the held `cluster_tiering` generation always wins, so an env var can't override a decision the cluster has already made |
 | `NODE_REGION` | Explicit region name (`region_source = 'configured'`). Unset = inferred by clustering heartbeat RTTs |
 | `CLUSTER_REGION_RTT_MS` | RTT spread within which two *unconfigured* nodes are taken to share a region. Default 30 |
-| `MASTER_URL` / `MASTER_TOKEN` | Coordinates a non-master node auto-joins at startup |
-| `CLUSTER_TOKEN` | Shared bearer token for node-to-node endpoints |
+| `MASTER_URL` / `MASTER_TOKEN` | Coordinates a non-master node auto-joins at startup. `MASTER_TOKEN` may be a one-use enrolment token: it is spent on the first boot's credential exchange, and every boot after that re-joins with the pair credential it established |
+| `CLUSTER_TOKEN` | **Bootstrap** bearer token. Since Phase 9 each pair of nodes holds its own credential; this is honoured on the state-carrying endpoints only until every linked peer has exchanged (`credentials.ts::legacyTokenAcceptable`), after which it serves only to enrol a new node and to authenticate the event firehose |
 | `REPLICATION_MODE` | `full` (default) or `cache` (bounded LRU over the cluster blob store) |
 | `CACHE_MAX_BYTES` | Cache-mode eviction cap, over **unpinned** chunk bytes only. `0`/unset = never evict. Settable from the cluster dashboard (`PUT /api/cluster/cache-cap`). |
 | `REPLICATION_FACTOR` | Chunk copies kept cluster-wide (default `2`). `1` = wherever it was written and nowhere else |
@@ -388,6 +448,7 @@ swallowed rather than killing the timer.
 | `cluster_replication_pull` | 1s | Pulls the change log from this node's targets |
 | `cluster_cache_eviction` | 10m | LRU chunk eviction on `REPLICATION_MODE=cache` nodes, plus registry housekeeping everywhere (`cacheEviction.ts`) |
 | `cluster_chunk_replication` | 1m | Pushes under-replicated chunks toward `REPLICATION_FACTOR` copies (`placement.ts`). 20 per tick |
+| `cluster_credentials` | 5m | Establishes a pair credential with any peer still on the shared token, re-mints aged ones, sweeps expired overlaps (`credentials.ts`) |
 | `torrent_poll` | 5s | One qBittorrent list fetch per tick + Real-Debrid progress |
 
 `cluster_replication_pull` runs at 1s because one pull interval per hop is the
@@ -416,7 +477,9 @@ server/src/
   outbound.ts              # fetchLogged/beginOutbound — one log line per request leaving
                            #   this process, with the URL redacted first
   httpError.ts             # HttpError — thrown anywhere, rendered as {detail} by app.ts
-  ws.ts                    # Websocket firehose, attached to the raw http.Server
+  ws.ts                    # Websocket firehose, attached to the raw http.Server.
+                           #   Peer auth matches the HTTP guard: pair credential, then
+                           #   the shared token while it is still honoured.
   permissions.ts           # BOOL_FLAGS + getPermissions — the permission source of truth
   db/
     index.ts               # createDb(): picks an adapter by DATABASE_URL scheme (sqlite: only)
@@ -556,7 +619,8 @@ Every data endpoint lives under `/api/*` so it can never collide with an SPA cli
 | `/api/users`, `/api/audit`, `/api/admin` | `users.ts`, `audit.ts`, `admin.ts` |
 | `/api/torrents`, `/api/admin/torrents` | `torrents.ts` |
 | `/api/media` | `media.ts` — library browse, publish, stream, play keys |
-| `/api/cluster`, `/api/admin/cluster` | `cluster.ts` |
+| `/api/cluster` | `clusterNode.ts` (node-authenticated) **then** `cluster.ts` (session-authenticated) — two routers, one prefix, disjoint paths |
+| `/api/admin/cluster` | `cluster.ts::adminClusterRouter` (node-authenticated) |
 | `/api/admin/directories` | `directories.ts::adminDirectoriesRouter` — flat every-folder list, master-only |
 | `/api` (self-prefixed paths) | `directories.ts` (`directoriesRouter` + `publicDirectoriesRouter`), `dropbox.ts`, `docs.ts` (`/docs.md`), `public.ts` (`/file/:slug*`), public folder routes (`/d/:slug*`) |
 
@@ -923,6 +987,11 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - **Anything that rewrites a blob's stored bytes in place must call `rechunkBlob`.** Today that is only the archive/unarchive path in `jobs/lifecycle.ts`; every other rewrite mints a new blob through `attachBlob`. A stale manifest makes every peer's chunk fetch fail its hash check forever.
 - **Never add a UNIQUE constraint to `blob_chunks` or `chunk_locations`.** A UNIQUE violation raised while applying a peer's entry halts the replication batch at that entry, permanently. Count copies with `COUNT(DISTINCT node_id)` instead.
 - **Don't put a per-read column in a replicated table.** `chunk_locations.last_read_at` was the obvious place for the LRU clock and would have appended a change-log entry — shipped cluster-wide — on every read; it lives in node-local `local_chunk_cache` instead.
+- **Never authenticate a node-to-node request against `state.clusterToken` directly.** Go through `cluster/credentials.ts::requirePeer` (or `verifyPeerSecret`, as `ws.ts` does): a pair credential first, the shared token only while `legacyTokenAcceptable()` still holds. A direct comparison re-opens S2 and never expires.
+- **Never store a peer's inbound secret in the clear, and never hash the outbound one.** They are different halves: the inbound is only ever compared (hash it), the outbound has to be presented (it cannot be hashed). Getting this backwards makes one of the two unusable.
+- **Never retire an inbound credential before its replacement is acknowledged.** `acceptInbound` mints the new row and sets the old one's `expires_at` in the same call, and the exchange only reaches it after the peer has answered. A credential withdrawn ahead of its replacement is S3 exactly.
+- **A node-to-node route belongs in `routes/clusterNode.ts`, not `routes/cluster.ts`.** One guard per file is what makes the auth posture of a route readable at a glance — the interleaved version is why S4 shipped. The single exception, `/conflicts`, is a peer relaying an operator's read-through and is marked as such.
+- **Don't let an enrolment token authorize anything but one credential exchange.** `requirePeer` takes `allowEnrollment` per route, off by default, and the handler burns the token only after the exchange succeeded — burning in the guard strands the operator when anything downstream fails.
 - **A play key must never be trusted on a jti that isn't in `media_play_keys`.** Treating a missing row as valid would make the prune job a revocation-bypass.
 - **Deleting a file must also call `deleteThumbnail(fileId)`** — the thumbnail cache is keyed by file id and is not reference-counted.
 - **A debrid retry decides re-import vs. re-download by the `data/debrid/_sources/<tag>.complete` marker**, not by "the staging directory has files in it". A transfer aborted halfway also leaves files there, and importing those would silently store truncated content. The marker is written only after the last byte of the last link lands (`debrid.ts::markTransferComplete`), and lives outside the job directory so the importer never sees it as content.
@@ -974,6 +1043,11 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - Don't record an eviction that freed no bytes — the cache would believe it is under a cap the disk says it is over, and evict its way down to nothing
 - Don't mint a chunk manifest anywhere but the node that created the blob (and the master, for legacy blobs) — two manifests for one blob is two sets of rows on every peer
 - Don't walk the peer list to find a blob any more — `chunk_locations` says who holds it; the whole-blob walk survives only for a blob with no manifest at all
+- Don't put the shared `CLUSTER_TOKEN` back on the node-to-node path — it is a bootstrap value that a healthy cluster stops accepting on its own, and reviving it as a fallback would make that retirement meaningless
+- Don't hand a peer's credential to anyone, in a response body or otherwise — introduce them with a one-use, subject-scoped enrolment token instead; `peers[].token` in the join response was S1
+- Don't invalidate a peer credential without an overlap window — the retired secret stays valid for ten minutes *after* the replacement lands, or a rotation 401s everything in flight
+- Don't add a second rotation path — establish, migrate and rotate are one exchange, and rotation is precisely the thing the old design got wrong by having its own path
+- Don't add a node-to-node route to `routes/cluster.ts` — that file is session-authenticated, and the two-auth-models-in-one-router shape is what Phase 9 deleted
 - Don't poll qBittorrent once per job — one list fetch per tick, grouped by tag, covering downloading *and* seeding jobs
 - Don't refuse a torrent for being over the concurrency limit — park it in `pending` and let `promotePendingJobs` start it
 - Don't count `pending` toward `IN_FLIGHT_STATUSES` — that is the status a job sits in *because* it has no slot, so counting it deadlocks the queue
@@ -1006,6 +1080,7 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - `cluster/changelog.ts` — the append is a **SQLite trigger**, not a wrapper around `db.run()`. Detecting writes by parsing SQL at the adapter would be guesswork; a trigger sees the committed row. That also moved uid minting into the trigger, so "minted where the row is created" is literally true. `replication_control` carries the node identity and the suppression flag *as table columns* because a trigger cannot reach application state — only other tables.
 - `cluster/replication.ts` — `PULL_LIMIT = 500` per request, `MAX_BATCHES_PER_TICK = 20` (a node far behind can't hold the 1s job forever — it resumes next tick), `PULL_TIMEOUT_MS = 20_000`. A pull that fills a batch immediately issues another rather than waiting for the next tick.
 - `cluster/tiering.ts` — `computePlan`, `inferRegions` and `upstreamOf` are pure and exported, which is why most of `clusterTiering.test.ts` needs no cluster at all. `computePlan` takes an `incumbent` used only when nothing is eligible: an all-ineligible snapshot must keep the current master, because *vacating* leadership is precisely what no node is allowed to decide. `KEEP_GENERATIONS = 20` trims history. `measureDrift(…, {persist: false})` measures without touching the hold-down clock, for read-only surfaces like `GET /cluster/self`.
+- `cluster/credentials.ts` — `verifyPeerSecret` scans the live inbound rows rather than looking one up: at 2–10 nodes with an overlap window that is a handful of digests, and a scan cannot leak which peer a near-miss belonged to. `performExchange` stores the inbound verifier only *after* the peer answers, because the answer is what carries its node id — a peer calling in that millisecond gets one 401 and retries.
 - `cluster/membership.ts` — `heartbeatJob` times its own round-trip and writes the median of the last `RTT_SAMPLES = 5` into `cluster_nodes.rtt_ms`; the sample map is pruned against the live target list every run. Region inference is free precisely because that round-trip was already happening.
 - `db/index.ts` — the only place a `DATABASE_URL` scheme is interpreted. `sqlite:///rel`, `sqlite:////abs` and `:memory:` are the three forms; anything else throws. A future Postgres adapter implements `Db` and gets another case here rather than touching callers.
 - `client/src/components/layout/UserMenu.tsx` — the collapsed sidebar trigger is a plain `Button`; wrapping it in a `Tooltip` breaks Radix DropdownMenu clicks.

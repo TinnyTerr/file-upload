@@ -19,6 +19,7 @@ import { adminRouter } from "./routes/admin.ts";
 import { auditRouter } from "./routes/audit.ts";
 import { authRouter } from "./routes/auth.ts";
 import { adminClusterRouter, clusterRouter } from "./routes/cluster.ts";
+import { clusterNodeRouter } from "./routes/clusterNode.ts";
 import {
 	adminDirectoriesRouter,
 	directoriesRouter,
@@ -94,6 +95,9 @@ export function createApp(state: AppState): Express {
 	app.use("/api/media", mediaRouter(state));
 	app.use("/api/torrents", torrentsRouter(state));
 	app.use("/api/admin/torrents", adminTorrentsRouter(state));
+	// Two routers, one prefix, one auth model each (§5.13). They share no path,
+	// so the order only decides which one 404s an unknown one.
+	app.use("/api/cluster", clusterNodeRouter(state));
 	app.use("/api/cluster", clusterRouter(state));
 	app.use("/api/admin/cluster", adminClusterRouter(state));
 	app.use("/api", publicRouter(state));

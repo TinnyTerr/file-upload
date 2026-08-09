@@ -24,6 +24,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { performExchange } from "../src/cluster/credentials.ts";
 import { adoptTiering, retier } from "../src/cluster/tiering.ts";
 import type { Settings } from "../src/config.ts";
 import { nowIso } from "../src/db/rows.ts";
@@ -32,13 +33,16 @@ import { type Harness, makeHarness } from "./harness.ts";
 export interface ClusterNodeHarness extends Harness {
 	nodeId: string;
 	nodeName: string;
-	/** The cluster token this node accepts, and that peers present to it. */
+	/** The shared cluster token. Since Phase 9 this is a *bootstrap* credential:
+	 * this node honours it only until every linked peer has established a pair
+	 * credential (`cluster/credentials.ts::legacyTokenAcceptable`). */
 	token: string;
-	/** `request()` with this node's cluster token attached — i.e. a call made
-	 * *as a peer*, hitting the node-to-node auth path rather than a session. */
+	/** `request()` with a cluster credential attached — i.e. a call made *as a
+	 * peer*, hitting the node-to-node auth path rather than a session. Defaults
+	 * to the shared token; pass `secret` for a pair credential. */
 	asPeer(
 		path: string,
-		init?: RequestInit & { json?: unknown },
+		init?: RequestInit & { json?: unknown; secret?: string },
 	): Promise<Response>;
 }
 
@@ -51,8 +55,17 @@ export interface ClusterHarness {
 	 * peer-walking loop (firehose consumer, replication, blob fetch) reads. */
 	link(from: ClusterNodeHarness, to: ClusterNodeHarness): void;
 	/** Full mesh, both directions, every pair — then tiers, since a linked but
-	 * untiered node has no upstream and replicates with nobody. */
+	 * untiered node has no upstream and replicates with nobody.
+	 *
+	 * Leaves every pair on the shared cluster token, which is the state an
+	 * upgraded deployment boots into and which `legacyTokenAcceptable()` still
+	 * honours (§5.13). Call `credentialAll()` to run the exchange. */
 	linkAll(): void;
+	/** Establish a pair credential across every linked edge, the way the
+	 * `cluster_credentials` job does in production. After this the shared token
+	 * is refused everywhere, so a test that wants the Phase 9 end state calls
+	 * it and a test that wants the migration state does not. */
+	credentialAll(): Promise<void>;
 	/** Mint a generation on the master and hand it to every other node, which is
 	 * what the join handshake and heartbeat do in production
 	 * (cluster/tiering.ts). Call this after changing what the computation reads
@@ -101,9 +114,9 @@ export async function makeCluster(
 			nodeName,
 			token,
 			asPeer(path, init = {}) {
-				const { json, headers, ...rest } = init;
+				const { json, headers, secret, ...rest } = init;
 				const h = new Headers(headers);
-				h.set("authorization", `Bearer ${token}`);
+				h.set("authorization", `Bearer ${secret ?? token}`);
 				if (json !== undefined) {
 					h.set("content-type", "application/json");
 				}
@@ -175,6 +188,20 @@ export async function makeCluster(
 				}
 			}
 			tier();
+		},
+		async credentialAll() {
+			// One exchange per unordered pair: it re-mints both directions, so
+			// running it twice per pair would just rotate what the first call
+			// established.
+			for (let i = 0; i < nodes.length; i++) {
+				for (let j = i + 1; j < nodes.length; j++) {
+					await performExchange(nodes[i]!.state, {
+						baseUrl: nodes[j]!.baseUrl,
+						auth: nodes[j]!.token,
+						expectNodeId: nodes[j]!.nodeId,
+					});
+				}
+			}
 		},
 		close() {
 			for (const n of nodes) n.close();

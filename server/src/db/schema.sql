@@ -464,7 +464,62 @@ CREATE TABLE IF NOT EXISTS cluster_nodes (
   -- Operator switches. `ineligible` removes a node from leader candidacy
   -- without unlinking it; `pinned_master` overrides the computation entirely.
   ineligible INTEGER NOT NULL DEFAULT 0,
-  pinned_master INTEGER NOT NULL DEFAULT 0
+  pinned_master INTEGER NOT NULL DEFAULT 0,
+  -- When the value in `token` stopped being the shared CLUSTER_TOKEN and became
+  -- a per-pair secret this node established with that peer (§5.13, Phase 9).
+  -- NULL means we are still presenting a shared token to it -- the migration
+  -- state, and what the maintenance job in cluster/credentials.ts looks for.
+  -- It is also the rotation clock: a credential older than CREDENTIAL_MAX_AGE
+  -- is re-minted.
+  credential_at TEXT
+);
+
+-- ── per-node credentials (cluster/credentials.ts, redesign §5.13) ──────────
+--
+-- The outbound half of a pair credential -- the secret this node PRESENTS when
+-- it calls a peer -- lives in `cluster_nodes.token`, because presenting it
+-- requires it to be recoverable and because that column already meant exactly
+-- that. What changed in Phase 9 is what the value is: a secret shared with one
+-- peer instead of that peer's single token, so compromising this node's
+-- database yields the ability to act as *this* node and nothing else (S2).
+--
+-- The inbound half -- the secret a peer presents to US -- is only ever
+-- compared, never replayed, so it is stored hashed. One peer can have more
+-- than one live row: that is the rotation overlap window (S3).
+CREATE TABLE IF NOT EXISTS cluster_peer_credentials (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  peer_node_id TEXT NOT NULL,
+  -- SHA-256 hex of the presented secret. A high-entropy random value, so a
+  -- plain digest is enough -- there is nothing here to brute-force.
+  secret_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  -- NULL for the current secret. Set on the OUTGOING one when a rotation has
+  -- been acknowledged by the peer, never before: a credential withdrawn ahead
+  -- of its replacement landing is exactly how rotation used to break the
+  -- cluster (S3).
+  expires_at TEXT,
+  last_used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cluster_peer_credentials_peer
+  ON cluster_peer_credentials(peer_node_id);
+
+-- Short-lived, one-use tokens that authorize a single credential exchange
+-- (§5.13). Two producers: an operator minting one from the dashboard to link a
+-- node by hand, and a node minting one on behalf of a joiner it is introducing
+-- to a peer. Stored hashed for the same reason authorization codes are --
+-- reading the database must not yield a usable credential.
+CREATE TABLE IF NOT EXISTS cluster_enrollment_tokens (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_hash TEXT NOT NULL UNIQUE,
+  -- The node id this token may enrol, when it is known at mint time (an
+  -- introduction). NULL for an operator-minted token, where the joining node's
+  -- id is exactly what the operator does not have yet.
+  subject_node_id TEXT,
+  created_by TEXT NOT NULL,       -- a username, or 'node:<id>' for an introduction
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  used_by_node_id TEXT
 );
 
 -- ── tiering (cluster/tiering.ts, redesign §5.3-5.4) ────────────────────────

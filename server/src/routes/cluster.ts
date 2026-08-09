@@ -1,142 +1,58 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
-import {
-	applyLocalUpsert,
-	type ChangeEntry,
-	isChangelogTable,
-	logHead,
-	readChanges,
-} from "../cluster/changelog.ts";
+import { applyLocalUpsert, isChangelogTable } from "../cluster/changelog.ts";
 import {
 	dismissConflict,
 	getConflict,
 	listConflicts,
 	openConflictCount,
 } from "../cluster/conflicts.ts";
+import {
+	authenticatePeer,
+	credentialSummary,
+	mintEnrollmentToken,
+	performExchange,
+	requirePeer,
+} from "../cluster/credentials.ts";
 import { masterStatus } from "../cluster/degraded.ts";
-import { computeDigest } from "../cluster/digest.ts";
 import { readOwnEvents } from "../cluster/eventStore.ts";
 import * as clusterHttp from "../cluster/http.ts";
 import { ClusterHTTPError } from "../cluster/http.ts";
-import {
-	allowIdentityFetch,
-	applyPublishedMaterial,
-	type CredentialMaterial,
-	fetchMaterial,
-	localMaterial,
-	materialSummary,
-} from "../cluster/identityFetch.ts";
-import { enrollWithMaster, upsertPeer } from "../cluster/membership.ts";
-import {
-	blobPath,
-	chunkStorageStats,
-	localChunk,
-	manifestOf,
-	markChunk,
-	touchChunk,
-	writeChunkAt,
-} from "../cluster/placement.ts";
-import {
-	type GrantRequest,
-	grantReservation,
-	outstandingReservations,
-	renewReservation,
-	settleReservation,
-} from "../cluster/quota.ts";
-import { applyPushedRevocation } from "../cluster/revocation.ts";
+import { materialSummary } from "../cluster/identityFetch.ts";
+import { chunkStorageStats } from "../cluster/placement.ts";
+import { outstandingReservations } from "../cluster/quota.ts";
+import { selfStats } from "../cluster/selfStats.ts";
 import {
 	currentTiering,
 	isMaster,
 	measureDrift,
 	promoteSelf,
-	regionOf,
 	retier,
-	retierForNewMember,
-	selfRole,
-	type Tiering,
 } from "../cluster/tiering.ts";
 import { buildTopology } from "../cluster/topology.ts";
 import { ConfigLockedError, isEnvManaged, setEnvValue } from "../config.ts";
-import { type ClusterNodeRow, nowIso, type UserRow } from "../db/rows.ts";
+import { type ClusterNodeRow, nowIso } from "../db/rows.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger, queryBackendLogs } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
 import { requirePermission } from "../middleware/deps.ts";
 import { requireCsrf } from "../security/csrf.ts";
-import { diskUsageBytes, usedStorageBytes } from "../storage/accounting.ts";
-import { safeJoin, storageRoot } from "../storage/paths.ts";
 
-/** Mirrors app/routes/cluster.py -- both the session-authenticated
- * management surface (token reveal/rotate, node link/unlink, self/nodes) and
- * the cluster-token-authenticated node-to-node membership/replication/blob
- * handshake all live under this one router, matching the Python file's
- * single-router-mixed-deps layout. Mounted at /cluster in app.ts. */
+/** The session-authenticated cluster management surface: token and enrolment,
+ * node linking, self/topology/conflicts, re-tier and promote.
+ *
+ * The node-to-node handshake used to live here too, two auth models
+ * interleaved in one 625-line file. Phase 9 (§5.13) moved it to
+ * `routes/clusterNode.ts`, which is mounted at the same prefix and has exactly
+ * one guard. Nothing in this file authenticates a node — the two exceptions
+ * are marked, and both are read-throughs where an operator's session on one
+ * node and a peer proxying for one are genuinely the same request. */
 
 const log = getLogger("app.cluster.routes");
-
-interface ContentBlobRow {
-	id: number;
-	storage_path: string;
-	stored_sha256: string;
-	transform_key: string;
-}
-
-/** Read a pushed chunk's raw body, refusing anything that is not exactly the
- * length the manifest says. The cap is the point: a body is trusted only after
- * its hash matches, and an unbounded read would let a peer decide how much
- * memory this handler allocates. */
-async function readBody(
-	req: Request,
-	expected: number,
-): Promise<Buffer | null> {
-	const pieces: Buffer[] = [];
-	let total = 0;
-	for await (const piece of req as AsyncIterable<Buffer>) {
-		total += piece.length;
-		if (total > expected) return null;
-		pieces.push(piece);
-	}
-	return total === expected ? Buffer.concat(pieces) : null;
-}
-
-function selfStats(state: AppState) {
-	const usage = diskUsageBytes();
-	const tiering = currentTiering(state.db);
-	const role = selfRole(state);
-	const masterId = tiering?.master_node_id ?? null;
-	const masterUrl =
-		masterId === state.settings.nodeId
-			? state.settings.nodeUrl
-			: (tiering?.snapshot.find((m) => m.node_id === masterId)?.base_url ??
-				null);
-	return {
-		node_id: state.settings.nodeId,
-		name: state.settings.nodeName,
-		is_master: role === "master",
-		archive_enabled: state.settings.archiveEnabled,
-		replication_mode: state.settings.replicationMode,
-		disk_total_bytes: usage?.total ?? 0,
-		disk_free_bytes: usage?.free ?? 0,
-		used_bytes: usedStorageBytes(state.db),
-		role,
-		region: tiering ? regionOf(tiering, state.settings.nodeId) : null,
-		tiering_generation: tiering?.generation ?? 0,
-		master_node_id: masterId,
-		master_node_url: masterUrl,
-		// Pinned and cached kept apart, deliberately (§5.11): they are what makes
-		// REPLICATION_MODE=cache legible, and the panel conflating them is part of
-		// why it has not been.
-		chunk_storage: chunkStorageStats(state),
-		// The whole record, so a peer's handshake either learns nothing new or
-		// adopts a newer generation without a second request (cluster/tiering.ts).
-		tiering,
-	};
-}
 
 function mask(token: string): string {
 	if (!token) return "";
@@ -151,6 +67,11 @@ function serializeNode(node: ClusterNodeRow) {
 		name: node.name,
 		base_url: node.base_url,
 		token_preview: mask(node.token),
+		// §5.13: whether what we present to this peer is a secret shared with it
+		// alone, or still the shared cluster token. The dashboard shows it because
+		// "which peers are still on the legacy token" is the only thing an
+		// operator has to do anything about.
+		credential_at: node.credential_at,
 		active: !!node.active,
 		is_master: !!node.is_master,
 		// Derived from the tiering generation, never from what the node claimed.
@@ -171,46 +92,16 @@ function serializeNode(node: ClusterNodeRow) {
 	};
 }
 
-/** Whether this request carries *our* cluster token. Separate from the guard
- * below because one route (the Conflicts read-through) has to tell a peer call
- * from an operator's session and dispatch to a different auth for each — a
- * bearer that is not this token is left to the session path, where an API key
- * or OAuth token is judged on its own terms. */
-export function clusterTokenPresented(state: AppState, req: Request): boolean {
-	const header = req.header("authorization") ?? "";
-	let presented = header.startsWith("Bearer ")
-		? header.slice("Bearer ".length).trim()
-		: "";
-	if (!presented) presented = (req.header("x-cluster-token") ?? "").trim();
-	const expected = state.clusterToken || "";
-	const presentedBuf = Buffer.from(presented);
-	const expectedBuf = Buffer.from(expected);
-	return (
-		!!presented &&
-		!!expected &&
-		presentedBuf.length === expectedBuf.length &&
-		timingSafeEqual(presentedBuf, expectedBuf)
-	);
-}
-
-/** Authenticate a request by the cluster token (Bearer or X-Cluster-Token).
- * Distinct from API-key/session auth: this single token grants read/write
- * access to node-to-node membership/replication endpoints regardless of
- * which user (if any) is behind the request. */
-export function requireClusterToken(state: AppState) {
-	return (req: Request, res: Response, next: NextFunction): void => {
-		if (!clusterTokenPresented(state, req)) {
-			res.status(401).json({ detail: "invalid cluster token" });
-			return;
-		}
-		next();
-	};
-}
-
+/** Tell a node we have just linked to enrol with us, handing it a one-use
+ * enrolment token minted here rather than this node's standing credential. The
+ * call itself is authenticated with whatever the operator pasted — an enrolment
+ * token minted on the far side, or its cluster token while that is still
+ * honoured there. */
 async function triggerEnroll(
 	state: AppState,
 	baseUrl: string,
 	token: string,
+	actor: string,
 ): Promise<Record<string, unknown>> {
 	// Master is derived from the tiering generation (cluster/tiering.ts) -- the
 	// static NODE_ROLE config value can be stale, so check the live state.
@@ -230,13 +121,17 @@ async function triggerEnroll(
 	log.info(
 		`enroll ${baseUrl}: commanding node to join master ${state.settings.nodeUrl}`,
 	);
+	// Unscoped: the joining node's id is exactly what we do not know yet, which
+	// is why the operator is doing this at all. It buys one credential exchange
+	// and expires in fifteen minutes.
+	const invitation = mintEnrollmentToken(state.db, { createdBy: actor });
 	try {
 		const res = (await clusterHttp.postJson(
 			// Router is mounted at /api/cluster in app.ts -- every other node-to-node
 			// call in cluster/*.ts uses the /api prefix (membership.ts, blobs.ts).
 			`${baseUrl}/api/cluster/enroll`,
 			token,
-			{ master_url: state.settings.nodeUrl, master_token: state.clusterToken },
+			{ master_url: state.settings.nodeUrl, master_token: invitation.token },
 			20_000,
 		)) as Record<string, unknown> | null;
 		const result = res ?? { status: "ok" };
@@ -254,10 +149,18 @@ export function clusterRouter(state: AppState): Router {
 	const { db } = state;
 	const requireCluster = requirePermission(state, "can_manage_cluster");
 
-	// ── local cluster token ─────────────────────────────────────────────────
+	// ── the local cluster token and enrolment (§5.13) ───────────────────────
+	//
+	// `CLUSTER_TOKEN` is now a bootstrap credential, not the cluster's standing
+	// auth: it is honoured only until every linked peer has established a pair
+	// credential, after which `legacyTokenAcceptable()` goes false on its own.
+	// Linking a node from here mints a one-use enrolment token instead.
 
 	router.get("/token", requireCluster, (_req, res) => {
-		res.json({ token: state.clusterToken });
+		res.json({
+			token: state.clusterToken,
+			...credentialSummary(db),
+		});
 	});
 
 	router.post(
@@ -286,8 +189,82 @@ export function clusterRouter(state: AppState): Router {
 				target: "cluster_token",
 				ip: clientIp(state, req),
 			});
-			res.json({ token: newToken });
+			// Rotating this no longer breaks the cluster (S3): peers call us with
+			// their pair credential, which this does not touch. It only changes
+			// what a *new* node may bootstrap with.
+			res.json({ token: newToken, ...credentialSummary(db) });
 		},
+	);
+
+	/** Mint a one-use enrolment token for an operator to paste into the node
+	 * that is doing the linking. Short-lived and single-purpose: it authorizes
+	 * one credential exchange and nothing else. */
+	router.post(
+		"/enrollment-tokens",
+		requireSession(state),
+		requireCsrf,
+		requireCluster,
+		(req, res) => {
+			const minted = mintEnrollmentToken(db, {
+				createdBy: req.currentUser!.username,
+			});
+			recordAudit(db, {
+				actor: req.currentUser!.username,
+				action: "cluster.enrollment_token_minted",
+				target: `expires:${minted.expires_at}`,
+				ip: clientIp(state, req),
+			});
+			res.json({
+				...minted,
+				node_id: state.settings.nodeId,
+				name: state.settings.nodeName,
+				base_url: state.settings.nodeUrl,
+			});
+		},
+	);
+
+	/** Re-key a peer by hand. The same exchange the maintenance job runs, so
+	 * there is one rotation mechanism rather than an operator-only second one;
+	 * the old inbound secret stays valid for the overlap window either way. */
+	router.post(
+		"/nodes/:id(\\d+)/rotate-credential",
+		requireSession(state),
+		requireCsrf,
+		requireCluster,
+		asyncHandler(async (req, res) => {
+			const node = db.get<ClusterNodeRow>(
+				"SELECT * FROM cluster_nodes WHERE id = $id",
+				{ $id: Number(req.params.id) },
+			);
+			if (!node) throw new HttpError(404, "not found");
+			if (!node.node_id || !node.base_url || !node.token) {
+				throw new HttpError(409, "that node has no credential to rotate");
+			}
+			try {
+				await performExchange(state, {
+					baseUrl: node.base_url,
+					auth: node.token,
+					expectNodeId: node.node_id,
+				});
+			} catch (err) {
+				const reason =
+					err instanceof ClusterHTTPError ? err.message : String(err);
+				throw new HttpError(502, `the peer refused the exchange: ${reason}`);
+			}
+			recordAudit(db, {
+				actor: req.currentUser!.username,
+				action: "cluster.credential_rotated",
+				target: `node:${node.node_id}`,
+				ip: clientIp(state, req),
+			});
+			res.json(
+				serializeNode(
+					db.get<ClusterNodeRow>("SELECT * FROM cluster_nodes WHERE id = $id", {
+						$id: node.id,
+					})!,
+				),
+			);
+		}),
 	);
 
 	// ── the local chunk cache (§5.11) ───────────────────────────────────────
@@ -326,7 +303,7 @@ export function clusterRouter(state: AppState): Router {
 		},
 	);
 
-	// ── linked remote nodes ─────────────────────────────────────────────────
+	// ── this node ───────────────────────────────────────────────────────────
 
 	router.get("/self", requireCluster, (_req, res) => {
 		const stats = selfStats(state);
@@ -357,6 +334,8 @@ export function clusterRouter(state: AppState): Router {
 			// without asking anyone — the operational read on D-12's "a user cannot
 			// log in on a node that cannot reach a holder".
 			identity: materialSummary(db),
+			// §5.13. How far this node is from having retired the shared token.
+			credentials: credentialSummary(db),
 		});
 	});
 
@@ -374,22 +353,24 @@ export function clusterRouter(state: AppState): Router {
 	// So the panel on any other node reads through to the master rather than
 	// answering from a local table that would always be empty. `managerOrPeer`
 	// is what lets one path serve both the operator's session and that
-	// read-through.
+	// read-through — the one place in this file where a node authenticates, and
+	// it is a node relaying an operator's own request.
 
+	const peerAuth = requirePeer(state);
 	const managerOrPeer = (
 		req: Request,
 		res: Response,
 		next: NextFunction,
 	): void => {
-		if (clusterTokenPresented(state, req)) {
-			clusterAuth(req, res, next);
+		if (authenticatePeer(state, req)) {
+			peerAuth(req, res, next);
 			return;
 		}
 		requireCluster(req, res, next);
 	};
 
-	/** The master as a peer we can call: its URL from the generation, its token
-	 * from the `cluster_nodes` row we linked it through. */
+	/** The master as a peer we can call: its URL from the generation, its
+	 * credential from the `cluster_nodes` row we linked it through. */
 	function masterPeer(): { baseUrl: string; token: string } | null {
 		const tiering = currentTiering(db);
 		const masterId = tiering?.master_node_id;
@@ -509,6 +490,8 @@ export function clusterRouter(state: AppState): Router {
 		}),
 	);
 
+	// ── linked remote nodes ─────────────────────────────────────────────────
+
 	router.get("/nodes", requireCluster, (_req, res) => {
 		const nodes = db.all<ClusterNodeRow>(
 			"SELECT * FROM cluster_nodes ORDER BY created_at",
@@ -549,6 +532,10 @@ export function clusterRouter(state: AppState): Router {
 				{
 					$name: name,
 					$baseUrl: baseUrl,
+					// Whatever the operator pasted: an enrolment token minted on that
+					// node, or its cluster token. Either way it is provisional — the
+					// exchange the enrolment kicks off replaces it with a pair secret,
+					// which is why `credential_at` stays NULL here.
 					$token: token,
 					$createdBy: req.currentUser!.id,
 					$now: now,
@@ -567,8 +554,20 @@ export function clusterRouter(state: AppState): Router {
 				ip: clientIp(state, req),
 			});
 
-			const enroll = await triggerEnroll(state, node.base_url, node.token);
-			res.json({ ...serializeNode(node), enroll });
+			const enroll = await triggerEnroll(
+				state,
+				node.base_url,
+				node.token,
+				req.currentUser!.username,
+			);
+			res.json({
+				...serializeNode(
+					db.get<ClusterNodeRow>("SELECT * FROM cluster_nodes WHERE id = $id", {
+						$id: node.id,
+					})!,
+				),
+				enroll,
+			});
 		}),
 	);
 
@@ -658,6 +657,16 @@ export function clusterRouter(state: AppState): Router {
 				return;
 			}
 			db.run("DELETE FROM cluster_nodes WHERE id = $id", { $id: id });
+			// The inbound verifiers go with it, or an unlinked node keeps a working
+			// credential into this one. `legacyTokenAcceptable()` is deliberately
+			// unaffected by that: dropping the last peer must not revive the shared
+			// token on a node that has ever credentialed anyone.
+			if (node.node_id) {
+				db.run(
+					"DELETE FROM cluster_peer_credentials WHERE peer_node_id = $peer",
+					{ $peer: node.node_id },
+				);
+			}
 			recordAudit(db, {
 				actor: req.currentUser!.username,
 				action: "cluster.node_unlinked",
@@ -667,490 +676,6 @@ export function clusterRouter(state: AppState): Router {
 			res.json({ status: "deleted" });
 		},
 	);
-
-	// ── node-to-node membership handshake (cluster-token auth) ─────────────
-
-	const clusterAuth = requireClusterToken(state);
-
-	interface JoinBody {
-		node_id: string;
-		name: string;
-		base_url: string;
-		token: string;
-		archive_enabled?: boolean;
-		replication_mode?: string;
-		disk_total_bytes?: number;
-		disk_free_bytes?: number;
-		used_bytes?: number;
-		/** The sender's tiering generation. Adopted only if newer than ours; the
-		 * sender's *role* is never taken from the body (S4). */
-		tiering?: Tiering | null;
-	}
-
-	router.post("/join", clusterAuth, (req, res) => {
-		const body = req.body as JoinBody;
-		if (!body?.node_id || !body?.name || !body?.base_url || !body?.token) {
-			res
-				.status(400)
-				.json({ detail: "node_id, name, base_url and token are required" });
-			return;
-		}
-		const peer = upsertPeer(state, {
-			nodeId: body.node_id,
-			name: body.name,
-			baseUrl: body.base_url,
-			token: body.token,
-			archiveEnabled: body.archive_enabled !== false,
-			replicationMode: body.replication_mode ?? "full",
-			diskTotalBytes: body.disk_total_bytes ?? 0,
-			diskFreeBytes: body.disk_free_bytes ?? 0,
-			usedBytes: body.used_bytes ?? 0,
-			tiering: body.tiering,
-		});
-		recordAudit(db, {
-			actor: `node:${body.node_id}`,
-			action: "cluster.node_joined",
-			target: `node:${peer.id}`,
-			ip: clientIp(state, req),
-		});
-		// A node the current generation has never seen is admitted immediately
-		// rather than waiting out the drift hold-down: until it is in a snapshot
-		// it has no upstream, so its writes reach nobody. The response below then
-		// carries the generation that names it, which is how the joiner learns its
-		// own role in the same round-trip.
-		retierForNewMember(state, body.node_id);
-
-		const others = db
-			.all<ClusterNodeRow>("SELECT * FROM cluster_nodes WHERE active = 1")
-			.filter((n) => n.node_id && n.node_id !== body.node_id);
-		const peers = others.map((n) => ({
-			node_id: n.node_id,
-			name: n.name,
-			base_url: n.base_url,
-			token: n.token,
-			archive_enabled: !!n.archive_enabled,
-			replication_mode: n.replication_mode,
-		}));
-		res.json({ self: selfStats(state), peers });
-	});
-
-	router.post(
-		"/enroll",
-		clusterAuth,
-		asyncHandler(async (req, res) => {
-			const body = req.body as { master_url?: string; master_token?: string };
-			if (!body?.master_url || !body?.master_token) {
-				res
-					.status(400)
-					.json({ detail: "master_url and master_token are required" });
-				return;
-			}
-			const result = await enrollWithMaster(
-				state,
-				body.master_url,
-				body.master_token,
-			);
-			res.json(result);
-		}),
-	);
-
-	router.post("/heartbeat", clusterAuth, (req, res) => {
-		const body = req.body as JoinBody;
-		if (!body?.node_id || !body?.name || !body?.base_url || !body?.token) {
-			res
-				.status(400)
-				.json({ detail: "node_id, name, base_url and token are required" });
-			return;
-		}
-		upsertPeer(state, {
-			nodeId: body.node_id,
-			name: body.name,
-			baseUrl: body.base_url,
-			token: body.token,
-			archiveEnabled: body.archive_enabled !== false,
-			replicationMode: body.replication_mode ?? "full",
-			diskTotalBytes: body.disk_total_bytes ?? 0,
-			diskFreeBytes: body.disk_free_bytes ?? 0,
-			usedBytes: body.used_bytes ?? 0,
-			tiering: body.tiering,
-		});
-		res.json(selfStats(state));
-	});
-
-	router.get("/ping", clusterAuth, (_req, res) => {
-		res.json(selfStats(state));
-	});
-
-	function findLocalBlob(
-		storedSha256: string,
-		transform: string | null,
-	): ContentBlobRow | undefined {
-		if (transform) {
-			return db.get<ContentBlobRow>(
-				"SELECT * FROM content_blobs WHERE stored_sha256 = $hash AND transform_key = $t",
-				{
-					$hash: storedSha256,
-					$t: transform,
-				},
-			);
-		}
-		return db.get<ContentBlobRow>(
-			"SELECT * FROM content_blobs WHERE stored_sha256 = $hash",
-			{ $hash: storedSha256 },
-		);
-	}
-
-	// Cheap existence probe used by cluster/cacheEviction.ts before evicting a
-	// locally-cached blob -- confirms a full-replica peer already has these
-	// exact bytes without transferring them. No response body (just the
-	// status code), so a large eviction pass never streams file content just
-	// to check durability.
-	router.head("/blobs/:storedSha256", clusterAuth, (req, res) => {
-		const transform =
-			typeof req.query.transform === "string" ? req.query.transform : null;
-		const blob = findLocalBlob(req.params.storedSha256, transform);
-		if (!blob) {
-			res.status(404).end();
-			return;
-		}
-		let path: string;
-		try {
-			path = safeJoin(storageRoot(), blob.storage_path);
-		} catch {
-			res.status(404).end();
-			return;
-		}
-		res.status(existsSync(path) ? 200 : 404).end();
-	});
-
-	router.get("/blobs/:storedSha256", clusterAuth, (req, res) => {
-		const transform =
-			typeof req.query.transform === "string" ? req.query.transform : null;
-		const blob = findLocalBlob(req.params.storedSha256, transform);
-		if (!blob) {
-			res.status(404).json({ detail: "blob not found" });
-			return;
-		}
-		let path: string;
-		try {
-			path = safeJoin(storageRoot(), blob.storage_path);
-		} catch {
-			res.status(404).json({ detail: "blob not found" });
-			return;
-		}
-		if (!existsSync(path)) {
-			res.status(404).json({ detail: "blob bytes missing on this node" });
-			return;
-		}
-		const stat = statSync(path);
-		res.writeHead(200, {
-			"Content-Type": "application/octet-stream",
-			"Content-Length": String(stat.size),
-			"X-Blob-Transform": blob.transform_key,
-			"X-Blob-Stored-Sha256": blob.stored_sha256,
-			"X-Blob-Storage-Path": blob.storage_path,
-		});
-		createReadStream(path).pipe(res);
-	});
-
-	// ── chunks (redesign §5.11) ─────────────────────────────────────────────
-	//
-	// The blob endpoints above move a whole file; these move one chunk of one,
-	// which is what lets a node hold part of something bigger than its disk and
-	// what makes a read cost a request to a node that has the bytes instead of
-	// a walk down the peer list. Both directions live here: GET is a read-time
-	// fetch or an eviction's durability probe, POST is placement pushing a
-	// durability copy onto this node.
-
-	router.head("/chunks/:storedSha256", clusterAuth, (req, res) => {
-		res.status(localChunk(db, req.params.storedSha256) ? 200 : 404).end();
-	});
-
-	router.get("/chunks/:storedSha256", clusterAuth, (req, res) => {
-		const sha256 = req.params.storedSha256;
-		const local = localChunk(db, sha256);
-		if (!local) {
-			res.status(404).json({ detail: "chunk not held on this node" });
-			return;
-		}
-		res.writeHead(200, {
-			"Content-Type": "application/octet-stream",
-			"Content-Length": String(local.size),
-			"X-Chunk-Sha256": sha256,
-		});
-		// A byte range of the blob's file -- the chunk store *is* the blob store
-		// (cluster/placement.ts), so serving one is a positional read.
-		createReadStream(local.path, {
-			start: local.offset,
-			end: local.offset + local.size - 1,
-		}).pipe(res);
-		touchChunk(db, sha256);
-	});
-
-	router.post(
-		"/chunks/:storedSha256",
-		clusterAuth,
-		asyncHandler(async (req, res) => {
-			const sha256 = req.params.storedSha256;
-			const blobUid = typeof req.query.blob === "string" ? req.query.blob : "";
-			const blob = blobUid
-				? db.get<ContentBlobRow & { id: number }>(
-						"SELECT * FROM content_blobs WHERE uid = $uid",
-						{ $uid: blobUid },
-					)
-				: undefined;
-			if (!blob) {
-				// The row is on its way through the change log. 409 rather than 404
-				// because the right response is for the pusher to try again later,
-				// not to conclude the chunk is unwanted.
-				res.status(409).json({ detail: "blob not replicated here yet" });
-				return;
-			}
-			const slot = manifestOf(db, blob.id).find((s) => s.sha256 === sha256);
-			if (!slot) {
-				res.status(409).json({ detail: "chunk is not part of that blob here" });
-				return;
-			}
-			const path = blobPath(blob);
-			if (!path) {
-				res.status(500).json({ detail: "invalid storage path" });
-				return;
-			}
-
-			const body = await readBody(req, slot.size);
-			if (!body) {
-				res.status(400).json({ detail: "chunk body is the wrong length" });
-				return;
-			}
-			// Content-addressed means the address is checkable, so it is checked:
-			// these bytes are about to be written into the middle of a file the
-			// read path will decrypt, where a corrupt range has no other signal.
-			if (createHash("sha256").update(body).digest("hex") !== sha256) {
-				res.status(400).json({ detail: "chunk failed its hash check" });
-				return;
-			}
-			writeChunkAt(path, slot.offset, body);
-			// Pinned: a placement push is a durability copy by definition, even
-			// onto a cache node, and the eviction pass must leave it alone.
-			markChunk(db, state.settings.nodeId, sha256, {
-				state: "present",
-				size: slot.size,
-				pinned: true,
-			});
-			touchChunk(db, sha256);
-			res.json({ stored: true, chunk_sha256: sha256, size_bytes: slot.size });
-		}),
-	);
-
-	router.get("/digest", clusterAuth, (_req, res) => {
-		res.json(computeDigest(state));
-	});
-
-	// ── the replication change log (redesign §5.7) ──────────────────────────
-	//
-	// One endpoint, both directions. A peer pulls from here with the cursor it
-	// last reached; whether that is a follower reading down from its master or
-	// the master reading up from a follower is the caller's business, not this
-	// handler's -- which is what lets the region tier slot in later without a
-	// new endpoint.
-	//
-	// Ascending from `after`, front-truncated at `limit`. Returning the newest
-	// N instead would silently strand everything older, which is exactly the
-	// bug B2 was in the event pipeline.
-
-	router.get("/changes", clusterAuth, (req, res) => {
-		const after = Number(req.query.after ?? 0) || 0;
-		const limitRaw = Number(req.query.limit ?? 500);
-		const limit = Math.max(
-			1,
-			Math.min(Number.isFinite(limitRaw) ? limitRaw : 500, 1000),
-		);
-		const entries = readChanges(db, { after, limit });
-		res.json({
-			entries,
-			last_seq: entries.length > 0 ? entries[entries.length - 1]!.seq : after,
-			// This node's log head, so a caller can tell "nothing new" from
-			// "still catching up" without a second request.
-			head: logHead(db),
-			count: entries.length,
-		});
-	});
-
-	// ── pushed revocations (redesign §5.9, D-13) ────────────────────────────
-	//
-	// The same entries the pull would have carried, delivered early because a
-	// stale *grant* is a security hole and the operator is waiting. Applied
-	// through the ordinary apply path, so a redelivery by the pull afterwards
-	// dedups to nothing.
-
-	router.post("/revocations", clusterAuth, (req, res) => {
-		const entries = Array.isArray(req.body?.entries)
-			? (req.body.entries as ChangeEntry[])
-			: [];
-		if (entries.length === 0) {
-			res.json({ applied: 0 });
-			return;
-		}
-		res.json(applyPushedRevocation(state, entries));
-	});
-
-	// ── identity material (redesign §5.10, D-12) ────────────────────────────
-	//
-	// `password_hash` and TOTP seeds do not replicate. A node fetches them the
-	// first time somebody tries to log in as a given user there, and the fetch
-	// walks up the tier until it reaches a holder — the master, which every
-	// credential write publishes to. Nothing walks down or sideways.
-	//
-	// A miss answers `{material: null}` rather than 404: "nobody up the chain
-	// holds any" is a real answer, and the caller turns it into a failed login,
-	// not an error.
-
-	router.post(
-		"/identity/fetch",
-		clusterAuth,
-		asyncHandler(async (req, res) => {
-			const userUid =
-				typeof req.body?.user_uid === "string" ? req.body.user_uid : "";
-			if (!userUid) {
-				res.status(422).json({ detail: "user_uid required" });
-				return;
-			}
-			// A bucket key, never an authorization input — an unauthenticated
-			// self-asserted node id decides nothing here but which counter is
-			// incremented, and a peer that lies about it only rate-limits itself
-			// against a different bucket. The IP fallback keeps it keyed on
-			// *something* when the field is absent.
-			const bucket =
-				typeof req.body?.node_id === "string" && req.body.node_id
-					? req.body.node_id
-					: clientIp(state, req);
-			if (!allowIdentityFetch(bucket, userUid)) {
-				res.status(429).json({ detail: "too many identity fetches" });
-				return;
-			}
-			const user = db.get<UserRow>("SELECT * FROM users WHERE uid = $uid", {
-				$uid: userUid,
-			});
-			const material = user ? localMaterial(db, user) : null;
-			if (material) {
-				res.json({ material });
-				return;
-			}
-			// Not held here. Forward up our own chain rather than answering "no" —
-			// and deliberately do NOT keep a copy of what comes back: a relay that
-			// cached would widen the set of nodes holding a hash beyond "nodes this
-			// user has actually logged in on", which is the bound §5.10 promises.
-			const hops = Number(req.body?.hops ?? 0) || 0;
-			res.json({ material: await fetchMaterial(state, userUid, hops) });
-		}),
-	);
-
-	router.post("/identity/publish", clusterAuth, (req, res) => {
-		const material = req.body?.material as CredentialMaterial | undefined;
-		if (!material || typeof material.user_uid !== "string") {
-			res.status(422).json({ detail: "material required" });
-			return;
-		}
-		const result = applyPublishedMaterial(state, material);
-		if (!result.stored) {
-			// The user row has not replicated here yet. The publisher pushes the
-			// log entries first precisely so this cannot happen; when it does, the
-			// row arrives at pull speed and the material follows on the next
-			// credential write or fetch.
-			res.status(409).json({ detail: result.reason ?? "not stored" });
-			return;
-		}
-		res.json({ stored: true });
-	});
-
-	// ── tiering (redesign §5.3-5.4) ─────────────────────────────────────────
-	//
-	// `/vote-request` and `/master-assumed` used to live here. There is nothing
-	// to replace them with: leadership is not negotiated, it is computed, and
-	// the only thing that travels between nodes is the generation itself —
-	// which already rides on every join and heartbeat. This endpoint exists so a
-	// node can ask for it directly rather than waiting for the next heartbeat.
-
-	router.get("/tiering", clusterAuth, (_req, res) => {
-		res.json({ tiering: currentTiering(db) });
-	});
-
-	// ── quota reservations (redesign §5.9) ──────────────────────────────────
-	//
-	// The only synchronous cross-node call on the write path. Master-only: a
-	// follower holds no ledger, and answering from one would be inventing the
-	// authority the whole design exists to centralise. 409 rather than 403 —
-	// the caller's credentials are fine, its *target* is wrong, and it should
-	// re-resolve who the master is and retry.
-
-	function requireQuotaAuthority(res: Response): boolean {
-		if (isMaster(state)) return true;
-		res.status(409).json({
-			detail: "this node is not the cluster's quota authority",
-			master_node_id: currentTiering(db)?.master_node_id ?? null,
-		});
-		return false;
-	}
-
-	router.post("/quota/reserve", clusterAuth, (req, res) => {
-		if (!requireQuotaAuthority(res)) return;
-		const body = req.body as Partial<GrantRequest>;
-		if (!body?.user_uid || typeof body.bytes !== "number") {
-			res.status(400).json({ detail: "user_uid and bytes are required" });
-			return;
-		}
-		res.json(
-			grantReservation(db, {
-				user_uid: body.user_uid,
-				bytes: body.bytes,
-				kind: body.kind ?? "upload",
-				node_id: body.node_id ?? "unknown",
-			}),
-		);
-	});
-
-	router.post("/quota/renew", clusterAuth, (req, res) => {
-		if (!requireQuotaAuthority(res)) return;
-		const uid = (req.body as { reservation_uid?: string })?.reservation_uid;
-		if (!uid) {
-			res.status(400).json({ detail: "reservation_uid is required" });
-			return;
-		}
-		const renewed = renewReservation(db, uid);
-		if (!renewed) {
-			res.status(404).json({ detail: "no such reservation" });
-			return;
-		}
-		res.json(renewed);
-	});
-
-	// Commit and release are idempotent and never fail on an unknown uid: a
-	// reservation that already expired is settled, and the file row it admitted
-	// exists either way. Erroring here would only make callers handle a case
-	// with no remedy.
-	router.post("/quota/commit", clusterAuth, (req, res) => {
-		if (!requireQuotaAuthority(res)) return;
-		const body = req.body as {
-			reservation_uid?: string;
-			actual_bytes?: number;
-		};
-		if (body?.reservation_uid) {
-			settleReservation(
-				db,
-				body.reservation_uid,
-				"committed",
-				body.actual_bytes,
-			);
-		}
-		res.json({ status: "ok" });
-	});
-
-	router.post("/quota/release", clusterAuth, (req, res) => {
-		if (!requireQuotaAuthority(res)) return;
-		const uid = (req.body as { reservation_uid?: string })?.reservation_uid;
-		if (uid) settleReservation(db, uid, "released");
-		res.json({ status: "ok" });
-	});
 
 	// Manual re-tier (§5.4 trigger 1): always available, always wins. Master-only
 	// — a node that is not master has no standing to mint a generation, and
@@ -1230,12 +755,21 @@ export function clusterRouter(state: AppState): Router {
  * surface -- node-logs and the HTTP long-poll firehose fallback. The
  * websocket firehose itself (`/admin/cluster/firehose`) is set up
  * separately in server/src/ws.ts since it needs the raw http.Server.
- * Mounted at /admin/cluster in app.ts. */
+ * Mounted at /admin/cluster in app.ts.
+ *
+ * Node-authenticated, not session-authenticated: these are what a peer polls
+ * when the websocket is unavailable (cluster/firehoseClient.ts). */
 export function adminClusterRouter(state: AppState): Router {
 	const router = Router();
-	const clusterAuth = requireClusterToken(state);
+	// `allowBootstrapToken`: the firehose is a monitoring endpoint as well as a
+	// peer one, and an operator's collector holding CLUSTER_TOKEN must not go
+	// dark the day the mesh finishes credentialing itself. Peers reach it with
+	// their pair credential like everything else; this is the one place the
+	// shared token outlives its retirement, and it reads events rather than
+	// touching cluster state.
+	const peerAuth = requirePeer(state, { allowBootstrapToken: true });
 
-	router.get("/node-logs", clusterAuth, (req, res) => {
+	router.get("/node-logs", peerAuth, (req, res) => {
 		const q = typeof req.query.q === "string" ? req.query.q : undefined;
 		const level =
 			typeof req.query.level === "string" ? req.query.level : undefined;
@@ -1247,7 +781,7 @@ export function adminClusterRouter(state: AppState): Router {
 		res.json(queryBackendLogs({ q, level, limit }));
 	});
 
-	router.get("/events", clusterAuth, (req, res) => {
+	router.get("/events", peerAuth, (req, res) => {
 		const after = Number(req.query.after ?? 0) || 0;
 		const limitRaw = Number(req.query.limit ?? 200);
 		const limit = Math.max(

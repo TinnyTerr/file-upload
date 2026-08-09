@@ -1,5 +1,6 @@
 import type { AppState } from "../appState.ts";
 import { cacheEvictionJob } from "../cluster/cacheEviction.ts";
+import { credentialMaintenanceJob } from "../cluster/credentials.ts";
 import { syncCheckJob } from "../cluster/digest.ts";
 import { heartbeatJob } from "../cluster/membership.ts";
 import { chunkReplicationJob } from "../cluster/placement.ts";
@@ -82,6 +83,18 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 			id: "cluster_sync_check",
 			intervalMs: 5 * MINUTE_MS,
 			run: () => syncCheckJob(state),
+		},
+		// Per-node credentials (§5.13). Three things at one cadence because they
+		// are one thing: establish where we are still calling a peer with the
+		// shared token, re-mint what has aged out, and sweep what the rotation
+		// overlap has finished with. This is the whole migration path off
+		// CLUSTER_TOKEN -- an upgraded cluster credentials itself within a tick or
+		// two and then stops honouring the shared token on its own. Nothing to do
+		// on a node with no peers.
+		{
+			id: "cluster_credentials",
+			intervalMs: 5 * MINUTE_MS,
+			run: () => credentialMaintenanceJob(state),
 		},
 		// The drift counter (§5.4). Master-only, and a single query on a node with
 		// no peers -- it replaces `cluster_election_liveness`, which existed to

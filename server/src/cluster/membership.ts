@@ -4,6 +4,7 @@ import type { ClusterNodeRow } from "../db/rows.ts";
 import { nowIso } from "../db/rows.ts";
 import { getLogger } from "../logging.ts";
 import { diskUsageBytes, usedStorageBytes } from "../storage/accounting.ts";
+import { claimPlaceholderNode, performExchange } from "./credentials.ts";
 import { ClusterHTTPError, postJson } from "./http.ts";
 import {
 	adoptTiering,
@@ -21,6 +22,9 @@ export interface SelfPayload {
 	node_id: string;
 	name: string;
 	base_url: string;
+	/** This node's shared cluster token. A bootstrap value only: a peer stores
+	 * it so a half-migrated mesh can call back before the pair credential exists
+	 * (§5.13), and `upsertPeer` refuses to write it over one that does. */
 	token: string;
 	is_master: boolean;
 	archive_enabled: boolean;
@@ -68,6 +72,21 @@ function derivedRole(state: AppState, nodeId: string): string {
 	return tiering ? roleOf(tiering, nodeId) : "follower";
 }
 
+/** The pair credential we already hold for whoever answers at `baseUrl`, or
+ * null if we are still on a bootstrap token there. Keyed by URL because at
+ * enrolment time that is all we know about the far side — the exchange is what
+ * tells us its node id. */
+function existingCredentialFor(
+	state: AppState,
+	baseUrl: string,
+): string | null {
+	const row = state.db.get<ClusterNodeRow>(
+		"SELECT * FROM cluster_nodes WHERE base_url = $url AND credential_at IS NOT NULL",
+		{ $url: baseUrl.replace(/\/$/, "") },
+	);
+	return row?.token || null;
+}
+
 interface LinkLocallyOpts {
 	nodeId: string;
 	name: string;
@@ -81,6 +100,7 @@ function linkLocally(state: AppState, opts: LinkLocallyOpts): void {
 	if (!opts.nodeId || !opts.baseUrl) return;
 	const baseUrl = opts.baseUrl.replace(/\/$/, "");
 	const { db } = state;
+	claimPlaceholderNode(db, opts.nodeId, baseUrl);
 	const existing = db.get<ClusterNodeRow>(
 		"SELECT * FROM cluster_nodes WHERE node_id = $nodeId",
 		{
@@ -110,7 +130,9 @@ function linkLocally(state: AppState, opts: LinkLocallyOpts): void {
 	}
 	db.run(
 		`UPDATE cluster_nodes SET
-       name = $name, base_url = $baseUrl, token = COALESCE(NULLIF($token, ''), token),
+       name = $name, base_url = $baseUrl,
+       token = CASE WHEN credential_at IS NOT NULL THEN token
+                    ELSE COALESCE(NULLIF($token, ''), token) END,
        is_master = $isMaster, archive_enabled = $archiveEnabled, replication_mode = $replicationMode,
        role = $role,
        active = 1, last_seen_at = $now
@@ -164,12 +186,37 @@ export async function enrollWithMaster(
 		return { status: "error", reason: "node has no NODE_URL configured" };
 	}
 
+	// Establish a pair credential with the master before joining, unless we
+	// already hold one (§5.13). `masterToken` is the bootstrap: an enrolment
+	// token, or the shared cluster token while the far side still honours it.
+	// Everything after this point is authenticated with a secret shared with
+	// that node and nobody else — including the re-join on every restart, which
+	// is why a one-use enrolment token in MASTER_TOKEN works exactly once and
+	// then is never needed again.
+	let auth = existingCredentialFor(state, masterUrl);
+	if (!auth) {
+		try {
+			await performExchange(state, { baseUrl: masterUrl, auth: masterToken });
+			auth = existingCredentialFor(state, masterUrl) ?? masterToken;
+		} catch (err) {
+			const reason =
+				err instanceof ClusterHTTPError ? err.message : String(err);
+			log.warning(
+				`failed to establish a credential with the master at ${masterUrl}: ${reason}`,
+			);
+			return {
+				status: "error",
+				reason: `credential exchange failed: ${reason}`,
+			};
+		}
+	}
+
 	const payload = selfPayload(state);
 	let result: Record<string, unknown> | null;
 	try {
 		result = (await postJson(
 			`${masterUrl}/api/cluster/join`,
-			masterToken,
+			auth,
 			payload,
 			15_000,
 		)) as Record<string, unknown>;
@@ -187,40 +234,60 @@ export async function enrollWithMaster(
 	// highest-generation-wins.
 	adoptTiering(state, masterSelf.tiering, { force: true });
 	// Linked *after* the tiering lands, so the peer row's derived role is right
-	// the first time rather than being corrected on the next heartbeat.
+	// the first time rather than being corrected on the next heartbeat. The
+	// token is left alone: the exchange above already wrote a pair credential
+	// there, and handing `masterToken` back would overwrite it with a bootstrap
+	// value that may be single-use.
 	linkLocally(state, {
 		nodeId: masterSelf.node_id ?? "",
 		name: masterSelf.name ?? "master",
 		baseUrl: masterUrl,
-		token: masterToken,
+		token: "",
 		archiveEnabled: masterSelf.archive_enabled ?? true,
 		replicationMode: masterSelf.replication_mode ?? "full",
 	});
 
+	// The rest of the mesh. What the master hands over is a one-use
+	// *introduction* per peer, not that peer's standing credential — handing the
+	// latter to whoever held the shared token was S1. An introduction only buys
+	// one exchange, and it is scoped to this node's id.
 	const peers = (result?.peers as Array<Record<string, unknown>>) ?? [];
 	for (const peer of peers) {
+		const peerUrl = ((peer.base_url as string) ?? "").replace(/\/$/, "");
+		const peerNodeId = (peer.node_id as string) ?? "";
+		if (!peerUrl || !peerNodeId) continue;
 		linkLocally(state, {
-			nodeId: (peer.node_id as string) ?? "",
+			nodeId: peerNodeId,
 			name: (peer.name as string) ?? "",
-			baseUrl: (peer.base_url as string) ?? "",
-			token: (peer.token as string) ?? "",
+			baseUrl: peerUrl,
+			token: "",
 			archiveEnabled: peer.archive_enabled !== false,
 			replicationMode: (peer.replication_mode as string) ?? "full",
 		});
-		// Register ourselves with the peer too, so the mesh is symmetric.
-		if (peer.base_url && peer.token) {
-			try {
-				await postJson(
-					`${(peer.base_url as string).replace(/\/$/, "")}/api/cluster/join`,
-					peer.token as string,
-					payload,
-					10_000,
-				);
-			} catch (err) {
-				log.debug(
-					`could not register with peer ${peer.base_url}: ${err instanceof Error ? err.message : String(err)}`,
-				);
+		const intro = (peer.enrollment_token as string) ?? "";
+		const peerAuth = existingCredentialFor(state, peerUrl) ?? intro;
+		if (!peerAuth) continue;
+		try {
+			if (!existingCredentialFor(state, peerUrl)) {
+				await performExchange(state, {
+					baseUrl: peerUrl,
+					auth: intro,
+					expectNodeId: peerNodeId,
+				});
 			}
+			// Register ourselves with the peer too, so the mesh is symmetric.
+			await postJson(
+				`${peerUrl}/api/cluster/join`,
+				existingCredentialFor(state, peerUrl) ?? peerAuth,
+				payload,
+				10_000,
+			);
+		} catch (err) {
+			// The credential maintenance job retries this on both sides, so an
+			// unreachable peer costs the mesh an edge for a few minutes.
+			log.debug(
+				`could not register with peer ${peerUrl}: ${err instanceof Error ? err.message : String(err)}`,
+			);
 		}
 	}
 	log.info(`joined cluster via master ${masterUrl}`);
@@ -408,6 +475,9 @@ export function upsertPeer(
 	// Before the row is written, so a generation naming this very peer takes
 	// effect on the role we are about to derive for it.
 	adoptTiering(state, opts.tiering);
+	// …and before the lookup, so an operator's placeholder row becomes this
+	// peer's row rather than a second one for the same server.
+	claimPlaceholderNode(db, opts.nodeId, baseUrl);
 	const existing = db.get<ClusterNodeRow>(
 		"SELECT * FROM cluster_nodes WHERE node_id = $nodeId",
 		{
@@ -441,7 +511,12 @@ export function upsertPeer(
 	} else {
 		db.run(
 			`UPDATE cluster_nodes SET
-         name = $name, base_url = $baseUrl, token = COALESCE(NULLIF($token, ''), token),
+         name = $name, base_url = $baseUrl,
+         -- Never over a pair credential (§5.13): the payload's token field is
+         -- the sender's shared cluster token, a bootstrap value that is only of
+         -- any use before an exchange has happened.
+         token = CASE WHEN credential_at IS NOT NULL THEN token
+                      ELSE COALESCE(NULLIF($token, ''), token) END,
          is_master = $isMaster, archive_enabled = $archiveEnabled, replication_mode = $replicationMode,
          disk_total_bytes = $diskTotal, disk_free_bytes = $diskFree, used_bytes = $used,
          role = $role,

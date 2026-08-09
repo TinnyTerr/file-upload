@@ -143,6 +143,10 @@ export function createSqliteDb(path: string): Db {
 		"pinned_master",
 		"pinned_master INTEGER NOT NULL DEFAULT 0",
 	);
+	// Per-node credentials (cluster/credentials.ts, §5.13). NULL on every
+	// existing row, which is exactly right: an upgraded node is presenting the
+	// shared CLUSTER_TOKEN to its peers until the maintenance job replaces it.
+	ensureColumn(sqlite, "cluster_nodes", "credential_at", "credential_at TEXT");
 	// Read by the change log's fixup TRIGGER, which cannot reach application
 	// state -- only other tables. Must exist before installChangeLog() below
 	// recreates that trigger.

@@ -6,16 +6,32 @@ import type {
 	ClusterSelf,
 	ClusterTopology,
 	ConflictsResponse,
+	EnrollmentToken,
 	LinkedClusterNode,
 	NewClusterNode,
 } from "../types";
 
 export const clusterService = {
+	/** The shared cluster token. Since Phase 9 this is a *bootstrap* credential:
+	 * a node honours it only until every linked peer has established a pair
+	 * credential, after which it is good for nothing but enrolling a new node. */
 	revealToken: () =>
 		api.get<{ token: string }>("/cluster/token").then((r) => r.token),
 
 	rotateToken: () =>
 		api.post<{ token: string }>("/cluster/token/rotate").then((r) => r.token),
+
+	/** Mint a one-use, fifteen-minute token to paste into the node that will do
+	 * the linking. It authorizes one credential exchange and nothing else — no
+	 * change log, no identity fetch, no heartbeat. */
+	mintEnrollmentToken: () =>
+		api.post<EnrollmentToken>("/cluster/enrollment-tokens"),
+
+	/** Re-key one peer by hand. The same exchange the maintenance job runs, so
+	 * the retired secret stays valid for the overlap window and nothing 401s
+	 * mid-flight. */
+	rotateCredential: (nodeId: number) =>
+		api.post<ClusterNode>(`/cluster/nodes/${nodeId}/rotate-credential`),
 
 	self: () => api.get<ClusterSelf>("/cluster/self"),
 

@@ -3,6 +3,7 @@ import type { Server as HttpServer, IncomingMessage } from "node:http";
 import type { Request } from "express";
 import { type WebSocket, WebSocketServer } from "ws";
 import type { AppState } from "./appState.ts";
+import { verifyPeerSecret } from "./cluster/credentials.ts";
 import type { ClusterEvent, EventPredicate } from "./cluster/eventBus.ts";
 import type { UserRow } from "./db/rows.ts";
 import { getLogger } from "./logging.ts";
@@ -174,7 +175,15 @@ export function setupWebSockets(server: HttpServer, state: AppState): void {
 					? header.slice("Bearer ".length).trim()
 					: "";
 			}
-			if (!safeTokenEqual(presented, state.clusterToken)) {
+			// A pair credential (§5.13) first, then the shared cluster token —
+			// which this one surface keeps honouring after the mesh has retired it
+			// everywhere else, because the firehose is an operator's monitoring
+			// endpoint too and it must not go dark on its own. Same rule as the
+			// HTTP fallback it degrades to (`/api/admin/cluster/events`, which sets
+			// `allowBootstrapToken`), so a client that switches transports sees one
+			// answer.
+			const peerNodeId = verifyPeerSecret(state, presented);
+			if (!peerNodeId && !safeTokenEqual(presented, state.clusterToken)) {
 				rejectUpgrade(
 					socket,
 					path,
@@ -184,7 +193,11 @@ export function setupWebSockets(server: HttpServer, state: AppState): void {
 				return;
 			}
 			firehoseWss.handleUpgrade(req, socket, head, (ws) => {
-				logConnection(ws, path, `cluster-token ip=${ip}`);
+				logConnection(
+					ws,
+					path,
+					`peer=${peerNodeId ?? "legacy-token"} ip=${ip}`,
+				);
 				pump(state, ws, () => true, afterId(url));
 			});
 			return;

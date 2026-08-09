@@ -132,7 +132,24 @@ export function useClusterNodes() {
 			toast.error("Couldn't update node", { description: errorMessage(err) }),
 	});
 
-	return { list, link, unlink, update };
+	// Re-keying one peer (§5.13). The retired secret survives the overlap
+	// window, so this is safe to hit while the cluster is busy.
+	const rotateCredential = useMutation({
+		mutationFn: (nodeId: number) => clusterService.rotateCredential(nodeId),
+		onSuccess: () => {
+			toast.success("Credential rotated", {
+				description: "The previous secret keeps working for ten minutes.",
+			});
+			invalidate();
+			qc.invalidateQueries({ queryKey: SELF_QUERY });
+		},
+		onError: (err) =>
+			toast.error("Couldn't rotate the credential", {
+				description: errorMessage(err),
+			}),
+	});
+
+	return { list, link, unlink, update, rotateCredential };
 }
 
 /** Manual re-tiering (§5.4 trigger 1): always available on the master, always
@@ -210,5 +227,13 @@ export function useClusterToken() {
 			toast.error("Couldn't rotate token", { description: errorMessage(err) }),
 	});
 
-	return { reveal, rotate };
+	const mintEnrollment = useMutation({
+		mutationFn: () => clusterService.mintEnrollmentToken(),
+		onError: (err) =>
+			toast.error("Couldn't mint an enrolment token", {
+				description: errorMessage(err),
+			}),
+	});
+
+	return { reveal, rotate, mintEnrollment };
 }

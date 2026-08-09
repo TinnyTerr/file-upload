@@ -399,6 +399,34 @@ export interface ClusterNodeRow {
 	throughput_bps: number | null;
 	ineligible: number;
 	pinned_master: number;
+	/** When `token` became a per-pair secret rather than the shared cluster
+	 * token (§5.13). NULL = still legacy, which is what the credential
+	 * maintenance job looks for; also the rotation clock. */
+	credential_at: string | null;
+}
+
+/** The inbound half of a pair credential: a secret a peer presents to us,
+ * stored hashed because it is only ever compared. More than one live row per
+ * peer is the rotation overlap window (cluster/credentials.ts). */
+export interface ClusterPeerCredentialRow {
+	id: number;
+	peer_node_id: string;
+	secret_hash: string;
+	created_at: string;
+	expires_at: string | null;
+	last_used_at: string | null;
+}
+
+/** A one-use, short-lived token authorizing exactly one credential exchange. */
+export interface ClusterEnrollmentTokenRow {
+	id: number;
+	token_hash: string;
+	subject_node_id: string | null;
+	created_by: string;
+	created_at: string;
+	expires_at: string;
+	used_at: string | null;
+	used_by_node_id: string | null;
 }
 
 export interface ClusterTieringRow {
