@@ -4,7 +4,7 @@ import { ensureMaster } from "./bootstrap.ts";
 import { initSelfState } from "./cluster/election.ts";
 import { ClusterFirehoseConsumer } from "./cluster/firehoseClient.ts";
 import { joinCluster } from "./cluster/membership.ts";
-import { loadSettings } from "./config.ts";
+import { configValue, environmentKeys, loadSettings } from "./config.ts";
 import { createDb } from "./db/index.ts";
 import { startBackendWorkers } from "./jobs/scheduler.ts";
 import { getLogger } from "./logging.ts";
@@ -14,6 +14,15 @@ const log = getLogger("app.main");
 
 const settings = loadSettings();
 log.info(`application startup begin database_url=${settings.databaseUrl}`);
+// Names only -- several of these carry secrets. Worth one line: these are the
+// keys whose value `data/app.env` no longer decides, and the admin panel will
+// refuse to write them.
+const envManaged = environmentKeys();
+if (envManaged.length) {
+	log.info(
+		`configuration overridden by the environment: ${envManaged.join(", ")} (config file ${settings.configPath})`,
+	);
+}
 if (settings.trustProxyMode !== "off") {
 	log.info(`trusting proxy headers mode=${settings.trustProxyMode}`);
 }
@@ -46,7 +55,7 @@ void joinCluster(state).catch((err) => {
 });
 
 const app = createApp(state);
-const port = Number(process.env.PORT ?? 8000);
+const port = Number(configValue("PORT") || 8000);
 
 // The websocket firehose (/ws/events, /admin/cluster/firehose) needs the
 // raw http.Server that app.listen() returns -- Express itself has no

@@ -1,4 +1,5 @@
 import pino from "pino";
+import { configValue } from "./config.ts";
 
 /**
  * Logging built on pino, shaped to match the Python server:
@@ -55,7 +56,11 @@ const RESET = "\x1b[0m";
 const useColor = process.stdout.isTTY && process.env.NO_COLOR === undefined;
 
 function consoleLevel(): string {
-	const raw = (process.env.LOG_LEVEL ?? "INFO").toUpperCase();
+	// Read through the config resolver, so LOG_LEVEL works as an app.env entry
+	// as well as an environment variable. This runs at import time, before
+	// loadSettings() -- the resolver reads the default config path lazily for
+	// exactly that reason.
+	const raw = configValue("LOG_LEVEL", "INFO").toUpperCase();
 	return PY_TO_PINO[raw] ?? "info";
 }
 

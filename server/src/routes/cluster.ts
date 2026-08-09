@@ -22,7 +22,7 @@ import {
 	localIdentity,
 	type SerializedRow,
 } from "../cluster/replication.ts";
-import { setEnvValue } from "../config.ts";
+import { ConfigLockedError, isEnvManaged, setEnvValue } from "../config.ts";
 import { type ClusterNodeRow, nowIso } from "../db/rows.ts";
 import { getLogger, queryBackendLogs } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
@@ -180,6 +180,13 @@ export function clusterRouter(state: AppState): Router {
 		requireCsrf,
 		requireCluster,
 		(req, res) => {
+			// A CLUSTER_TOKEN fixed by the environment can't be rotated: the new
+			// one would live in memory until the next restart handed every peer
+			// back the old one. Refuse up front (409) rather than rotate into
+			// that. Persistence itself stays best-effort -- an unwritable config
+			// file is an operator problem, and the rotation has already happened.
+			if (isEnvManaged("CLUSTER_TOKEN"))
+				throw new ConfigLockedError("CLUSTER_TOKEN");
 			const newToken = randomBytes(32).toString("base64url");
 			state.clusterToken = newToken;
 			try {

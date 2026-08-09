@@ -73,7 +73,33 @@ wrong. Both scripts pass `./tests` explicitly — a bare `bun test` from either
 workspace globs the whole monorepo and runs the *other* workspace's tests with
 the wrong cwd.
 
-Config lives in `./data/app.env`, auto-generated on first run (mode `0600`). Environment variables:
+Config lives in `./data/app.env`, auto-generated on first run (mode `0600`).
+
+**`app.env` and the process environment are one namespace** (`config.ts`).
+Every key below can be given either way, and a variable set on the command
+line, in a unit file or via a container's `-e` **wins** over the file — which
+is what lets a value only known at launch be supplied at launch. `configValue()`
+is the single resolver: environment → file → default. Two rules keep it safe:
+
+- **The environment is never written back.** `generateFile` records an
+  environment-supplied key as a `# KEY is set in this node's environment`
+  comment rather than a value, and no backfill mints one. A persisted copy of
+  an overlay is a second answer that silently takes over the day the variable
+  is dropped — for `SECRET_KEY` that is every session invalidated, where the
+  *absent* key is a loud startup error instead.
+- **`setEnvValue` refuses an environment-supplied key** (`ConfigLockedError`, a
+  409), so the admin panel can't persist a value the running process is
+  ignoring. Every caller therefore persists *before* mutating `settings` in
+  place, or a refusal would leave memory ahead of the file.
+
+Keys outside `CONFIG_KEYS` are read from the environment only when `app.env`
+already carries them — anything you can put in the file you can also set in the
+environment, but a stray variable can't invent a value the app never had.
+`FILEUPLOAD_CONFIG` is the one environment-only key: it names the file.
+`index.ts` logs the overridden key *names* at startup (never values — several
+are secrets).
+
+Environment variables:
 
 | Variable | Purpose |
 |---|---|
@@ -98,8 +124,9 @@ Config lives in `./data/app.env`, auto-generated on first run (mode `0600`). Env
 | `QBITTORRENT_SEED_RATIO` | Share ratio at which a seeding torrent is removed and its downloaded copy deleted. Default `1.0`; `0` = no ratio limit. |
 | `QBITTORRENT_SEED_MINUTES` | Same, by seeding time. Default `10080` (7 days); `0` = no time limit. Whichever limit hits first wins. |
 | `TORRENT_CONTENT_PATH` | The same directory as **this server** sees it; only needed when qBittorrent is containerized separately (defaults to `QBITTORRENT_SAVE_PATH`) |
+| `PORT` | Listen port, default `8000` |
 | `LOG_LEVEL` | Python-style level name (`DEBUG`/`INFO`/`WARNING`/…), default `INFO` |
-| `FILEUPLOAD_CONFIG` | Override the config file path (default `./data/app.env`) |
+| `FILEUPLOAD_CONFIG` | Override the config file path (default `./data/app.env`). **Environment-only** — it names the file, so it can't come from it |
 | `FILEUPLOAD_STORAGE` | Override the blob storage root (default `./data/storage`) |
 | `FILEUPLOAD_THUMBNAILS` | Override the thumbnail cache root (default `./data/thumbnails`) |
 | `FILEUPLOAD_DEBRID` | Override the Real-Debrid staging root (default `./data/debrid`) |
@@ -114,7 +141,8 @@ server/src/
   app.ts                   # Express app factory: middleware order, route mounting, SPA serving, error handler
   appState.ts              # AppState (settings, db, sessionManager, lockout, clusterToken, eventBus,
                            #           eventWriter, haltRegistry, loginChallenges, secondFactorTickets)
-  config.ts                # Settings loader / generator for data/app.env
+  config.ts                # Settings loader / generator for data/app.env, and the one
+                           #   resolver (configValue) merging it with the environment
   bootstrap.ts             # First-run master user seed (only when `users` is empty)
   spa.ts                   # Reads the built SPA shell, injects per-page og: meta tags
   links.ts                 # Slug minting + atomic single-UPDATE link use consumption
@@ -563,6 +591,8 @@ Non-obvious rules that are easy to re-break. Each one has bitten this codebase a
 the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - **`/account/reset` must not delete the user's `permissions` row** — that would silently reset an admin-assigned quota to the default. Reset purges *content*; only true account deletion purges identity.
 - **Decrypt/decompress order depends on the producer.** `archived && !compressed` is `ZSTD(ENC(x))` (decompress, then decrypt); every other compressed+encrypted combination is `ENC(ZSTD(x))` (decrypt, then decompress). `routes/public.ts` and `storage/zip.ts` both branch on this — keep them in sync.
+- **Don't read `process.env` for a config key — go through `configValue()`.** A direct read skips `app.env`, which re-splits the one namespace `config.ts` exists to merge; a key resolved two ways is a key that answers differently depending on which module asks.
+- **Persist config before applying it in memory.** `setEnvValue` throws `ConfigLockedError` when the environment supplies the key, so `settings.x = v; setEnvValue(...)` leaves the process holding a value the file refused.
 - **`TRUST_PROXY` must be set behind a TLS-terminating proxy.** Otherwise `req.protocol` stays `http` in prod and `httpsRedirect` 308s in an infinite loop.
 - **Anything added to `permissions` or `users` must also be added to `cluster/replication.ts`'s `TABLE_COLUMNS`**, or the column silently resets to its default on every peer during replication.
 - **A play key must never be trusted on a jti that isn't in `media_play_keys`.** Treating a missing row as valid would make the prune job a revocation-bypass.

@@ -647,13 +647,16 @@ export function adminTorrentsRouter(state: AppState): Router {
 				const actor = req.currentUser!.username;
 				const ip = clientIp(state, req);
 
+				// Persist first, apply second: setEnvValue refuses a key fixed by
+				// this node's environment (config.ts), and the in-memory value must
+				// not move ahead of the file it is supposed to mirror.
 				if (typeof body.enabled === "boolean") {
-					settings.realDebridEnabled = body.enabled;
 					setEnvValue(
 						settings.configPath,
 						"REALDEBRID_ENABLED",
 						body.enabled ? "true" : "false",
 					);
+					settings.realDebridEnabled = body.enabled;
 				}
 
 				if (body.api_key !== undefined) {
@@ -669,8 +672,8 @@ export function adminTorrentsRouter(state: AppState): Router {
 									: `could not verify the token with Real-Debrid: ${errText(err)}`,
 							);
 						});
-						settings.realDebridApiKey = key;
 						setEnvValue(settings.configPath, "REALDEBRID_API_KEY", key);
+						settings.realDebridApiKey = key;
 						recordAudit(db, {
 							actor,
 							action: "torrent.debrid_key_set",
@@ -681,8 +684,8 @@ export function adminTorrentsRouter(state: AppState): Router {
 							`Real-Debrid token installed by ${actor} account=${account.username} type=${account.type}`,
 						);
 					} else {
-						settings.realDebridApiKey = "";
 						setEnvValue(settings.configPath, "REALDEBRID_API_KEY", "");
+						settings.realDebridApiKey = "";
 						recordAudit(db, {
 							actor,
 							action: "torrent.debrid_key_cleared",
@@ -723,13 +726,14 @@ export function adminTorrentsRouter(state: AppState): Router {
 				const body = req.body ?? {};
 				const actor = req.currentUser!.username;
 
+				// Persist first, apply second -- see the note on /debrid above.
 				if (typeof body.enabled === "boolean") {
-					settings.qbittorrentSeeding = body.enabled;
 					setEnvValue(
 						settings.configPath,
 						"QBITTORRENT_SEEDING",
 						body.enabled ? "true" : "false",
 					);
+					settings.qbittorrentSeeding = body.enabled;
 				}
 				for (const [key, envKey, field] of [
 					["ratio", "QBITTORRENT_SEED_RATIO", "qbittorrentSeedRatio"],
@@ -741,8 +745,8 @@ export function adminTorrentsRouter(state: AppState): Router {
 					if (!Number.isFinite(value) || value < 0) {
 						throw new HttpError(400, `${key} must be a non-negative number`);
 					}
-					settings[field] = value;
 					setEnvValue(settings.configPath, envKey, String(value));
+					settings[field] = value;
 				}
 
 				recordAudit(db, {
