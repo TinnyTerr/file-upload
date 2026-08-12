@@ -1,6 +1,6 @@
 # fileupload
 
-A self-hosted file sharing platform with end-to-end encryption, folder management, share links, API keys, dropboxes, and an admin panel.
+A self-hosted file sharing platform with end-to-end encryption, folder management, share links, API keys, dropboxes, torrenting, a media library, multi-node clustering, and an admin panel.
 
 Built with **Bun + Express** on the backend and **React + TypeScript** on the frontend.
 
@@ -13,6 +13,10 @@ Built with **Bun + Express** on the backend and **React + TypeScript** on the fr
 - Dropboxes — token-gated public upload links
 - Admin panel: users, permissions, files, keys, audit log, storage/backend controls
 - Remote URL fetch-and-upload
+- Torrenting via Real-Debrid (preferred) or a host qBittorrent (fallback)
+- Media library at `/watch`, with play keys for external players
+- OAuth 2.0 authorization server (PKCE) for third-party apps
+- Multi-node clustering: replication, elected leadership, blob fetch-on-miss
 
 ## Quick start
 
@@ -57,13 +61,13 @@ fails loudly at startup rather than quietly minting a new identity.
 | Layer | Technology |
 |---|---|
 | Backend | Bun + Express, `bun:sqlite` (SQLite, no migrations) |
-| Frontend | React 18/19, TypeScript, TanStack Query, Tailwind CSS, Radix UI primitives |
+| Frontend | React 19, TypeScript, TanStack Query, Tailwind CSS v4, Radix UI primitives |
 | Auth | Cookie-based sessions (`fu_session`) + CSRF tokens (`fu_csrf_token` in localStorage) |
 | Crypto | AES-GCM (server-side), browser WebCrypto (client-side E2E) |
 
 ## How it works
 
-**Client/server split.** The server does one job: serve every backend route under `/api/*` (JSON + binary alike — uploads, downloads, previews, admin) and, for everything else, serve the built React SPA and let React Router handle the page. Because the API lives entirely under its own `/api` prefix, a page route and an API route can share the same name (`/files` the page, `/api/files` the endpoint) with no ambiguity — the dev-mode Vite proxy forwards `/api/*` to the Express server and lets Vite serve everything else itself.
+**Client/server split.** The server does one job: serve every backend route under `/api/*` (JSON + binary alike — uploads, downloads, previews, admin) and, for everything else, serve the built React SPA and let React Router handle the page. "Everything else" is narrower than it sounds: a path with a file extension is a missing asset and gets a 404, an unknown `/api/*` path gets a JSON 404, and a request that didn't ask for HTML never receives a page — only genuine client-side routes get the shell. Because the API lives entirely under its own `/api` prefix, a page route and an API route can share the same name (`/files` the page, `/api/files` the endpoint) with no ambiguity — the dev-mode Vite proxy forwards `/api/*` to the Express server and lets Vite serve everything else itself.
 
 **Auth.** Logging in sets an HTTP-only `fu_session` cookie and returns a CSRF token, which the client stores in `localStorage` and sends back as `X-CSRF-Token` on every mutating request (`POST`/`PUT`/`PATCH`/`DELETE`) — the server rejects a mutation that has a valid session cookie but no matching CSRF header, which is what stops a third-party site from silently using a logged-in user's cookie against them. API keys (`Authorization: Bearer <key>`) are a separate auth path for scripts/integrations and skip CSRF entirely, since there's no ambient cookie to forge.
 
@@ -76,9 +80,10 @@ fails loudly at startup rather than quietly minting a new identity.
 ## Project structure
 
 ```
-server/src/     Bun + Express backend (routes, db, security, storage, jobs)
+server/src/     Bun + Express backend (routes, db, security, storage, jobs, cluster)
 client/src/     React + TypeScript frontend (features, components, config)
-public/         Built client output, served by the Express app
+docs/api.md     The public API reference (served at /api/docs.md, rendered at /api-docs)
+public/         Built client output, served by the Express app (not checked in)
 data/           Runtime state: app.env, sqlite db, uploaded files (not checked in)
 ```
 

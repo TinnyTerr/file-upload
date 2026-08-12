@@ -10,6 +10,7 @@ import {
 	RequireMaster,
 	RequirePermission,
 } from "@/components/layout/guards";
+import { NotFoundPage } from "@/components/layout/NotFoundPage";
 import { PublicShell } from "@/components/layout/PublicShell";
 import { type FeatureFlag, isFeatureEnabled } from "@/config/featureFlags";
 import { ChangePage } from "@/features/auth/components/ChangePage";
@@ -262,7 +263,17 @@ export default function App() {
 				</Route>
 
 				<Route path="/" element={<IndexRoute />} />
-				<Route path="*" element={<Navigate to="/" replace />} />
+				{/* Unknown address: say so, rather than bouncing to `/` and making a
+				    dead link look like a normal visit. The server hands the shell to
+				    any extension-less path, so this is where those land. */}
+				<Route
+					path="*"
+					element={
+						<PublicShell>
+							<NotFoundPage />
+						</PublicShell>
+					}
+				/>
 			</Routes>
 		</Suspense>
 	);

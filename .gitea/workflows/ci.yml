@@ -12,8 +12,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - working-directory: server
-        run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
       - working-directory: server
         run: bun run typecheck
 
@@ -24,10 +23,9 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - run: bun install --frozen-lockfile
       - working-directory: server
-        run: bun install --frozen-lockfile
-      - working-directory: server
-        run: bun test
+        run: bun run test
 
 
   server-biome:
@@ -37,8 +35,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - working-directory: server
-        run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
       - working-directory: server
         run: bunx @biomejs/biome check .
 
@@ -49,8 +46,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - working-directory: client
-        run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
       - working-directory: client
         run: bun run typecheck
       - name: Build (throwaway output)
@@ -67,10 +63,9 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
+      - run: bun install --frozen-lockfile
       - working-directory: client
-        run: bun install --frozen-lockfile
-      - working-directory: client
-        run: bun test
+        run: bun run test
       - working-directory: client
         run: bun run test:crypto
 
@@ -81,7 +76,6 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - working-directory: client
-        run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile
       - working-directory: client
         run: bunx @biomejs/biome check .

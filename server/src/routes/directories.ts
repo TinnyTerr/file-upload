@@ -56,7 +56,7 @@ import {
 } from "../security/accessLock.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
-import { renderSpa } from "../spa.ts";
+import { escapeHtml, sendSpa } from "../spa.ts";
 import { usedStorageBytesForUser } from "../storage/accounting.ts";
 import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
 import { safeJoin, storageRoot } from "../storage/paths.ts";
@@ -453,15 +453,6 @@ function archivePreview(db: Db, f: FileRow): Record<string, unknown> {
 		entries: manifest.entries.slice(0, 100),
 		entry_count: manifest.entryCount,
 	};
-}
-
-function escapeHtml(s: string): string {
-	return s
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;")
-		.replace(/'/g, "&#39;");
 }
 
 function directoryPageMeta(req: Request, db: Db, d: DirectoryRow): string {
@@ -2818,12 +2809,8 @@ export function publicDirectoriesRouter(state: AppState): Router {
 	router.get("/d/:slug", (req, res) => {
 		const resolved = resolveDirectory(db, req.params.slug);
 		const meta = resolved ? directoryPageMeta(req, db, resolved.directory) : "";
-		const content = renderSpa(meta);
-		res.set({
-			...SECURITY_HEADERS,
-			"Content-Type": "text/html; charset=utf-8",
-		});
-		res.send(content);
+		res.set(SECURITY_HEADERS);
+		sendSpa(res, meta);
 	});
 
 	return router;

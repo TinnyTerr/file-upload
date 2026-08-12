@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
+import { RootErrorBoundary } from "@/components/layout/RootErrorBoundary";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "@/features/auth/hooks/auth";
 import { RevealedKeyProvider } from "@/features/drive/hooks/useRevealedKeys";
@@ -27,24 +28,28 @@ import "./index.css";
 
 createRoot(document.getElementById("root")!).render(
 	<StrictMode>
-		<QueryProvider>
-			<AuthProvider>
-				<TooltipProvider delayDuration={200}>
-					<DialogProvider>
-						<UploadProvider>
-							{/* Above the router on purpose: a revealed key must survive the
-							    refetch, the navigation and the reload that the mutation
-							    producing it can trigger. */}
-							<RevealedKeyProvider>
-								<BrowserRouter>
-									<App />
-								</BrowserRouter>
-								<ToastProvider />
-							</RevealedKeyProvider>
-						</UploadProvider>
-					</DialogProvider>
-				</TooltipProvider>
-			</AuthProvider>
-		</QueryProvider>
+		{/* Outermost on purpose: a provider that throws while mounting must still
+		    reach a rendered error page, not a blank document. */}
+		<RootErrorBoundary>
+			<QueryProvider>
+				<AuthProvider>
+					<TooltipProvider delayDuration={200}>
+						<DialogProvider>
+							<UploadProvider>
+								{/* Above the router on purpose: a revealed key must survive the
+								    refetch, the navigation and the reload that the mutation
+								    producing it can trigger. */}
+								<RevealedKeyProvider>
+									<BrowserRouter>
+										<App />
+									</BrowserRouter>
+									<ToastProvider />
+								</RevealedKeyProvider>
+							</UploadProvider>
+						</DialogProvider>
+					</TooltipProvider>
+				</AuthProvider>
+			</QueryProvider>
+		</RootErrorBoundary>
 	</StrictMode>,
 );

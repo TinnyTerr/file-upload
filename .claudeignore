@@ -2,85 +2,34 @@
 # Same syntax as .gitignore. One pattern per line; trailing whitespace ignored.
 
 # --- Runtime state & secrets (NEVER read: contain user data + crypto keys) ---
-# Encryption keys, password hashes, sessions, API-key hashes, TOTP secrets,
-# and user rows all live in the SQLite DBs and the .env file.
+# Encryption keys, password hashes, sessions, API-key hashes, TOTP secrets and
+# user rows all live in the SQLite database and app.env.
 data/
-app/data/
 *.db
 *.db-shm
 *.db-wal
 *.sqlite
 *.sqlite3
-*.sqlite-journal
 .env
 .env.*
 !.env.example
 *.env
 app.env
 
-# --- Python venv & package caches ---
-.venv/
-venv/
-env/
-ENV/
-__pypackages__/
-
-# --- Python bytecode & caches ---
-__pycache__/
-*.py[cod]
-*$py.class
-
-# --- Test / coverage / type-checker artifacts ---
-.pytest_cache/
-.coverage
-.coverage.*
-htmlcov/
-coverage.xml
-*.cover
-*.py,cover
-.tox/
-.nox/
-.hypothesis/
-cover/
-.mypy_cache/
-.dmypy.json
-dmypy.json
-.pyre/
-.pytype/
-cython_debug/
-.ruff_cache/
-
-# --- Build / packaging artifacts ---
-build/
+# --- Dependencies & build output (generated; read the source instead) --------
+node_modules/
+public/
 dist/
-develop-eggs/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-*.egg
-*.whl
-.installed.cfg
-MANIFEST
+build/
+*.tsbuildinfo
+bun.lock
 
-# --- Logs ---
+# --- Logs -------------------------------------------------------------------
 *.log
-pip-log.txt
-pip-delete-this-directory.txt
 
-# --- Editor / IDE / OS noise ---
+# --- Editor / IDE / OS noise ------------------------------------------------
 .idea/
 .vscode/
-.spyderproject
-.spyproject
-.ropeproject
 *.swp
 *.swo
 *~
@@ -88,7 +37,7 @@ pip-delete-this-directory.txt
 Thumbs.db
 desktop.ini
 
-# --- Git internals (keep .git/sdd/ — it's the durable project ledger) ---
+# --- Git internals ----------------------------------------------------------
 .git/objects/
 .git/refs/
 .git/logs/
@@ -97,6 +46,3 @@ desktop.ini
 .git/COMMIT_EDITMSG
 .git/description
 .git/info/
-
-# --- Stray / one-off paths from past shell mistakes ---
-C:UsersfagolDocumentsfileuploadfileupload.gitsdd/

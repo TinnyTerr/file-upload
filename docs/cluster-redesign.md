@@ -1,6 +1,8 @@
 # Cluster redesign — analysis and proposal
 
-**Status:** design agreed, no code written. Part 4 records the decisions; Parts 5–7 are
+**Status:** built. Phases 0–9 of Part 7 landed on `cluster-rework` and are merged into
+`main`; this document is kept as the design record behind `server/src/cluster/*` and for
+**Part 8**, whose R-2 and R-3 are still open. Part 4 records the decisions; Parts 5–7 are
 built on them. Revised 2026-08-06 — the first draft recommended a **leaderless** design,
 and that was overruled in favour of the **auto-tiered master/region topology** in Part 5.
 Second revision, same day: credential material now replicates **on demand at login**

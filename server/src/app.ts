@@ -1,5 +1,3 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import cookieParser from "cookie-parser";
 import express, {
 	type Express,
@@ -34,9 +32,7 @@ import { publicRouter } from "./routes/public.ts";
 import { remoteUploadRouter } from "./routes/remoteUpload.ts";
 import { adminTorrentsRouter, torrentsRouter } from "./routes/torrents.ts";
 import { usersRouter } from "./routes/users.ts";
-
-const REPO_ROOT = join(import.meta.dir, "..", "..");
-const SPA_DIST = join(REPO_ROOT, "public");
+import { mountSpa, SERVER_ERROR_PAGE, sendErrorPage } from "./spa.ts";
 
 /** Mirrors app/main.py::create_app -- same middleware order, health check,
  * and same-origin static+SPA serving (no CORS, matching the FastAPI app). */
@@ -90,31 +86,21 @@ export function createApp(state: AppState): Express {
 	app.use("/api", publicRouter(state));
 	app.use("/api", publicDirectoriesRouter(state));
 
-	if (existsSync(SPA_DIST)) {
-		app.use(
-			express.static(SPA_DIST, {
-				setHeaders(res, filePath) {
-					if (filePath.includes(`${join(SPA_DIST, "assets")}`)) {
-						res.setHeader(
-							"Cache-Control",
-							"public, max-age=31536000, immutable",
-						);
-					} else {
-						res.setHeader("Cache-Control", "no-cache");
-					}
-				},
-			}),
-		);
-		app.get(/^\/(?!api\/).*/, (_req, res) => {
-			res.set("Cache-Control", "no-cache");
-			res.sendFile(join(SPA_DIST, "index.html"));
-		});
-	}
+	// Static assets + the SPA fallback for every client-side route. Mounted last
+	// so it can never shadow an API router, and it hands unknown /api/* paths
+	// straight through to the JSON 404 below.
+	mountSpa(app);
+
+	// An unknown API path is a 404 in the same shape as every other API error --
+	// never the SPA shell, which would make a typo'd endpoint look like a 200.
+	app.use("/api", (_req: Request, res: Response) => {
+		res.status(404).json({ detail: "not found" });
+	});
 
 	// Converts thrown HttpError into FastAPI-style {detail} JSON; anything else
 	// is logged with its stack and returned as an opaque 500.
 	const errorLog = getLogger("app.error");
-	app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+	app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
 		if (err instanceof HttpError) {
 			res.status(err.status).json({ detail: err.detail });
 			return;
@@ -134,9 +120,20 @@ export function createApp(state: AppState): Express {
 		errorLog.error(
 			`unhandled error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
 		);
-		if (!res.headersSent) {
-			res.status(500).json({ detail: "internal server error" });
+		// Headers already flushed (a streamed download that died mid-body) --
+		// there is no status left to set, so drop the connection rather than
+		// appending an error page to a half-written file.
+		if (res.headersSent) {
+			res.destroy();
+			return;
 		}
+		// A page request gets the error page; an API call gets {detail}.
+		// sendErrorPage picks between them on Accept.
+		if (!req.path.startsWith("/api/")) {
+			sendErrorPage(res, SERVER_ERROR_PAGE);
+			return;
+		}
+		res.status(500).json({ detail: "internal server error" });
 	});
 
 	return app;

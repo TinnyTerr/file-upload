@@ -144,7 +144,8 @@ server/src/
   config.ts                # Settings loader / generator for data/app.env, and the one
                            #   resolver (configValue) merging it with the environment
   bootstrap.ts             # First-run master user seed (only when `users` is empty)
-  spa.ts                   # Reads the built SPA shell, injects per-page og: meta tags
+  spa.ts                   # SPA serving: mtime-cached shell + og: meta injection,
+                           #   static asset mounting, and the standalone HTML error page
   links.ts                 # Slug minting + atomic single-UPDATE link use consumption
   audit.ts                 # Hash-chained audit log (recordAudit / verifyAuditChain)
   logging.ts               # pino + in-memory ring buffer backing GET /api/admin/backend/logs
@@ -228,7 +229,8 @@ client/src/
     api-docs/              # API reference page — renders docs/api.md, imported into the
                            #   bundle at build time (`@docs/api.md?raw`), not fetched
   components/
-    layout/                # Sidebar, settings modal (sessions tab), top bar
+    layout/                # Sidebar, settings modal (sessions tab), top bar,
+                           #   ErrorPage / NotFoundPage / RootErrorBoundary
     ui/                    # Shared Radix-based design system components
   workers/                 # aead.worker.ts + fuplCore.ts — client-side E2E encryption off the main thread
   lib/                     # base64url, bytes, cn, copy, download, time, zip helpers
@@ -578,6 +580,44 @@ decrypt rather than a join (mpv issues a Range request per seek), with
 
 `client/src/config/api.ts` — typed `fetch` wrapper that prefixes `/api`, sends `credentials: "same-origin"`, attaches `X-CSRF-Token` to POST/PUT/PATCH/DELETE, and throws `ApiError` carrying the backend's `detail`. Upload progress needs `XMLHttpRequest`, so `filesService.ts` has its own XHR path that mirrors the same CSRF rules.
 
+### Serving the SPA, and what happens when it can't be served
+
+`server/src/spa.ts` owns everything between a browser request and the built
+client. `app.ts` calls `mountSpa(app)` once, after every `/api/*` router, and
+the three HTML entry points (`/`, `/file/:slug`, `/d/:slug`) all go out through
+`sendSpa`.
+
+- **The shell is cached against its mtime+size**, not re-read per request. A
+  `bun run build` is still picked up without a restart — the point of the
+  original uncached read — but a hot public page no longer costs a synchronous
+  `readFileSync`.
+- **A request that looks like a file is a 404, not the shell.** `/assets/index-a1b2.js`
+  after a deploy is a *missing chunk*; answering it with `index.html` and a 200
+  hands the browser a page of HTML under a script content type, which surfaces
+  as an unreadable syntax error instead of a 404 in the network tab.
+- **An unknown `/api/*` path is `{detail: "not found"}` with a 404.** It never
+  reaches the SPA fallback, so a typo'd endpoint can't come back 200 HTML.
+- **HTML vs JSON is decided by `Accept`.** `sendErrorPage` renders the HTML
+  error page for a browser navigation and the usual `{detail}` JSON for
+  everything else, so `fetch()` and curl never get a page they can't parse.
+- **The error page is standalone** — inline CSS, no script, no asset requests.
+  It stands in for the bundle exactly when the bundle can't be trusted (no
+  build → 503 with the `bun run build` hint, unknown URL → 404, thrown error on
+  a page request → 500), so it must not depend on the thing it is replacing. Its
+  palette duplicates `client/src/index.css`'s tokens on purpose.
+- **Cache headers**: `assets/*` is content-hashed by Vite and goes out
+  `immutable` for a year; the shell and everything else is `no-cache` (must
+  revalidate, may 304). Getting this backwards makes a deploy invisible to an
+  open tab.
+
+Client-side, three components cover the same ground:
+`components/layout/ErrorPage.tsx` (the presentational surface),
+`NotFoundPage.tsx` (the router's `*` route — it shows the address that failed
+rather than bouncing to `/`), and `RootErrorBoundary.tsx`, mounted above every
+provider in `main.tsx`. The boundary special-cases a failed dynamic `import()`
+as "a new version is available, reload" — that is a tab holding chunk names the
+server no longer has, not a bug.
+
 ---
 
 ## Gotchas / invariants
@@ -586,6 +626,9 @@ Non-obvious rules that are easy to re-break. Each one has bitten this codebase a
 
 - **Wrap every `async` route handler in `asyncHandler`** (`middleware/asyncHandler.ts`). This is Express **4**, which does not await handlers — a rejected promise becomes an unhandled rejection and the request hangs forever with no response ever sent, rather than producing a 500.
 - **`express.json()` runs with an explicit 8 MB limit**, not the 100 KB default, because `POST /api/torrents` accepts base64 `.torrent` payloads up to 2 MiB (base64 inflates 4/3). Keep the limit above `MAX_TORRENT_FILE_BYTES * 4/3`.
+- **The SPA fallback must never answer a path with a file extension.** It is a missing asset, and serving the shell for it turns a 404 into a 200 of HTML delivered as JavaScript. `mountSpa` in `spa.ts` is the only place this rule lives — see "Serving the SPA".
+- **`mountSpa` goes after every API router, and the `/api` JSON 404 after it.** The fallback passes `/api/*` through untouched precisely so that 404 can answer in JSON; reordering the two makes unknown endpoints return HTML.
+- **The server error handler branches on `res.headersSent`.** A streamed download that dies mid-body has no status left to set, so it destroys the socket instead of appending an error page to a half-written file.
 - **Deleting a user requires clearing every table that FKs to `users`** — `PRAGMA foreign_keys = ON` means a missed one throws instead of cascading. Currently: `permissions`, `sessions`, `credentials`, `files`, `directories`, `directory_collaborators` (both `user_id` and `invited_by_id`), `api_keys`, `dropbox_upload_links`, `remote_upload_jobs`, `torrent_jobs`, `media_play_keys`, the three `oauth_*` tables (via
 `routes/oauth.ts::purgeOauthForUser`, which clears both the apps they *own* and
 the grants they were *issued*), and `cluster_nodes.created_by_id`.
@@ -621,6 +664,9 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 
 - Don't run migrations — add nullable columns (or columns with a SQLite `DEFAULT`) plus an `ensureColumn` backfill
 - Don't write an `async` Express handler without `asyncHandler`
+- Don't send the SPA shell for a path with a file extension, and don't let the catch-all answer `/api/*`
+- Don't commit a per-workspace `bun.lock` — `bun install` inside `client/`/`server/` resolves the root workspace lockfile, so a nested one is a stale second answer nothing reads
+- Don't bounce an unknown client-side route to `/` — render `NotFoundPage`, or a dead share link looks like a normal visit
 - Don't scale this server to multiple processes without redesigning `cluster/eventBus.ts` sequencing
 - Don't poll qBittorrent once per job — one list fetch per tick, grouped by tag, covering downloading *and* seeding jobs
 - Don't refuse a torrent for being over the concurrency limit — park it in `pending` and let `promotePendingJobs` start it

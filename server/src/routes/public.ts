@@ -18,7 +18,7 @@ import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp } from "../middleware/auth.ts";
 import { checkLinkAccess } from "../security/accessLock.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
-import { renderSpa } from "../spa.ts";
+import { escapeHtml, sendSpa } from "../spa.ts";
 import { fileHashes } from "../storage/blobs.ts";
 import { decompressStream } from "../storage/compress.ts";
 import { safeJoin, storageRoot } from "../storage/paths.ts";
@@ -92,15 +92,6 @@ function streamRange(
 	const stream = createReadStream(path, { start, end });
 	stream.on("error", () => res.destroy());
 	stream.pipe(res);
-}
-
-function escapeHtml(s: string): string {
-	return s
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;")
-		.replace(/'/g, "&#39;");
 }
 
 /** Content types /preview knows how to serve inline. */
@@ -690,12 +681,8 @@ export function publicRouter(state: AppState): Router {
 	);
 
 	router.get("/file/:slug", (req, res) => {
-		const content = renderSpa(fileMetaTags(req, state, req.params.slug));
-		res.set({
-			...SECURITY_HEADERS,
-			"Content-Type": "text/html; charset=utf-8",
-		});
-		res.send(content);
+		res.set(SECURITY_HEADERS);
+		sendSpa(res, fileMetaTags(req, state, req.params.slug));
 	});
 
 	return router;
