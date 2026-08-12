@@ -989,6 +989,11 @@ Tests: `clusterEvents`, `clusterIdentity`, `clusterChangelog`, `clusterReplicati
 `clusterTiering`, `clusterQuota`, `clusterConflicts`, `clusterRevocation`,
 `clusterTopology`, `clusterIdentityFetch`, `clusterChunks`, `clusterCredentials`.
 
+Since the phases closed, `cluster/rechunk.ts` + the `cluster_rechunk_legacy` job have
+landed against R-2 — the pass that turns Phase 8's whole-file seed into a real manifest,
+and the fix for the seed's one wrong case (a blob archived before Phase 8). R-2 below has
+the reasoning.
+
 Three implementation decisions worth recording, because the text above does not predict
 them:
 
@@ -1152,7 +1157,9 @@ And five from Phase 8:
   recommendation, with the detail R-2 does not state: the seed is *free*, because a legacy
   blob's single chunk hash is its `stored_sha256` and nothing has to be read — and it must
   run on one node only, or two nodes would mint two manifests for the same blob and ship
-  both.
+  both. It is free for exactly the blobs whose bytes still are what they were minted as,
+  which is why archived ones are excluded and why the seed is only half the answer; see
+  R-2 for the background pass that finishes it.
 - **An eviction that frees nothing is not recorded as one.** Evicting a chunk out of the
   middle of a file that has to stay needs a hole punched in it, which no portable API
   exposes; `fallocate --punch-hole` is attempted and its failure is an ordinary answer.
@@ -1218,9 +1225,35 @@ there no matter what is replicated. **TOTP seeds replicate with the password has
 on demand at login, because a second factor that only works on one node is an outage rather
 than a factor. §5.10 has the detail.
 
-**R-2 — Legacy blobs at the chunking cutover.** Rechunk existing blobs in place, or record
-them as single-chunk manifests and only chunk new writes? *Recommend:* single-chunk
-manifests, with an optional background rechunk job — it makes Phase 8 non-disruptive.
+**R-2 — Legacy blobs at the chunking cutover.** ~~Rechunk existing blobs in place, or record
+them as single-chunk manifests and only chunk new writes?~~ **Resolved: both, in that
+order.** Phase 8 shipped the single-chunk seed, which is what made it non-disruptive; the
+background pass (`cluster/rechunk.ts`, the `cluster_rechunk_legacy` job) is no longer
+optional, because without it none of Phase 8's capability ever reaches a byte that was
+already on disk — a legacy 40 GiB blob stays one 40 GiB chunk, placeable only on a node
+with 40 GiB free, fetchable only whole, evictable only whole. It is master-only (a manifest
+has one writer), largest blob first, and budgeted at 4 GiB read per hourly tick, so a
+legacy corpus converges over days without an afternoon of saturated disk.
+
+Two things the recommendation did not anticipate:
+
+- **The free hash is wrong for an archived blob.** `jobs/lifecycle.ts` compresses a blob's
+  bytes in place and never rewrites `content_blobs.stored_sha256` — the column stays the
+  identity the blob was minted for, which is what excludes archived blobs from dedup
+  matching. So for a blob archived *before* Phase 8, the seed's free chunk hash describes
+  bytes that no longer exist, and every peer fetching that chunk fails its verification
+  forever with no fallback (§5.11's whole-blob walk only covers a blob with *no* manifest).
+  `seedLegacyManifests` now skips archived blobs entirely, leaving them on the whole-blob
+  path until the rechunk pass gives them a manifest read off the disk.
+- **Re-cutting a manifest has to be paranoid about the archive job.** It is the one other
+  thing that rewrites a blob's bytes in place, so the pass re-reads the row and re-stats the
+  file after hashing, and checks the digest against `stored_sha256` where that is meaningful.
+  Anything that moved abandons the attempt and retries next tick: a manifest recorded over
+  bytes that were replaced mid-read is the one outcome that would break a blob permanently.
+
+Nothing moves on disk. Peers pull the re-cut manifest like any other row, and one
+`cluster_cache_eviction` tick does the rest — `gcOrphanChunks` drops the row for the old
+hash, `reconcileLocalChunks` re-advertises the same bytes under the new ones.
 
 **R-3 — What counts as a "capacity class change"** for the drift counter (§5.4)? Any change
 to `disk_total_bytes` would make routine disk growth look like churn. *Recommend:* only a

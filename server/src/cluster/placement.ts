@@ -225,12 +225,22 @@ export function rechunkBlob(
  * `stored_sha256`, so nothing has to be read to record it.
  *
  * R-2's answer: legacy blobs are non-disruptive rather than rechunked at the
- * cutover. The cost is that they are still transferred whole; a background
- * rechunk pass can split them later without anything else changing. */
+ * cutover. The cost is that they are still transferred whole, and
+ * `cluster/rechunk.ts` is the background pass that pays it off later.
+ *
+ * **Archived blobs are excluded, because for them the free hash is wrong.**
+ * `jobs/lifecycle.ts` compresses a blob's bytes in place without rewriting
+ * `stored_sha256` — the column stays the identity the blob was minted for,
+ * which is why archived blobs are excluded from dedup matching too. Seeding it
+ * as a chunk hash would describe bytes that no longer exist, and a peer
+ * fetching against it would fail its verification forever with no fallback.
+ * Left with no manifest at all they fall back to the whole-blob walk
+ * (`cluster/blobs.ts::fetchBlobFromPeers`) until the rechunk pass reads their
+ * real hashes off the disk. */
 export function seedLegacyManifests(db: Db, limit = 500): number {
 	const blobs = db.all<ContentBlobRow>(
 		`SELECT * FROM content_blobs cb
-      WHERE cb.stored_sha256 <> ''
+      WHERE cb.stored_sha256 <> '' AND cb.archived = 0
         AND NOT EXISTS (SELECT 1 FROM blob_chunks bc WHERE bc.blob_id = cb.id)
       ORDER BY cb.id LIMIT ${limit}`,
 	);

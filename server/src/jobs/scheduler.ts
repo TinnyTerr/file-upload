@@ -5,6 +5,7 @@ import { syncCheckJob } from "../cluster/digest.ts";
 import { heartbeatJob } from "../cluster/membership.ts";
 import { chunkReplicationJob } from "../cluster/placement.ts";
 import { quotaSweepJob } from "../cluster/quota.ts";
+import { rechunkLegacyJob } from "../cluster/rechunk.ts";
 import { replicationPullJob } from "../cluster/replication.ts";
 import { tieringDriftJob } from "../cluster/tiering.ts";
 import { getLogger } from "../logging.ts";
@@ -137,6 +138,16 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 			id: "cluster_chunk_replication",
 			intervalMs: MINUTE_MS,
 			run: () => chunkReplicationJob(state),
+		},
+		// Splits the whole-file manifests Phase 8 seeded for blobs that predate
+		// it (R-2), a byte budget at a time. Master-only -- a manifest has one
+		// writer cluster-wide -- and a no-op the moment the corpus has caught
+		// up, which for a deployment that never held a pre-chunking blob is
+		// immediately.
+		{
+			id: "cluster_rechunk_legacy",
+			intervalMs: HOUR_MS,
+			run: () => rechunkLegacyJob(state),
 		},
 		// One qBittorrent request per tick (not per job), and zero requests at
 		// all when no job is in flight -- see torrents/poller.ts.

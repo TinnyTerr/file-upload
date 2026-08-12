@@ -18,6 +18,7 @@ Multi-node replication lives in `server/src/cluster/*.ts`:
 - `replication.ts` — hierarchical pull of that log (`GET /api/cluster/changes`) + per-peer, per-direction cursors
 - `topology.ts` — the replication graph the cluster dashboard draws: every node this one knows of, its derived role, and its upstream. Built from the same `upstreamOf()` over the same generation that `pullTargets` uses, with the same liveness observation, so the picture cannot disagree with the pulls. `GET /api/cluster/topology`
 - `placement.ts` — chunking (Phase 8, §5.11): the `blob_chunks` manifest, the `chunk_locations` registry, the local physical layer (`localChunk`, `writeChunkAt`, `reclaimChunk`), the LRU clock in node-local `local_chunk_cache`, `chunkReplicationJob` + `choosePlacementTarget`, `reconcileLocalChunks`/`gcOrphanChunks`, and `chunkSize()` — the one definition of 16 MiB, which `routes/files.ts::chunkUploadSize` now delegates to
+- `rechunk.ts` — R-2's other half: the background pass that splits a legacy whole-file manifest into real chunks (`rechunkCandidates`, `rechunkLegacyJob`). Master-only, byte-budgeted, and the only thing that mints a manifest for a blob archived before Phase 8 — `seedLegacyManifests` can't, because an archived blob's `stored_sha256` describes its pre-archive bytes. Its own file rather than part of `placement.ts` because `storage/blobs.ts` (where `hashFile` lives) already imports `placement.ts`
 - `blobs.ts` — fetch-on-miss, per chunk and registry-driven: `ensureBlobLocal` pulls exactly the chunks this node lacks from whoever `chunk_locations` names, nearest-first by RTT, four at a time, verifying each against its own hash. `fetchBlobFromPeers` (the old whole-blob peer walk) survives for the two cases with no manifest to work from
 - `cacheEviction.ts` — LRU eviction over **unpinned** chunks for `REPLICATION_MODE=cache` nodes; durability is read off `chunk_locations` and confirmed with one HEAD against a node it names. Also runs the registry housekeeping (`gcOrphanChunks`, `reconcileLocalChunks`) on every node, cache or not
 - `halt.ts` — in-memory TTL'd upload halt registry (user-scope + global), gossiped over the event firehose
@@ -222,6 +223,22 @@ in turn.
   a manifest. Legacy blobs are seeded as one whole-file chunk — free, since a
   legacy blob's chunk hash is its `stored_sha256` — and **only on the master**,
   after `seedChangeLog`, or two nodes would ship two manifests for one blob.
+- **An archived blob is not seeded, because for it the free hash is a lie.**
+  The archive job never rewrites `content_blobs.stored_sha256` (that column is
+  the identity the blob was minted for, which is also why archived blobs are
+  excluded from dedup matching), so for a blob archived *before* Phase 8 it
+  names bytes the file no longer holds. Seeding it would make every peer's
+  fetch fail its hash check forever with no fallback; left unseeded the blob
+  has no manifest, which is the case `fetchBlobFromPeers` still covers.
+- **The whole-file manifest is temporary, and `rechunk.ts` is what retires
+  it.** `cluster_rechunk_legacy` re-cuts a seeded manifest into real chunks
+  from a full read of the file — master-only, largest blob first, 4 GiB per
+  hourly tick — and mints the manifests the seed declined to. Until then a
+  legacy blob is one chunk the size of the whole file, so none of Phase 8's
+  capability applies to it. Nothing moves on disk: the peers pull the re-cut
+  manifest, `gcOrphanChunks` drops their row for the old hash and
+  `reconcileLocalChunks` re-advertises the same bytes under the new ones, both
+  in one `cluster_cache_eviction` tick.
 - **The archive job is the one thing that rewrites stored bytes in place**, so
   it is the one thing that must call `rechunkBlob`; every hash in the old
   manifest describes bytes that no longer exist.
@@ -299,6 +316,11 @@ Phase 9 added `cluster/credentials.ts` and split `routes/clusterNode.ts` out of
 **The rework is complete: Phases 0–9 are all built and green.** What is left is
 operational rather than structural — the residual questions in `Part 8` of the
 design doc, and anything the deployment turns up.
+
+Since then, `cluster/rechunk.ts` closed R-2's open half: the whole-file manifest
+Phase 8 seeds for a pre-chunking blob is now temporary rather than permanent,
+and the pass that retires it also fixed the case the seed got wrong (a blob
+archived before Phase 8, whose `stored_sha256` no longer describes its bytes).
 
 ---
 
@@ -448,6 +470,7 @@ swallowed rather than killing the timer.
 | `cluster_replication_pull` | 1s | Pulls the change log from this node's targets |
 | `cluster_cache_eviction` | 10m | LRU chunk eviction on `REPLICATION_MODE=cache` nodes, plus registry housekeeping everywhere (`cacheEviction.ts`) |
 | `cluster_chunk_replication` | 1m | Pushes under-replicated chunks toward `REPLICATION_FACTOR` copies (`placement.ts`). 20 per tick |
+| `cluster_rechunk_legacy` | 1h | Splits whole-file manifests seeded for pre-chunking blobs into real chunks (`rechunk.ts`). Master-only, 4 GiB read per tick |
 | `cluster_credentials` | 5m | Establishes a pair credential with any peer still on the shared token, re-mints aged ones, sweeps expired overlaps (`credentials.ts`) |
 | `torrent_poll` | 5s | One qBittorrent list fetch per tick + Real-Debrid progress |
 
@@ -983,7 +1006,8 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - **`INSERT INTO users` must set `credential_version_local`.** A row inserted
   without it reads as "holds no material" on the node that just minted the hash,
   and that node will go looking for an upstream to fetch its own password from.
-- **A chunk manifest has one writer, and it is the node that created the blob.** `recordManifest` is a no-op when rows exist, and a dedup hit records presence only — minting a second manifest ships a duplicate set of `(blob_id, idx)` rows to every peer. The legacy seed (`seedLegacyManifests`) runs on the master alone, and *after* `seedChangeLog`, because appending entries is exactly what makes the seed pass think it has already run.
+- **A chunk manifest has one writer, and it is the node that created the blob.** `recordManifest` is a no-op when rows exist, and a dedup hit records presence only — minting a second manifest ships a duplicate set of `(blob_id, idx)` rows to every peer. The legacy seed (`seedLegacyManifests`) runs on the master alone, and *after* `seedChangeLog`, because appending entries is exactly what makes the seed pass think it has already run. `rechunk.ts`'s pass is master-only for the same reason, and it verifies the file against `stored_sha256` before writing — a manifest recorded over bytes the archive job replaced mid-read would break the blob permanently.
+- **Never derive a chunk hash from `stored_sha256` for an archived blob.** The archive job rewrites the bytes and leaves that column naming the pre-archive identity, so the hash describes a file that no longer exists — and a peer's chunk fetch verifies against it, forever. `seedLegacyManifests` skips archived blobs for exactly this reason; their manifests come from `rechunk.ts`, which reads the disk.
 - **Anything that rewrites a blob's stored bytes in place must call `rechunkBlob`.** Today that is only the archive/unarchive path in `jobs/lifecycle.ts`; every other rewrite mints a new blob through `attachBlob`. A stale manifest makes every peer's chunk fetch fail its hash check forever.
 - **Never add a UNIQUE constraint to `blob_chunks` or `chunk_locations`.** A UNIQUE violation raised while applying a peer's entry halts the replication batch at that entry, permanently. Count copies with `COUNT(DISTINCT node_id)` instead.
 - **Don't put a per-read column in a replicated table.** `chunk_locations.last_read_at` was the obvious place for the LRU clock and would have appended a change-log entry — shipped cluster-wide — on every read; it lives in node-local `local_chunk_cache` instead.

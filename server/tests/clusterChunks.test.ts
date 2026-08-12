@@ -36,6 +36,7 @@ import {
 	seedLegacyManifests,
 	underReplicatedChunks,
 } from "../src/cluster/placement.ts";
+import { rechunkCandidates, rechunkLegacyJob } from "../src/cluster/rechunk.ts";
 import { replicationPullJob } from "../src/cluster/replication.ts";
 import { resetConfigCache } from "../src/config.ts";
 import type { ClusterNodeRow, ContentBlobRow } from "../src/db/rows.ts";
@@ -610,6 +611,212 @@ describe("cache eviction", () => {
 			expect(existsSync(join(storageRoot(), peerBlob.storage_path))).toBe(true);
 			expect(localNodeId(cache.db)).toBe(cache.nodeId);
 			expect(peerRow(cache, master).node_id).toBe(master.nodeId);
+		} finally {
+			c.close();
+		}
+	});
+});
+
+describe("retiring the legacy whole-file manifest (R-2)", () => {
+	/** Put a blob back into the state a pre-Phase-8 database left it in: bytes
+	 * on disk, a `content_blobs` row, and no manifest at all. */
+	function forgetManifest(node: ClusterNodeHarness, blobId: number): void {
+		node.db.run("DELETE FROM blob_chunks WHERE blob_id = $id", { $id: blobId });
+		node.db.run("DELETE FROM chunk_locations WHERE node_id = $node", {
+			$node: node.nodeId,
+		});
+	}
+
+	/** What `jobs/lifecycle.ts` leaves behind: new bytes at the same path, a new
+	 * `stored_size_bytes`, `archived = 1` — and `stored_sha256` still naming the
+	 * identity the blob was minted for, which no longer describes the file. */
+	function archiveInPlace(
+		node: ClusterNodeHarness,
+		blob: ContentBlobRow,
+		bytes: Buffer,
+	): void {
+		writeFileSync(join(storageRoot(), blob.storage_path), bytes);
+		node.db.run(
+			"UPDATE content_blobs SET archived = 1, stored_size_bytes = $size WHERE id = $id",
+			{ $size: bytes.length, $id: blob.id },
+		);
+	}
+
+	test("a whole-file manifest is split into per-chunk hashes of the real bytes", async () => {
+		const c = await makeCluster({ size: 1 });
+		try {
+			const db = c.master.db;
+			const bytes = randomBytes(CHUNK * 3 + 11);
+			const blob = await makeBlob(c.master, bytes);
+			forgetManifest(c.master, blob.id);
+			expect(seedLegacyManifests(db)).toBe(1);
+			expect(manifestOf(db, blob.id)).toHaveLength(1);
+
+			await rechunkLegacyJob(c.master.state);
+
+			const slots = manifestOf(db, blob.id);
+			expect(slots).toHaveLength(4);
+			for (const slot of slots) {
+				const range = bytes.subarray(slot.offset, slot.offset + slot.size);
+				expect(createHash("sha256").update(range).digest("hex")).toBe(
+					slot.sha256,
+				);
+				// The bytes did not move, so this node still holds every one of them
+				// -- under the hashes the cluster now knows them by.
+				expect(
+					db.get<{ state: string }>(
+						"SELECT state FROM chunk_locations WHERE chunk_sha256 = $sha AND node_id = $node",
+						{ $sha: slot.sha256, $node: c.master.nodeId },
+					)?.state,
+				).toBe("present");
+			}
+
+			// Idempotent: a manifest that already describes the file is not a
+			// candidate, so the pass does not rewrite it every hour.
+			const before = db.get<{ n: number }>(
+				"SELECT COUNT(*) AS n FROM replication_log",
+			)!.n;
+			await rechunkLegacyJob(c.master.state);
+			expect(rechunkCandidates(db)).toHaveLength(0);
+			expect(
+				db.get<{ n: number }>("SELECT COUNT(*) AS n FROM replication_log")!.n,
+			).toBe(before);
+		} finally {
+			c.close();
+		}
+	});
+
+	test("an archived blob is left unseeded and rechunked from its real bytes", async () => {
+		const c = await makeCluster({ size: 1 });
+		try {
+			const db = c.master.db;
+			const blob = await makeBlob(c.master, randomBytes(CHUNK * 2));
+			forgetManifest(c.master, blob.id);
+			const archived = randomBytes(CHUNK + 40);
+			archiveInPlace(c.master, blob, archived);
+
+			// The free hash would describe bytes that no longer exist, so the seed
+			// declines to mint one at all.
+			expect(seedLegacyManifests(db)).toBe(0);
+			expect(manifestOf(db, blob.id)).toHaveLength(0);
+
+			await rechunkLegacyJob(c.master.state);
+
+			const slots = manifestOf(db, blob.id);
+			expect(slots).toHaveLength(2);
+			expect(slots.map((s) => s.size)).toEqual([CHUNK, 40]);
+			expect(slots[0]!.sha256).not.toBe(blob.stored_sha256);
+			for (const slot of slots) {
+				const range = archived.subarray(slot.offset, slot.offset + slot.size);
+				expect(createHash("sha256").update(range).digest("hex")).toBe(
+					slot.sha256,
+				);
+			}
+		} finally {
+			c.close();
+		}
+	});
+
+	test("a manifest an older seed minted for an archived blob is replaced", async () => {
+		const c = await makeCluster({ size: 1 });
+		try {
+			const db = c.master.db;
+			const blob = await makeBlob(c.master, randomBytes(CHUNK));
+			forgetManifest(c.master, blob.id);
+			const archived = randomBytes(CHUNK - 7);
+			archiveInPlace(c.master, blob, archived);
+			// Exactly what the seed used to write: one chunk, hashed as the blob's
+			// pre-archive identity. Every peer fetching it fails its verification.
+			db.run(
+				`INSERT INTO blob_chunks (blob_id, idx, chunk_sha256, size_bytes, created_at)
+         VALUES ($blob, 0, $sha, $size, '2026-01-01T00:00:00.000Z')`,
+				{ $blob: blob.id, $sha: blob.stored_sha256, $size: archived.length },
+			);
+			expect(rechunkCandidates(db).map((b) => b.id)).toEqual([blob.id]);
+
+			await rechunkLegacyJob(c.master.state);
+
+			const slots = manifestOf(db, blob.id);
+			expect(slots).toHaveLength(1);
+			expect(slots[0]!.sha256).toBe(
+				createHash("sha256").update(archived).digest("hex"),
+			);
+		} finally {
+			c.close();
+		}
+	});
+
+	test("bytes that do not hash to the blob's identity are left alone", async () => {
+		const c = await makeCluster({ size: 1 });
+		try {
+			const db = c.master.db;
+			const bytes = randomBytes(CHUNK * 2);
+			const blob = await makeBlob(c.master, bytes);
+			forgetManifest(c.master, blob.id);
+			seedLegacyManifests(db);
+			// A rewrite that landed while the pass was reading looks exactly like
+			// this: same length, different content. Recording a manifest of it
+			// would be the one way this pass could break a blob for good.
+			writeFileSync(
+				join(storageRoot(), blob.storage_path),
+				randomBytes(bytes.length),
+			);
+
+			await rechunkLegacyJob(c.master.state);
+
+			expect(manifestOf(db, blob.id)).toHaveLength(1);
+		} finally {
+			c.close();
+		}
+	});
+
+	test("only the master rechunks", async () => {
+		const c = await makeCluster({ size: 2 });
+		try {
+			c.linkAll();
+			const [master, follower] = c.nodes as [
+				ClusterNodeHarness,
+				ClusterNodeHarness,
+			];
+			const blob = await makeBlob(master, randomBytes(CHUNK * 2));
+			forgetManifest(master, blob.id);
+			seedLegacyManifests(master.db);
+			await replicationPullJob(follower.state);
+			const peerBlob = follower.db.get<ContentBlobRow>(
+				"SELECT * FROM content_blobs WHERE uid = $uid",
+				{ $uid: blob.uid },
+			)!;
+			expect(manifestOf(follower.db, peerBlob.id)).toHaveLength(1);
+
+			// A second writer for one manifest would ship a second set of
+			// (blob_id, idx) rows to every peer, and neither natural key carries a
+			// constraint that would catch it.
+			await rechunkLegacyJob(follower.state);
+
+			expect(manifestOf(follower.db, peerBlob.id)).toHaveLength(1);
+
+			// The follower holds the bytes, so it advertises the whole-file chunk
+			// the seed named them by.
+			await cacheEvictionJob(follower.state);
+			const legacySha = manifestOf(follower.db, peerBlob.id)[0]!.sha256;
+			expect(holdersOf(follower.db, legacySha)).toContain(follower.nodeId);
+
+			await rechunkLegacyJob(master.state);
+			expect(manifestOf(master.db, blob.id)).toHaveLength(2);
+
+			// The re-cut manifest travels like any other row, and the housekeeping
+			// half of the eviction tick does the rest: the orphaned row goes, and
+			// the same bytes are re-advertised under the hashes they are now known
+			// by. Nothing moved on disk.
+			await replicationPullJob(follower.state);
+			await cacheEvictionJob(follower.state);
+			const slots = manifestOf(follower.db, peerBlob.id);
+			expect(slots).toHaveLength(2);
+			expect(holdersOf(follower.db, legacySha)).not.toContain(follower.nodeId);
+			for (const slot of slots) {
+				expect(holdersOf(follower.db, slot.sha256)).toContain(follower.nodeId);
+			}
+			expect(existsSync(join(storageRoot(), peerBlob.storage_path))).toBe(true);
 		} finally {
 			c.close();
 		}
