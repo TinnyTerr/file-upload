@@ -5,11 +5,8 @@ import type { Request, Response } from "express";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
-import {
-	commitQuota,
-	releaseQuota,
-	reserveQuota,
-} from "../cluster/quota.ts";
+import { commitQuota, releaseQuota, reserveQuota } from "../cluster/quota.ts";
+import { pushRevocation, revocationMark } from "../cluster/revocation.ts";
 import { getMasterKey } from "../config.ts";
 import {
 	type EffectiveEncryption,
@@ -44,10 +41,6 @@ import {
 import { HttpError } from "../httpError.ts";
 import { newSlug } from "../links.ts";
 import { getLogger } from "../logging.ts";
-import {
-	pushRevocation,
-	revocationMark,
-} from "../cluster/revocation.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
 import {
@@ -66,7 +59,6 @@ import {
 import { requireCsrf } from "../security/csrf.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
 import { renderSpa } from "../spa.ts";
-import { usedStorageBytesForUser } from "../storage/accounting.ts";
 import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
 import { safeJoin, storageRoot } from "../storage/paths.ts";
 import {
@@ -144,7 +136,7 @@ function resolveActiveDirLink(db: Db, slug: string): DirectoryLinkRow | null {
 		"SELECT * FROM directory_links WHERE slug = $slug",
 		{ $slug: slug },
 	);
-	if (!link || !link.active) return null;
+	if (!link?.active) return null;
 	const now = new Date().toISOString();
 	if (link.expires_at !== null && link.expires_at <= now) return null;
 	if (link.max_uses !== null && link.use_count >= link.max_uses) return null;
@@ -949,7 +941,7 @@ export function directoriesRouter(state: AppState): Router {
 							? { ...d, path: pathOf(pagedDirs[i]!.parent_directory_id) }
 							: d,
 				),
-				files: serializeFiles(state, req, pagedFiles).map((f, i) =>
+				files: serializeFiles(state, pagedFiles).map((f, i) =>
 					pathOf ? { ...f, path: pathOf(pagedFiles[i]!.directory_id) } : f,
 				),
 				scope,
@@ -2535,7 +2527,7 @@ export function publicDirectoriesRouter(state: AppState): Router {
 				n.files.reduce((sum, f) => sum + f.size_bytes, 0) +
 				n.children.reduce((sum, c) => sum + totalOf(c), 0);
 			const logicalBytes = totalOf(tree);
-			const perm = ensurePermissions(db, user.id, {
+			ensurePermissions(db, user.id, {
 				master: user.role === "master",
 			});
 			// As with a file save (R-5): no new bytes, but a `files` row per

@@ -112,8 +112,12 @@ export function CreateFolderDialog({
 				});
 				setShareOpen(true);
 			}
-		} catch (err: any) {
-			setError(err.message || "Failed to create folder");
+		} catch (err) {
+			setError(
+				err instanceof Error && err.message
+					? err.message
+					: "Failed to create folder",
+			);
 		} finally {
 			setCreatingKey(false);
 		}

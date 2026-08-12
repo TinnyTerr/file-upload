@@ -36,14 +36,13 @@ const log = getLogger("app.jobs.scheduler");
 const HOUR_MS = 60 * 60 * 1000;
 const TEN_MIN_MS = 10 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
-const FIFTEEN_SEC_MS = 15 * 1000;
 const FIVE_SEC_MS = 5 * 1000;
 const SECOND_MS = 1000;
 
 interface JobSpec {
 	id: string;
 	intervalMs: number;
-	run: () => void | Promise<unknown>;
+	run: () => unknown;
 }
 
 const timers = new Map<string, ReturnType<typeof setInterval>>();
@@ -159,10 +158,7 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 	];
 }
 
-async function runJob(
-	id: string,
-	run: () => void | Promise<unknown>,
-): Promise<void> {
+async function runJob(id: string, run: () => unknown): Promise<void> {
 	try {
 		await run();
 	} catch (err) {

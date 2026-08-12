@@ -253,7 +253,14 @@ describe("apply", () => {
 	async function twoNodes() {
 		const a = await makeHarness({ nodeId: "node-a", nodeRole: "master" });
 		const b = await makeHarness({ nodeId: "node-b", nodeRole: "follower" });
-		return { a, b, close: () => (a.close(), b.close()) };
+		return {
+			a,
+			b,
+			close: () => {
+				a.close();
+				b.close();
+			},
+		};
 	}
 
 	test("replays a whole subtree onto a peer that has none of it", async () => {

@@ -5,6 +5,12 @@ import { basename, join, relative, sep } from "node:path";
 import type { Request } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
+import {
+	commitQuota,
+	releaseQuota,
+	renewQuota,
+	reserveQuota,
+} from "../cluster/quota.ts";
 import { resolveDirectoryEncryption } from "../crypto/effectiveEncryption.ts";
 import type { DirectoryRow, TorrentJobRow, UserRow } from "../db/rows.ts";
 import { nowIso } from "../db/rows.ts";
@@ -18,12 +24,6 @@ import { HttpError } from "../httpError.ts";
 import { newSlug } from "../links.ts";
 import { getLogger } from "../logging.ts";
 import { ensurePermissions } from "../permissions.ts";
-import {
-	commitQuota,
-	releaseQuota,
-	renewQuota,
-	reserveQuota,
-} from "../cluster/quota.ts";
 import { finalizeStoredFile } from "../routes/files.ts";
 import {
 	debridRoot,
@@ -127,7 +127,6 @@ function createDirectory(
 	state: AppState,
 	user: UserRow,
 	title: string,
-	req: Request,
 	parent: DirectoryRow | null,
 ): DirectoryRow {
 	const { db } = state;
@@ -254,9 +253,7 @@ export async function importCompletedTorrent(
 		}
 	}
 	const directory =
-		files.length > 1
-			? createDirectory(state, user, job.name, req, target)
-			: target;
+		files.length > 1 ? createDirectory(state, user, job.name, target) : target;
 
 	let imported = 0;
 	try {

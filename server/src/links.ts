@@ -12,7 +12,7 @@ export function resolveActiveLink(db: Db, slug: string): LinkRow | null {
 	const link = db.get<LinkRow>("SELECT * FROM links WHERE slug = $slug", {
 		$slug: slug,
 	});
-	if (!link || !link.active) return null;
+	if (!link?.active) return null;
 	const now = new Date().toISOString();
 	if (link.expires_at !== null && link.expires_at <= now) return null;
 	if (link.max_uses !== null && link.use_count >= link.max_uses) return null;

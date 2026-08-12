@@ -31,7 +31,7 @@ import {
 	reserveQuota,
 } from "../cluster/quota.ts";
 import { pushRevocation, revocationMark } from "../cluster/revocation.ts";
-import { configValue, getMasterKey } from "../config.ts";
+import { getMasterKey } from "../config.ts";
 import { encryptFile } from "../crypto/aead.ts";
 import {
 	keyScopeOf,
@@ -102,7 +102,6 @@ import { memberSource, safeArcname } from "../storage/zip.ts";
 
 const log = getLogger("app.routes.files");
 
-const CHUNK = 256 * 1024;
 const REQUEST_OVERHEAD_ALLOWANCE = 1024 * 1024;
 const CHUNK_SESSION_TTL = 12 * 3600;
 
@@ -268,7 +267,6 @@ export function checkUploadHalt(state: AppState, userId: number): void {
  * by `reserveDeclaredSize` below — checking it locally as well would just be a
  * second, weaker opinion that the reservation immediately overrules. */
 export function precheckDeclaredSize(
-	state: AppState,
 	user: UserRow,
 	perm: PermissionRow,
 	declared: number,
@@ -294,7 +292,7 @@ export async function reserveDeclaredSize(
 	declared: number,
 	kind: ReservationKind = "upload",
 ): Promise<Reservation> {
-	precheckDeclaredSize(state, user, perm, declared);
+	precheckDeclaredSize(user, perm, declared);
 	return reserveQuota(state, { user, bytes: declared, kind });
 }
 
@@ -348,7 +346,7 @@ interface FinalizeOpts {
 export async function finalizeStoredFile(
 	opts: FinalizeOpts,
 ): Promise<Record<string, unknown>> {
-	const { state, req, user, perm, directory } = opts;
+	const { state, req, user, directory } = opts;
 	const { db } = state;
 	const basePath = join(storageRoot(), opts.relPath);
 	const directoryId = directory ? directory.id : null;
@@ -849,7 +847,6 @@ export function sweepStaleParts(): void {
  * other.) */
 export function serializeFiles(
 	state: AppState,
-	req: Request,
 	files: FileRow[],
 ): Record<string, unknown>[] {
 	const { db } = state;
@@ -1066,7 +1063,7 @@ export function filesRouter(state: AppState): Router {
 					if (stored > prepared.perm.max_file_bytes) {
 						throw new HttpError(413, "file exceeds max file size");
 					}
-					precheckDeclaredSize(state, user, prepared.perm, stored);
+					precheckDeclaredSize(user, prepared.perm, stored);
 
 					return finalizeStoredFile({
 						state,
@@ -1540,7 +1537,7 @@ export function filesRouter(state: AppState): Router {
 				res.status(access.status).json({ detail: access.detail });
 				return;
 			}
-			const perm = ensurePermissions(db, user.id, {
+			ensurePermissions(db, user.id, {
 				master: user.role === "master",
 			});
 			// A save writes no new bytes -- it bumps the source blob's ref_count --
@@ -1714,7 +1711,7 @@ export function filesRouter(state: AppState): Router {
 				return;
 			}
 
-			const perm = ensurePermissions(db, user.id, {
+			ensurePermissions(db, user.id, {
 				master: user.role === "master",
 			});
 			// Same reasoning as save: no new bytes, but a new `files` row, and
@@ -1817,7 +1814,7 @@ export function filesRouter(state: AppState): Router {
 				`file copied source_file_id=${source.id} copy_file_id=${copy.id} owner_id=${user.id} directory_id=${copy.directory_id}`,
 			);
 			await commitQuota(state, reservation.uid, source.size_bytes);
-			res.json(serializeFiles(state, req, [copy])[0]!);
+			res.json(serializeFiles(state, [copy])[0]!);
 		}),
 	);
 
@@ -1828,7 +1825,7 @@ export function filesRouter(state: AppState): Router {
 			"SELECT * FROM files WHERE directory_id IS NULL AND owner_id = $id ORDER BY created_at DESC",
 			{ $id: user.id },
 		);
-		res.json({ files: serializeFiles(state, req, files) });
+		res.json({ files: serializeFiles(state, files) });
 	});
 
 	router.get(
@@ -2002,7 +1999,7 @@ export function filesRouter(state: AppState): Router {
 			const updated = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
 				$id: fileObj.id,
 			})!;
-			res.json(serializeFiles(state, req, [updated])[0]!);
+			res.json(serializeFiles(state, [updated])[0]!);
 		},
 	);
 
@@ -2054,7 +2051,7 @@ export function filesRouter(state: AppState): Router {
 				return;
 			}
 			if (targetId === fileObj.directory_id) {
-				res.json(serializeFiles(state, req, [fileObj])[0]!);
+				res.json(serializeFiles(state, [fileObj])[0]!);
 				return;
 			}
 
@@ -2101,7 +2098,7 @@ export function filesRouter(state: AppState): Router {
 			const updated = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
 				$id: fileObj.id,
 			})!;
-			res.json(serializeFiles(state, req, [updated])[0]!);
+			res.json(serializeFiles(state, [updated])[0]!);
 		},
 	);
 
@@ -2255,7 +2252,7 @@ export function filesRouter(state: AppState): Router {
 				$id: fileObj.id,
 			})!;
 			res.json({
-				...serializeFiles(state, req, [updated])[0]!,
+				...serializeFiles(state, [updated])[0]!,
 				access_key: accessKey ?? recoverAccessKey(state, updated),
 			});
 		}),
@@ -2362,7 +2359,7 @@ export function filesRouter(state: AppState): Router {
 				$id: fileObj.id,
 			})!;
 			res.json({
-				...serializeFiles(state, req, [updated])[0]!,
+				...serializeFiles(state, [updated])[0]!,
 				// Shown once. There is no second copy anywhere on this server.
 				key: revealed,
 				key_is_password: usePassword,
@@ -2526,7 +2523,7 @@ export function filesRouter(state: AppState): Router {
 				$id: replacement.id,
 			})!;
 			res.json({
-				...serializeFiles(state, req, [updated])[0]!,
+				...serializeFiles(state, [updated])[0]!,
 				replaced_file_id: replaced.id,
 				previous_encryption_mode: before,
 			});
@@ -2711,12 +2708,12 @@ export function adminFilesRouter(state: AppState): Router {
 	 * system from the one screen whose job is to show all of it. `directory_path`
 	 * is what makes a nested row identifiable — two files can share a name at
 	 * different depths. */
-	router.get("/", requireMaster(state), (req, res) => {
+	router.get("/", requireMaster(state), (_req, res) => {
 		const files = db.all<FileRow>(
 			"SELECT * FROM files ORDER BY created_at DESC",
 		);
 		const pathOf = buildPathIndex(db);
-		const rows = serializeFiles(state, req, files);
+		const rows = serializeFiles(state, files);
 		res.json({
 			files: rows.map((row, i) => ({
 				...row,

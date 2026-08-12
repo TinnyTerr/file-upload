@@ -18,7 +18,7 @@ export function Dropzone({
 	const [dragging, setDragging] = useState(false);
 
 	const pick = (list: FileList | null) => {
-		if (!list || !list.length) return;
+		if (!list?.length) return;
 		onFiles(Array.from(list));
 	};
 

@@ -12,11 +12,7 @@ import { clientCountry, clientIp, requireSession } from "../middleware/auth.ts";
 import { mfaEnforcedFor, passkeyEnforcedFor } from "../permissions.ts";
 import * as credentials from "../security/credentials.ts";
 import { requireCsrf } from "../security/csrf.ts";
-import {
-	hashPassword,
-	verifyDummyPassword,
-	verifyPassword,
-} from "../security/passwords.ts";
+import { verifyDummyPassword, verifyPassword } from "../security/passwords.ts";
 import { COOKIE_NAME, type SessionRow } from "../security/sessions.ts";
 import {
 	buildAuthenticationOptions,
@@ -97,9 +93,15 @@ export function authRouter(state: AppState): Router {
 				? await ensureCredentialMaterial(state, found)
 				: undefined;
 
-			const ok = user
-				? await verifyPassword(password, user.password_hash)
-				: (await verifyDummyPassword(password), false);
+			// The dummy verify on the miss path is what keeps "no such user" and
+			// "wrong password" indistinguishable by timing -- it must run, and its
+			// result is never the answer.
+			let ok = false;
+			if (user) {
+				ok = await verifyPassword(password, user.password_hash);
+			} else {
+				await verifyDummyPassword(password);
+			}
 
 			if (!user || !ok) {
 				lockout.recordFailure(db, username, "username");
@@ -262,7 +264,7 @@ export function authRouter(state: AppState): Router {
 				db,
 				(response as { id?: string }).id ?? "",
 			);
-			if (!credRow || !credRow.webauthn_id || !credRow.webauthn_public_key) {
+			if (!credRow?.webauthn_id || !credRow.webauthn_public_key) {
 				recordAudit(db, {
 					actor: "unknown",
 					action: "login.webauthn_failure",

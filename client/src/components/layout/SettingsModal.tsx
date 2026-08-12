@@ -609,10 +609,9 @@ function ProfileTab() {
 		}
 	};
 
-	const avatarSrc =
-		user && user.has_avatar
-			? accountService.avatarUrl(user.id, avatarVersion)
-			: null;
+	const avatarSrc = user?.has_avatar
+		? accountService.avatarUrl(user.id, avatarVersion)
+		: null;
 
 	const displaySrc = preview ?? avatarSrc;
 

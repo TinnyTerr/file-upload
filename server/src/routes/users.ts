@@ -174,7 +174,7 @@ export function usersRouter(state: AppState): Router {
 					{ $u: username },
 				)!;
 
-				const perm = ensurePermissions(db, user.id, {
+				ensurePermissions(db, user.id, {
 					master: role === "master",
 				});
 				const updates: Partial<Record<PermissionFlag, boolean>> = {

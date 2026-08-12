@@ -58,8 +58,12 @@ export function UnlockFolderDialog({
 			setValue("");
 			onOpenChange(false);
 			onUnlocked(key);
-		} catch (err: any) {
-			setError(err?.message || "That key doesn't open this folder.");
+		} catch (err) {
+			setError(
+				err instanceof Error && err.message
+					? err.message
+					: "That key doesn't open this folder.",
+			);
 		} finally {
 			setBusy(false);
 		}

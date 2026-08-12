@@ -26,7 +26,6 @@ import { storageRoot } from "../storage/paths.ts";
 import { checkUploadHalt, finalizeStoredFile } from "./files.ts";
 
 const log = getLogger("app.routes.remote_upload");
-const CHUNK = 256 * 1024;
 // Slack above the declared max file size to cover response headers riding
 // along in the same accumulated buffer -- the byte cap below is enforced on
 // the raw socket stream (headers + body), not the parsed body alone.

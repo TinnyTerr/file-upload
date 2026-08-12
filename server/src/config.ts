@@ -170,7 +170,7 @@ function parseEnvFile(text: string): Map<string, string> {
 }
 
 function serializeEnvFile(map: Map<string, string>): string {
-	return [...map.entries()].map(([k, v]) => `${k}=${v}`).join("\n") + "\n";
+	return `${[...map.entries()].map(([k, v]) => `${k}=${v}`).join("\n")}\n`;
 }
 
 // ── resolution ──────────────────────────────────────────────────────────────
@@ -299,7 +299,7 @@ function generateFile(path: string): void {
 			: `${k}=${v}`,
 	);
 	const fd = openSync(path, "wx", 0o600);
-	writeSync(fd, lines.join("\n") + "\n");
+	writeSync(fd, `${lines.join("\n")}\n`);
 	closeSync(fd);
 	chmodSync(path, 0o600);
 }

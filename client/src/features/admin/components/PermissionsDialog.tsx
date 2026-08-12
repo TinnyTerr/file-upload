@@ -39,8 +39,12 @@ export function PermissionsDialog({
 		try {
 			await setPermissions.mutateAsync({ id: user.id, permissions: draft });
 			onClose();
-		} catch (err: any) {
-			setError(err.message || "Failed to save permissions.");
+		} catch (err) {
+			setError(
+				err instanceof Error && err.message
+					? err.message
+					: "Failed to save permissions.",
+			);
 		}
 	};
 

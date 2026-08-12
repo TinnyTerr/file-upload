@@ -1,4 +1,4 @@
-import { Database } from "bun:sqlite";
+import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -315,22 +315,26 @@ export function createSqliteDb(path: string): Db {
 
 	sqlite.exec(indexes);
 
+	// Named parameters are passed as one object, which bun:sqlite accepts at
+	// runtime but does not describe in its types -- `run`/`get`/`all` are typed
+	// over positional `SQLQueryBindings`. So the object goes through as a single
+	// binding. One helper rather than a cast at each of the three call sites,
+	// and narrower than the `any` this replaced.
+	const bind = (params: SqlParams) => params as unknown as SQLQueryBindings;
+
 	const db: Db = {
 		run(sql: string, params: SqlParams = {}) {
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			sqlite.query(sql).run(params as any);
+			sqlite.query(sql).run(bind(params));
 		},
 		get<T = Row>(sql: string, params: SqlParams = {}) {
 			// bun:sqlite returns null for a miss, but the Db contract says
 			// `T | undefined` -- normalize, or a caller testing `=== undefined`
 			// silently never matches a genuine miss.
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			const row = sqlite.query(sql).get(params as any) as T | null;
+			const row = sqlite.query(sql).get(bind(params)) as T | null;
 			return row ?? undefined;
 		},
 		all<T = Row>(sql: string, params: SqlParams = {}) {
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			return sqlite.query(sql).all(params as any) as T[];
+			return sqlite.query(sql).all(bind(params)) as T[];
 		},
 		transaction<T>(fn: () => T): T {
 			return sqlite.transaction(fn)();

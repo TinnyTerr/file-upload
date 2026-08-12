@@ -37,8 +37,12 @@ export function CreateLinkDialog({ fileId }: { fileId: number }) {
 			setMaxUses("");
 			setExpiresIn("");
 			setHideUploader(false);
-		} catch (err: any) {
-			setError(err.message || "Failed to create link");
+		} catch (err) {
+			setError(
+				err instanceof Error && err.message
+					? err.message
+					: "Failed to create link",
+			);
 		}
 	};
 

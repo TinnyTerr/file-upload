@@ -12,7 +12,7 @@ import {
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import busboy from "busboy";
-import type { Request, Response } from "express";
+import type { Response } from "express";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
@@ -42,7 +42,6 @@ import {
 	partsDir,
 	precheckDeclaredSize,
 	receivedIndices,
-	usedBytes,
 } from "./files.ts";
 
 const log = getLogger("app.routes.dropbox");
@@ -315,7 +314,7 @@ export function dropboxRouter(state: AppState): Router {
 			const { owner, directory, perm } = dropboxUploadContext(state, row);
 			const body = req.body ?? {};
 			const totalSize = Number(body.total_size ?? 0);
-			precheckDeclaredSize(state, owner, perm, totalSize);
+			precheckDeclaredSize(owner, perm, totalSize);
 
 			const chunkSize = chunkUploadSize();
 			const n = numChunks(totalSize, chunkSize);
@@ -583,7 +582,7 @@ export function dropboxRouter(state: AppState): Router {
 		const declared = req.header("content-length");
 		if (declared !== undefined) {
 			try {
-				precheckDeclaredSize(state, owner, perm, Number(declared));
+				precheckDeclaredSize(owner, perm, Number(declared));
 			} catch {
 				// best-effort, see app/routes/dropbox.py::upload_to_dropbox
 			}
