@@ -1,4 +1,5 @@
 import { api, apiPath } from "@/config/api";
+import { pollFinalize } from "@/lib/finalizePoll";
 
 export interface DropboxLink {
 	id: number;
@@ -177,11 +178,14 @@ async function chunkedDropboxUpload(
 		),
 	);
 	onProgress?.({ phase: "finalizing", percent: 100 });
-	return api.post<{ file_id: number; slug: string }>(
-		`/dropbox/${encoded}/upload/finalize`,
-		{
-			json: { upload_id },
-		},
+	// Polled rather than awaited once — a large upload's finalize outlives any
+	// proxy request timeout, and the receive link is spent by the time it
+	// succeeds, so a naive retry used to come back 410. See lib/finalizePoll.ts.
+	return pollFinalize(() =>
+		api.post<{ file_id: number; slug: string }>(
+			`/dropbox/${encoded}/upload/finalize`,
+			{ json: { upload_id } },
+		),
 	);
 }
 

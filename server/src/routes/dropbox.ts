@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
-	createReadStream,
 	createWriteStream,
 	existsSync,
 	mkdirSync,
@@ -32,16 +31,25 @@ import { clientIp, requireSession } from "../middleware/auth.ts";
 import { requireActiveUser } from "../middleware/deps.ts";
 import { ensurePermissions } from "../permissions.ts";
 import { requireCsrf } from "../security/csrf.ts";
+import type { FileHashes } from "../storage/blobs.ts";
 import { storageRoot } from "../storage/paths.ts";
 import {
+	assembleChunks,
+	assemblyPath,
 	canEditDirectory,
 	chunkUploadSize,
 	expectedChunkLen,
 	finalizeStoredFile,
+	isFinalizing,
+	isLegacyPartsLayout,
 	numChunks,
 	partsDir,
 	precheckDeclaredSize,
+	prepareAssembly,
+	receiveChunkAt,
 	receivedIndices,
+	replayFinalize,
+	startFinalize,
 	usedBytes,
 } from "./files.ts";
 
@@ -96,12 +104,25 @@ function resolveDropbox(state: AppState, token: string): DropboxLinkRow {
 	return row;
 }
 
-/** Mirrors app/routes/dropbox.py::_open_dropbox_upload_token. */
-function openDropboxToken(
+/**
+ * Decode an upload token and check it was minted for this receive link —
+ * *without* requiring the link to still be live.
+ *
+ * Split out of `openDropboxToken` for the finalize replay path. A finalize that
+ * succeeded sets the link `active = 0, used_at = now`, so `resolveDropbox`
+ * answers 410 "already been used" from then on. A client whose finalize request
+ * died at a proxy timeout while the server was still assembling therefore hit
+ * that 410 on its retry and concluded the upload had failed, when in fact the
+ * file was stored. The replay has to be answerable after the link is spent.
+ *
+ * Safe to trust this far on its own: the token is an AEAD blob sealed under the
+ * master key, so its `th` binding to this link can't be forged.
+ */
+function openDropboxChunkMeta(
 	state: AppState,
 	token: string,
 	uploadId: string,
-): { row: DropboxLinkRow; meta: DropboxChunkMeta } {
+): DropboxChunkMeta {
 	let meta: DropboxChunkMeta;
 	try {
 		const blob = Buffer.from(uploadId, "base64url");
@@ -115,8 +136,21 @@ function openDropboxToken(
 	} catch {
 		throw new HttpError(400, "invalid upload token");
 	}
+	if (meta.th !== tokenHash(token)) {
+		throw new HttpError(403, "upload token does not match receive link");
+	}
+	return meta;
+}
+
+/** Mirrors app/routes/dropbox.py::_open_dropbox_upload_token. */
+function openDropboxToken(
+	state: AppState,
+	token: string,
+	uploadId: string,
+): { row: DropboxLinkRow; meta: DropboxChunkMeta } {
+	const meta = openDropboxChunkMeta(state, token, uploadId);
 	const row = resolveDropbox(state, token);
-	if (meta.did !== row.id || meta.th !== row.token_hash) {
+	if (meta.did !== row.id) {
 		throw new HttpError(403, "upload token does not match receive link");
 	}
 	if (meta.exp < Date.now() / 1000) {
@@ -325,6 +359,7 @@ export function dropboxRouter(state: AppState): Router {
 				recursive: true,
 			});
 			mkdirSync(partsDir(relPath), { recursive: true });
+			prepareAssembly(relPath);
 
 			const meta: DropboxChunkMeta = {
 				v: 1,
@@ -403,65 +438,27 @@ export function dropboxRouter(state: AppState): Router {
 			res.status(400).json({ detail: "invalid chunk index" });
 			return;
 		}
-		const tmp = join(parts, `${index}.${randomBytes(8).toString("hex")}.tmp`);
-		const out = createWriteStream(tmp);
-		let written = 0;
-		let handled = false;
-		req.on("data", (chunk: Buffer) => {
-			written += chunk.length;
-			if (written > expected) {
-				handled = true;
-				out.destroy();
-				try {
-					unlinkSync(tmp);
-				} catch {
-					// best-effort
-				}
-				res.status(413).json({ detail: "chunk exceeds expected size" });
-				req.destroy();
-				return;
-			}
-			out.write(chunk);
-		});
-		req.on("end", () => {
-			if (handled) return;
-			out.end(() => {
-				if (handled) return;
-				if (written !== expected) {
-					try {
-						unlinkSync(tmp);
-					} catch {
-						// best-effort
-					}
-					res.status(400).json({ detail: "incomplete chunk" });
-					return;
-				}
-				renameSync(tmp, join(parts, String(index)));
-				res.json({ index, num_chunks: meta.n });
-			});
-		});
-		req.on("error", (err) => {
-			handled = true;
-			out.destroy();
-			try {
-				unlinkSync(tmp);
-			} catch {
-				// best-effort
-			}
-			next(err);
-		});
+		receiveChunkAt(
+			req,
+			res,
+			next,
+			{ parts, relPath: meta.rel, index, expected, chunkSize: meta.cs },
+			() => res.json({ index, num_chunks: meta.n }),
+		);
 	});
 
 	router.post(
 		"/dropbox/:token/upload/finalize",
 		asyncHandler(async (req, res) => {
-			// Hoisted so the catch below can clean it up on failure -- mirrors
-			// routes/files.ts's /upload/finalize, which unlinks its assembled `.part`
-			// file on error so it doesn't silently inflate disk use past what quota
-			// accounting reports until the stale-part sweep eventually catches it.
-			let work: string | null = null;
 			try {
 				const uploadId = String(req.body?.upload_id ?? "");
+				// Decoded before the link is resolved, and replayed before anything
+				// else: a finalize that already succeeded spent the link (410 from
+				// `resolveDropbox`) and removed the `.parts` dir (410 here), so both
+				// of those checks would turn a stored file's poll into a failure.
+				const early = openDropboxChunkMeta(state, req.params.token, uploadId);
+				if (replayFinalize(res, early.rel, `dropbox id=${early.did}`)) return;
+
 				const { row, meta } = openDropboxToken(
 					state,
 					req.params.token,
@@ -471,6 +468,14 @@ export function dropboxRouter(state: AppState): Router {
 
 				const relPath = meta.rel;
 				const parts = partsDir(relPath);
+				// This route had no finalize serialization at all, so two uploaders
+				// (or one client polling) could finalize the same upload
+				// concurrently — two passes racing to rename onto the same path, and
+				// a `dropbox.uploaded` audit entry for each.
+				if (isFinalizing(relPath)) {
+					res.status(409).json({ detail: "upload busy, retry shortly" });
+					return;
+				}
 				if (!existsSync(parts)) {
 					res.status(410).json({ detail: "upload session gone" });
 					return;
@@ -491,74 +496,71 @@ export function dropboxRouter(state: AppState): Router {
 					return;
 				}
 
-				work = `${join(storageRoot(), relPath)}.dropbox.part`;
-				const out = createWriteStream(work);
-				for (let i = 0; i < meta.n; i++) {
-					const chunkPath = join(parts, String(i));
-					await new Promise<void>((resolve, reject) => {
-						const rs = createReadStream(chunkPath);
-						rs.on("error", reject);
-						rs.on("end", resolve);
-						rs.pipe(out, { end: false });
-					});
+				// Chunks were written straight to their offsets, so the assembly is
+				// already complete and this is a stat, not a copy. A session staged
+				// before that change still needs concatenating first.
+				const work = assemblyPath(relPath);
+				let plainHashes: FileHashes | undefined;
+				if (isLegacyPartsLayout(parts, meta.n)) {
+					plainHashes = await assembleChunks(parts, work, meta.n);
 				}
-				await new Promise<void>((resolve) => out.end(resolve));
-				const stored = statSync(work).size;
+				const stored = existsSync(work) ? statSync(work).size : -1;
 				if (stored !== meta.total) {
-					unlinkSync(work);
 					res.status(400).json({ detail: "assembled size mismatch" });
 					return;
 				}
 
-				const result = await finalizeStoredFile({
-					state,
-					req,
-					user: owner,
-					perm,
-					directory,
-					workPath: work,
-					relPath,
-					stored,
-					contentType: meta.ct,
-					encryptionMode: meta.enc,
-					compress: false,
-					randomizeFilename: false,
-					originalFilename: meta.fn,
-					isPermanent: true,
-					tempDays: null,
-					deleteIfIdleDays: null,
-					archiveAfterIdleDays: null,
-					autoUnarchiveOnDownload: true,
-					maxUses: null,
-					expiresInSeconds: null,
-					sourceType: "dropbox",
-				});
-				db.run(
-					"UPDATE dropbox_upload_links SET active = 0, used_at = $now WHERE id = $id",
-					{
-						$now: nowIso(),
-						$id: row.id,
-					},
-				);
-				recordAudit(db, {
-					actor: "dropbox",
-					action: "dropbox.uploaded",
-					target: `dropbox:${row.id}:file:${result.file_id}`,
+				// Read while the socket is still up — see FinalizeOpts.requestOrigin.
+				const requestOrigin = {
 					ip: clientIp(state, req),
+					baseUrl: `${req.protocol}://${req.get("host")}`,
+				};
+				startFinalize(res, relPath, `dropbox id=${row.id}`, async () => {
+					const result = await finalizeStoredFile({
+						state,
+						req,
+						user: owner,
+						perm,
+						directory,
+						requestOrigin,
+						workPath: work,
+						relPath,
+						stored,
+						plainHashes,
+						contentType: meta.ct,
+						encryptionMode: meta.enc,
+						compress: false,
+						randomizeFilename: false,
+						originalFilename: meta.fn,
+						isPermanent: true,
+						tempDays: null,
+						deleteIfIdleDays: null,
+						archiveAfterIdleDays: null,
+						autoUnarchiveOnDownload: true,
+						maxUses: null,
+						expiresInSeconds: null,
+						sourceType: "dropbox",
+					});
+					db.run(
+						"UPDATE dropbox_upload_links SET active = 0, used_at = $now WHERE id = $id",
+						{
+							$now: nowIso(),
+							$id: row.id,
+						},
+					);
+					recordAudit(db, {
+						actor: "dropbox",
+						action: "dropbox.uploaded",
+						target: `dropbox:${row.id}:file:${result.file_id}`,
+						ip: requestOrigin.ip,
+					});
+					await rm(parts, { recursive: true, force: true });
+					log.info(
+						`dropbox chunked upload completed id=${row.id} file_id=${result.file_id} owner_id=${owner.id}`,
+					);
+					return result;
 				});
-				await rm(parts, { recursive: true, force: true });
-				log.info(
-					`dropbox chunked upload completed id=${row.id} file_id=${result.file_id} owner_id=${owner.id}`,
-				);
-				res.json(result);
 			} catch (err) {
-				if (work) {
-					try {
-						unlinkSync(work);
-					} catch {
-						// best-effort
-					}
-				}
 				respondError(res, err);
 			}
 		}),

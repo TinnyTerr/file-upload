@@ -1,4 +1,5 @@
 import { bytesToBase64Url, randomKey } from "@/lib/base64url";
+import { pollFinalize } from "@/lib/finalizePoll";
 import { encryptBlob } from "@/workers/aeadClient";
 import { filesService } from "../services/filesService";
 import type { UploadOptions, UploadResult } from "../types";
@@ -175,13 +176,22 @@ async function chunkedUpload(
 				(_, i) => worker(i),
 			),
 		);
-		onProgress?.({ phase: "finalizing", percent: 100 });
-		return await filesService.chunkedFinalize(upload_id);
 	} catch (err) {
 		// Best-effort cleanup of the partial session unless we were cancelled.
+		// Only the *transfer* is cleaned up this way: once finalize has been
+		// asked for, the server may be minutes into assembling a multi-GB file
+		// and an abort would be aimed at an upload that is about to succeed.
 		if (!signal?.aborted) filesService.chunkedAbort(upload_id).catch(() => {});
 		throw err;
 	}
+
+	onProgress?.({ phase: "finalizing", percent: 100 });
+	// Polled, not awaited once: finalizing a large upload outlives any proxy's
+	// request timeout, so the first response is usually a dead connection rather
+	// than a verdict. See lib/finalizePoll.ts.
+	return await pollFinalize(() => filesService.chunkedFinalize(upload_id), {
+		signal,
+	});
 }
 
 function delay(ms: number) {

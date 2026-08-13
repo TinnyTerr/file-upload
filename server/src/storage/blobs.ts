@@ -14,25 +14,47 @@ export interface FileHashes {
 	blake2b: string;
 }
 
-export async function hashFile(path: string): Promise<FileHashes> {
+/** The four digests every blob carries, fed incrementally.
+ *
+ * Broken out of `hashFile` so a caller that is *already* streaming the bytes
+ * for another reason can fold the digests into that pass instead of paying a
+ * second one. The four together run at ~135 MB/s and are CPU-bound, not
+ * disk-bound, so on a multi-GB upload one avoided pass is a minute of wall
+ * clock — see routes/files.ts's chunk assembly. */
+export interface Hashers {
+	update(chunk: Buffer): void;
+	digest(): FileHashes;
+}
+
+export function createHashers(): Hashers {
 	const sha256 = createHash("sha256");
 	const sha1 = createHash("sha1");
 	const md5 = createHash("md5");
 	// Python hashlib.blake2b defaults to a 64-byte digest == blake2b512.
 	const blake2b = createHash("blake2b512");
+	return {
+		update(chunk: Buffer) {
+			sha256.update(chunk);
+			sha1.update(chunk);
+			md5.update(chunk);
+			blake2b.update(chunk);
+		},
+		digest: () => ({
+			sha256: sha256.digest("hex"),
+			sha1: sha1.digest("hex"),
+			md5: md5.digest("hex"),
+			blake2b: blake2b.digest("hex"),
+		}),
+	};
+}
+
+export async function hashFile(path: string): Promise<FileHashes> {
+	const hashers = createHashers();
 	const stream = createReadStream(path, { highWaterMark: 1024 * 1024 });
 	for await (const chunk of stream as AsyncIterable<Buffer>) {
-		sha256.update(chunk);
-		sha1.update(chunk);
-		md5.update(chunk);
-		blake2b.update(chunk);
+		hashers.update(chunk);
 	}
-	return {
-		sha256: sha256.digest("hex"),
-		sha1: sha1.digest("hex"),
-		md5: md5.digest("hex"),
-		blake2b: blake2b.digest("hex"),
-	};
+	return hashers.digest();
 }
 
 /** Register a stored file as a content blob, reusing an existing blob when the

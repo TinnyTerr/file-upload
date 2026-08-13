@@ -9,9 +9,11 @@ import {
 	rmSync,
 	statSync,
 	unlinkSync,
+	writeFileSync,
 } from "node:fs";
 import { rm } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { ZipArchive } from "archiver";
 import busboy from "busboy";
 import type { Request, Response } from "express";
@@ -68,6 +70,8 @@ import {
 } from "../storage/accounting.ts";
 import {
 	attachBlob,
+	createHashers,
+	type FileHashes,
 	fileHashes,
 	hashFile,
 	releaseBlob,
@@ -304,6 +308,26 @@ interface FinalizeOpts {
 	 * uploader's plaintext under a mode that promises ciphertext.
 	 */
 	clientCiphertext?: boolean;
+	/**
+	 * Digests of `workPath`'s bytes, when the caller already computed them.
+	 *
+	 * The chunked routes stream every byte through a write stream to assemble
+	 * the file anyway, so they fold the digests into that pass. Without this the
+	 * assembled file is read a second time for nothing — a full extra pass at
+	 * ~135 MB/s (the four digests are CPU-bound), which is a minute of a
+	 * multi-GB upload's finalize.
+	 */
+	plainHashes?: FileHashes;
+	/**
+	 * Client IP and public base URL, resolved while the request was still live.
+	 *
+	 * The chunked routes finish detached, and by then the socket may be gone —
+	 * `clientIp` falls back to `req.socket.remoteAddress`, which empties out on a
+	 * destroyed socket, so the audit entry would record no IP at all. Reading
+	 * both up front is what keeps a deferred finalize's audit trail identical to
+	 * an inline one's.
+	 */
+	requestOrigin?: { ip: string; baseUrl: string };
 }
 
 /** Mirrors app/routes/files.py::_finalize_stored_file -- quota check, optional
@@ -360,9 +384,9 @@ export async function finalizeStoredFile(
 	// never inheritable -- only the browser has that key.
 	const overridden = directory && encryptionMode !== "client" ? 0 : 1;
 
-	let plainHashes: Awaited<ReturnType<typeof hashFile>>;
+	let plainHashes: FileHashes;
 	try {
-		plainHashes = await hashFile(opts.workPath);
+		plainHashes = opts.plainHashes ?? (await hashFile(opts.workPath));
 		enforceGlobalUploadCapacity(db, opts.stored);
 	} catch (err) {
 		try {
@@ -482,7 +506,13 @@ export async function finalizeStoredFile(
 
 		mkdirSync(join(basePath, ".."), { recursive: true });
 		renameSync(current, basePath);
-		const storedHashes = await hashFile(basePath);
+		// With neither transform applied, `current` is still the untouched work
+		// file and the stored bytes ARE the plaintext bytes -- hashing them again
+		// is a second full-file pass computing a digest we already hold. That is
+		// the common case (`encryption=none compressed=false`), and on a multi-GB
+		// upload it was a minute of the finalize request's wall clock.
+		const transformed = fileCompressed || encryptionMode === "server";
+		const storedHashes = transformed ? await hashFile(basePath) : plainHashes;
 		const transformKey = `${encryptionMode}:compressed=${fileCompressed ? 1 : 0}`;
 		const blob = attachBlob(db, {
 			finalPath: basePath,
@@ -540,7 +570,7 @@ export async function finalizeStoredFile(
 			actor: user.username,
 			action: "file.uploaded",
 			target: `file:${fileObj.id}`,
-			ip: clientIp(state, req),
+			ip: opts.requestOrigin?.ip ?? clientIp(state, req),
 		});
 		log.info(
 			`upload finalized file_id=${fileObj.id} owner_id=${user.id} stored_bytes=${blob.stored_size_bytes} size_bytes=${sizeBytes} encryption=${encryptionMode} compressed=${fileCompressed} directory_id=${directoryId}`,
@@ -554,7 +584,9 @@ export async function finalizeStoredFile(
 			);
 		});
 
-		const baseUrl = fileUrl(req, slug);
+		const baseUrl = opts.requestOrigin
+			? `${opts.requestOrigin.baseUrl}/file/${slug}`
+			: fileUrl(req, slug);
 		return {
 			file_id: fileObj.id,
 			slug,
@@ -700,6 +732,28 @@ export function expectedChunkLen(
 	return total - (n - 1) * chunkSize;
 }
 
+/**
+ * Whether this upload's chunks were staged the old way, with their payload in
+ * `.parts/<i>` instead of written straight to their offset in `<rel>.part`.
+ *
+ * Only ever true for a session already in flight across the deploy that
+ * introduced positional writes. Without the check those uploads fail their
+ * assembled-size test on a `.part` file that was never written; with it they
+ * take the old concatenating path and finish. One stat, and only of the first
+ * marker present — the layout is uniform within a session.
+ *
+ * Exported for reuse by dropbox.ts. */
+export function isLegacyPartsLayout(parts: string, n: number): boolean {
+	for (let i = 0; i < n; i++) {
+		try {
+			return statSync(join(parts, String(i))).size > 0;
+		} catch {
+			// not received yet — look at the next one
+		}
+	}
+	return false;
+}
+
 /** Exported for reuse by dropbox.ts. */
 export function receivedIndices(parts: string, n: number): number[] {
 	const out: number[] = [];
@@ -716,11 +770,307 @@ export function receivedIndices(parts: string, n: number): number[] {
 	return out.sort((a, b) => a - b);
 }
 
+/** The file an upload's chunks are written into, at their final offsets.
+ *
+ * Exported for reuse by dropbox.ts. */
+export function assemblyPath(relPath: string): string {
+	return `${join(storageRoot(), relPath)}.part`;
+}
+
+/** Create the (empty) assembly file so chunk writes can open it `r+`.
+ *
+ * Exported for reuse by dropbox.ts. */
+export function prepareAssembly(relPath: string): void {
+	writeFileSync(assemblyPath(relPath), "");
+}
+
+/**
+ * Stream one chunk's request body straight into its final offset.
+ *
+ * Chunks used to land in a per-chunk temp file, leaving finalize to
+ * concatenate them — a second full write *and* read of the entire upload
+ * before hashing had even started, which on an 8 GB file was around three
+ * minutes of a request nobody was still waiting on. Written at
+ * `index * chunkSize` instead, the assembly file simply *is* the upload once
+ * the last chunk lands and finalize has nothing to copy.
+ *
+ * `.parts/<i>` lives on as a zero-byte marker, so `receivedIndices`, resume,
+ * abort and `sweepStaleParts` all keep working untouched. The marker is
+ * written only once the last byte is in place, which is what keeps a chunk
+ * that died mid-transfer from counting: it leaves unreferenced garbage in its
+ * region and the retry overwrites the same offsets.
+ *
+ * Concurrent chunks are safe — each gets its own descriptor at its own offset,
+ * and positioned writes don't share a file cursor.
+ *
+ * Exported for reuse by dropbox.ts. */
+export function receiveChunkAt(
+	req: Request,
+	res: Response,
+	next: (err: unknown) => void,
+	opts: {
+		parts: string;
+		relPath: string;
+		index: number;
+		/** This chunk's exact length — the last one is short. */
+		expected: number;
+		/** The session's uniform chunk size, which is what sets the offset. */
+		chunkSize: number;
+	},
+	onDone: () => void,
+): void {
+	const { parts, relPath, index, expected } = opts;
+	const marker = join(parts, String(index));
+	const assembly = assemblyPath(relPath);
+	// A session that predates positional writes has no assembly file; so does
+	// one whose `.part` was swept. Recreating it beats 410ing an upload that is
+	// otherwise fine — a missing session is caught by the `.parts` check above.
+	if (!existsSync(assembly)) prepareAssembly(relPath);
+
+	const out = createWriteStream(assembly, {
+		flags: "r+",
+		start: index * opts.chunkSize,
+	});
+	let written = 0;
+	let handled = false;
+	const fail = (status: number, detail: string) => {
+		handled = true;
+		out.destroy();
+		res.status(status).json({ detail });
+	};
+	out.on("error", (err) => {
+		if (handled) return;
+		handled = true;
+		next(err);
+	});
+	req.on("data", (chunk: Buffer) => {
+		written += chunk.length;
+		if (written > expected) {
+			fail(413, "chunk exceeds expected size");
+			req.destroy();
+			return;
+		}
+		out.write(chunk);
+	});
+	req.on("end", () => {
+		if (handled) return;
+		out.end(() => {
+			if (handled) return;
+			if (written !== expected) {
+				// No marker: the region is garbage, but nothing counts it as
+				// received, so the client's retry rewrites the same offsets.
+				res.status(400).json({ detail: "incomplete chunk" });
+				return;
+			}
+			writeFileSync(marker, "");
+			onDone();
+		});
+	});
+	req.on("error", (err) => {
+		handled = true;
+		out.destroy();
+		next(err);
+	});
+}
+
+/** Concatenate an upload's `n` chunk files into `work`, hashing as we go.
+ *
+ * Only reachable now for a session staged the old way — chunk payloads in
+ * `.parts/<i>` rather than written straight to their offsets — which means one
+ * that was already in flight across the deploy that changed this. Kept so those
+ * uploads finish instead of failing their size check.
+ *
+ * The digests are folded into the copy because every byte is already streaming
+ * through this loop; computing them separately is a whole extra read at
+ * ~135 MB/s, CPU-bound on the four digests.
+ *
+ * `pipeline` rather than a hand-rolled write loop so backpressure is honored
+ * and a mid-assembly write error (a full disk) propagates instead of being
+ * swallowed by a `write()` whose return value nobody checked.
+ *
+ * Exported for reuse by dropbox.ts. */
+export async function assembleChunks(
+	parts: string,
+	work: string,
+	n: number,
+): Promise<FileHashes> {
+	const hashers = createHashers();
+	await pipeline(async function* () {
+		for (let i = 0; i < n; i++) {
+			const rs = createReadStream(join(parts, String(i)), {
+				highWaterMark: 1024 * 1024,
+			});
+			for await (const chunk of rs as AsyncIterable<Buffer>) {
+				hashers.update(chunk);
+				yield chunk;
+			}
+		}
+	}, createWriteStream(work));
+	return hashers.digest();
+}
+
 /** Serializes finalize/abort against each other for a given upload (keyed by
  * its storage rel path) so one request can't delete the `.parts` dir out from
  * under another that's mid-read — the ENOENT race that used to surface as an
  * unhandled 500 and leave an orphaned, unaccounted-for `.part` file on disk. */
 const uploadLocks = new Map<string, "finalizing" | "aborting">();
+
+/** Whether some request is already finalizing or aborting this upload.
+ * Exported so dropbox.ts's finalize shares this one registry rather than
+ * running unserialized beside it. */
+export function isFinalizing(relPath: string): boolean {
+	return uploadLocks.has(relPath);
+}
+
+/** How long a finished finalize's outcome stays replayable (ms). */
+const FINALIZE_RESULT_TTL = 6 * 3600 * 1000;
+
+/** Advertised poll interval for a finalize still in flight. */
+const FINALIZE_POLL_MS = 3000;
+
+type FinalizeEntry = { at: number } & (
+	| { state: "running" }
+	| { state: "done"; result: Record<string, unknown> }
+	| { state: "failed"; status: number; detail: unknown }
+);
+
+/**
+ * Every finalize this process has run recently, keyed by storage rel path.
+ *
+ * Finalizing a multi-GB upload is a minute or more of hashing whatever the
+ * transfer left on disk, which is longer than anything in front of this app
+ * will hold a request open (nginx's `proxy_read_timeout` defaults to 60s,
+ * Cloudflare caps at 100s). So the work does not run inside the request at all:
+ * `startFinalize` kicks it off, the request returns 202 immediately, and the
+ * client polls. This registry is what a poll reads.
+ *
+ * Failures are recorded too, and deliberately: a job that runs detached has no
+ * request left to throw into, so an uncaptured error would leave the client
+ * polling a finalize that is never going to answer.
+ *
+ * Process-local, like sessions and play keys — which costs nothing here, since
+ * a chunked upload's bytes are already on one node's local disk.
+ */
+const finalizeJobs = new Map<string, FinalizeEntry>();
+
+function recordFinalize(relPath: string, entry: FinalizeEntry): void {
+	// Swept on write rather than on a timer: entries are added once per upload,
+	// so this stays O(small), and an unbounded process-local Map is a leak.
+	const cutoff = Date.now() - FINALIZE_RESULT_TTL;
+	for (const [k, v] of finalizeJobs) {
+		if (v.state !== "running" && v.at < cutoff) finalizeJobs.delete(k);
+	}
+	finalizeJobs.set(relPath, entry);
+}
+
+/** True once a finalize for this upload has succeeded. Exported so the abort
+ * routes can refuse to "cancel" an upload that is already stored. */
+export function finalizeSucceeded(relPath: string): boolean {
+	return finalizeJobs.get(relPath)?.state === "done";
+}
+
+/**
+ * Answer a finalize whose outcome this process already knows or is working on.
+ *
+ * Returns true when it has answered and the caller must stop. Order matters
+ * twice over: this runs before the `.parts` existence check, because a finished
+ * finalize deleted that directory, and on the dropbox route it runs before the
+ * receive link is resolved, because a finished finalize spent the link. Getting
+ * either backwards is what turned a stored file into a 410 for its uploader.
+ *
+ * Exported for reuse by dropbox.ts. */
+export function replayFinalize(
+	res: Response,
+	relPath: string,
+	label: string,
+): boolean {
+	const entry = finalizeJobs.get(relPath);
+	if (!entry) return false;
+	if (entry.state === "running") {
+		res.status(202).json({
+			status: "finalizing",
+			retry_after_ms: FINALIZE_POLL_MS,
+		});
+		return true;
+	}
+	if (entry.state === "done") {
+		log.info(`${label} finalize replayed rel_path=${relPath}`);
+		res.json(entry.result);
+		return true;
+	}
+	// Delivered once, then forgotten, so a client that fixes whatever went wrong
+	// (a quota freed up, a directory recreated) can start the finalize again
+	// rather than being pinned to a stale failure for six hours.
+	finalizeJobs.delete(relPath);
+	log.info(`${label} finalize failure replayed rel_path=${relPath}`);
+	res.status(entry.status).json({ detail: entry.detail });
+	return true;
+}
+
+/**
+ * Run a validated finalize detached from the request that asked for it, and
+ * answer that request 202.
+ *
+ * The caller has already done every cheap check — token, missing chunks,
+ * assembled size, destination folder, permissions — so what runs here is the
+ * expensive, unconditional part: hashing, optional compression and encryption,
+ * and the DB write. Errors are captured into the registry instead of being
+ * thrown, because there is no longer a request listening for them.
+ *
+ * Exported for reuse by dropbox.ts. */
+export function startFinalize(
+	res: Response,
+	relPath: string,
+	label: string,
+	run: () => Promise<Record<string, unknown>>,
+): void {
+	recordFinalize(relPath, { state: "running", at: Date.now() });
+	uploadLocks.set(relPath, "finalizing");
+	const startedAt = Date.now();
+
+	void (async () => {
+		try {
+			const result = await run();
+			recordFinalize(relPath, { state: "done", result, at: Date.now() });
+			log.info(
+				`${label} finalize completed rel_path=${relPath} duration_ms=${Date.now() - startedAt}`,
+			);
+		} catch (err) {
+			// Never leave a partially-written assembly behind: it counts toward real
+			// disk usage but never becomes a `content_blobs` row, so it inflates disk
+			// use past what /api/files/usage reports until the stale-part sweep
+			// eventually catches it.
+			try {
+				unlinkSync(assemblyPath(relPath));
+			} catch {
+				// best-effort
+			}
+			const status = err instanceof HttpError ? err.status : 500;
+			const detail =
+				err instanceof HttpError
+					? err.detail
+					: "finalize failed; please try again";
+			recordFinalize(relPath, {
+				state: "failed",
+				status,
+				detail,
+				at: Date.now(),
+			});
+			log.error(
+				`${label} finalize failed rel_path=${relPath} status=${status}: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
+		} finally {
+			uploadLocks.delete(relPath);
+		}
+	})();
+
+	res.status(202).json({
+		status: "finalizing",
+		retry_after_ms: FINALIZE_POLL_MS,
+	});
+}
 
 /** Drops chunk dirs / assembly files left behind by abandoned uploads. Exported
  * so jobs/scheduler.ts can run it on an interval, mirroring the APScheduler job. */
@@ -1076,6 +1426,7 @@ export function filesRouter(state: AppState): Router {
 				recursive: true,
 			});
 			mkdirSync(partsDir(relPath), { recursive: true });
+			prepareAssembly(relPath);
 
 			const meta: ChunkMeta = {
 				v: 1,
@@ -1159,76 +1510,37 @@ export function filesRouter(state: AppState): Router {
 			res.status(400).json({ detail: "invalid chunk index" });
 			return;
 		}
-		const tmp = join(parts, `${index}.${randomBytes(8).toString("hex")}.tmp`);
-		const out = createWriteStream(tmp);
-		let written = 0;
-		let handled = false;
-		req.on("data", (chunk: Buffer) => {
-			written += chunk.length;
-			if (written > expected) {
-				handled = true;
-				out.destroy();
-				try {
-					unlinkSync(tmp);
-				} catch {
-					// best-effort
-				}
-				res.status(413).json({ detail: "chunk exceeds expected size" });
-				req.destroy();
-				return;
-			}
-			out.write(chunk);
-		});
-		req.on("end", () => {
-			if (handled) return;
-			out.end(() => {
-				if (handled) return;
-				if (written !== expected) {
-					try {
-						unlinkSync(tmp);
-					} catch {
-						// best-effort
-					}
-					res.status(400).json({ detail: "incomplete chunk" });
-					return;
-				}
-				renameSync(tmp, join(parts, String(index)));
-				res.json({ index, num_chunks: meta.n });
-			});
-		});
-		req.on("error", (err) => {
-			handled = true;
-			out.destroy();
-			try {
-				unlinkSync(tmp);
-			} catch {
-				// best-effort
-			}
-			next(err);
-		});
+		receiveChunkAt(
+			req,
+			res,
+			next,
+			{ parts, relPath: meta.rel, index, expected, chunkSize: meta.cs },
+			() => res.json({ index, num_chunks: meta.n }),
+		);
 	});
 
 	router.post(
 		"/upload/finalize",
 		getUploadUser(state),
 		asyncHandler(async (req, res) => {
-			let relPath: string | null = null;
-			let work: string | null = null;
 			try {
 				const user = req.currentUser!;
 				const uploadId = String(req.body?.upload_id ?? "");
 				const meta = openChunkToken(state, uploadId, user);
-				relPath = meta.rel;
+				const relPath = meta.rel;
 				const parts = partsDir(relPath);
-				if (!existsSync(parts)) {
-					res.status(410).json({ detail: "upload session gone" });
-					return;
-				}
+				// Before the `.parts` check, not after: a finalize that already
+				// succeeded removed that directory, so a client polling for its
+				// result would otherwise be told its stored file's session was gone.
+				if (replayFinalize(res, relPath, "chunked upload")) return;
 				if (uploadLocks.has(relPath)) {
 					res.status(409).json({ detail: "upload busy, retry shortly" });
 					return;
 				}
-				uploadLocks.set(relPath, "finalizing");
+				if (!existsSync(parts)) {
+					res.status(410).json({ detail: "upload session gone" });
+					return;
+				}
 
 				const received = new Set(receivedIndices(parts, meta.n));
 				const missing: number[] = [];
@@ -1246,38 +1558,23 @@ export function filesRouter(state: AppState): Router {
 					return;
 				}
 
-				work = `${join(storageRoot(), relPath)}.part`;
-				const out = createWriteStream(work);
-				try {
-					for (let i = 0; i < meta.n; i++) {
-						const chunkPath = join(parts, String(i));
-						await new Promise<void>((resolve, reject) => {
-							const rs = createReadStream(chunkPath);
-							rs.on("error", reject);
-							rs.on("end", resolve);
-							rs.pipe(out, { end: false });
-						});
-					}
-				} catch (err) {
-					out.destroy();
-					// The parts dir vanished mid-read — almost always a concurrent abort
-					// won the race despite the lock above (e.g. an abort that slipped in
-					// between the existsSync check and the lock being set). Report it as
-					// a clean, expected failure rather than a 500.
-					if (!existsSync(parts)) {
-						res.status(410).json({ detail: "upload session gone" });
-						return;
-					}
-					throw err;
+				// Chunks were written straight to their offsets, so the assembly is
+				// already complete and this is a stat, not a copy. A session staged
+				// before that change still needs concatenating first.
+				const work = assemblyPath(relPath);
+				let plainHashes: FileHashes | undefined;
+				if (isLegacyPartsLayout(parts, meta.n)) {
+					plainHashes = await assembleChunks(parts, work, meta.n);
 				}
-				await new Promise<void>((resolve) => out.end(resolve));
-				const stored = statSync(work).size;
+				const stored = existsSync(work) ? statSync(work).size : -1;
 				if (stored !== meta.total) {
-					unlinkSync(work);
 					res.status(400).json({ detail: "assembled size mismatch" });
 					return;
 				}
 
+				// Everything above is cheap and gives the client an immediate,
+				// actionable answer. Everything below is the unconditional
+				// per-byte work, and runs detached — see startFinalize.
 				let directory: DirectoryRow | null = null;
 				if (meta.dir !== null) {
 					directory =
@@ -1285,12 +1582,10 @@ export function filesRouter(state: AppState): Router {
 							$id: meta.dir,
 						}) ?? null;
 					if (!directory) {
-						unlinkSync(work);
 						res.status(404).json({ detail: "directory not found" });
 						return;
 					}
 					if (!canEditDirectory(state, directory.id, user)) {
-						unlinkSync(work);
 						res.status(403).json({ detail: "not your directory" });
 						return;
 					}
@@ -1299,50 +1594,45 @@ export function filesRouter(state: AppState): Router {
 				const perm = ensurePermissions(db, user.id, {
 					master: user.role === "master",
 				});
-				const result = await finalizeStoredFile({
-					state,
-					req,
-					user,
-					perm,
-					directory,
-					clientCiphertext: true,
-					workPath: work,
-					relPath,
-					stored,
-					contentType: meta.ct,
-					encryptionMode: meta.enc,
-					compress: meta.cmp,
-					randomizeFilename: meta.rnd,
-					originalFilename: meta.fn,
-					isPermanent: meta.perm,
-					tempDays: meta.td,
-					deleteIfIdleDays: meta.did,
-					archiveAfterIdleDays: meta.aaid,
-					autoUnarchiveOnDownload: meta.auod,
-					maxUses: meta.mu,
-					expiresInSeconds: meta.eis,
+				// Read while the socket is still up — see FinalizeOpts.requestOrigin.
+				const requestOrigin = {
+					ip: clientIp(state, req),
+					baseUrl: `${req.protocol}://${req.get("host")}`,
+				};
+				startFinalize(res, relPath, "chunked upload", async () => {
+					const result = await finalizeStoredFile({
+						state,
+						req,
+						user,
+						perm,
+						directory,
+						requestOrigin,
+						clientCiphertext: true,
+						workPath: work,
+						relPath,
+						stored,
+						plainHashes,
+						contentType: meta.ct,
+						encryptionMode: meta.enc,
+						compress: meta.cmp,
+						randomizeFilename: meta.rnd,
+						originalFilename: meta.fn,
+						isPermanent: meta.perm,
+						tempDays: meta.td,
+						deleteIfIdleDays: meta.did,
+						archiveAfterIdleDays: meta.aaid,
+						autoUnarchiveOnDownload: meta.auod,
+						maxUses: meta.mu,
+						expiresInSeconds: meta.eis,
+					});
+					await rm(parts, { recursive: true, force: true });
+					log.info(
+						`chunked upload finalized user_id=${user.id} total_bytes=${meta.total} chunks=${meta.n}`,
+					);
+					return result;
 				});
-				await rm(parts, { recursive: true, force: true });
-				log.info(
-					`chunked upload finalized user_id=${user.id} total_bytes=${meta.total} chunks=${meta.n}`,
-				);
-				res.json(result);
 			} catch (err) {
-				// Never leave a partially-assembled `.part` file behind on failure —
-				// that debris counts toward real disk usage but never becomes a
-				// `content_blobs` row, so it silently inflates disk use past what
-				// /api/files/usage reports until the (up to 12h-delayed) stale-part
-				// sweep catches it.
-				if (work) {
-					try {
-						unlinkSync(work);
-					} catch {
-						// best-effort
-					}
-				}
 				respondError(res, err);
-			} finally {
-				if (relPath) uploadLocks.delete(relPath);
 			}
 		}),
 	);
@@ -1356,6 +1646,13 @@ export function filesRouter(state: AppState): Router {
 				String(req.query.upload_id ?? ""),
 				user,
 			);
+			// An upload that already finalized is a stored file, not a session to
+			// throw away — an abort fired after a finalize the client lost track of
+			// must not read as "the upload never happened".
+			if (finalizeSucceeded(meta.rel)) {
+				res.status(409).json({ detail: "upload already finalized" });
+				return;
+			}
 			relPath = meta.rel;
 			if (uploadLocks.get(relPath) === "finalizing") {
 				res.status(409).json({ detail: "finalize in progress, retry shortly" });
