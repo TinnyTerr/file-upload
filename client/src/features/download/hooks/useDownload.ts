@@ -17,6 +17,8 @@ export function useDownload(
 	slug: string,
 	filename: string,
 	mode: EncryptionMode,
+	/** Only a hint: it decides whether to attempt a ranged chunked transfer. */
+	sizeBytes?: number,
 ) {
 	const [status, setStatus] = useState<DownloadStatus>("idle");
 	const [percent, setPercent] = useState(0);
@@ -58,9 +60,10 @@ export function useDownload(
 				const keyBytes = keys.sealKey ?? base64UrlToBytes(keys.clientKey!);
 				setStatus("downloading");
 				setPercent(0);
-				const cipher = await publicService.fetchRaw(slug, (loaded, total) =>
-					setPercent(total ? Math.round((loaded / total) * 100) : 0),
-				);
+				const cipher = await publicService.fetchRawChunked(slug, {
+					sizeBytes,
+					onProgress: (p) => setPercent(p.percent),
+				});
 				setStatus("decrypting");
 				setPercent(0);
 				const plain = await decryptBlob(cipher, keyBytes, setPercent);
@@ -74,7 +77,7 @@ export function useDownload(
 				toast.error(msg);
 			}
 		},
-		[slug, filename, mode],
+		[slug, filename, mode, sizeBytes],
 	);
 
 	return { download, status, percent, error };

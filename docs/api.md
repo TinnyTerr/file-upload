@@ -756,6 +756,38 @@ await new Promise((resolve, reject) => {
 });
 ```
 
+#### Range requests
+
+Files stored without a transform — no server-side encryption, no compression,
+not archived — are served with `Accept-Ranges: bytes` and answer a `Range`
+header with a `206` and a `Content-Range`. That is what makes a resumed
+download, or a parallel multi-connection one, possible; the web client uses it
+for anything over 16 MiB.
+
+```bash
+# One chunk of a parallel download
+curl -H "Range: bytes=0-8388607" -o part0 "{{BASE_URL}}/api/file/ab12cd34/raw"
+```
+
+Two rules go with it:
+
+- **A download costs one use, not one per request.** Only the request covering
+  byte zero (or one with no `Range` at all) spends a link use, stamps
+  `last_downloaded_at` and writes an audit entry. Every other range is a
+  continuation of a transfer already accounted for.
+- **A link with `max_uses` set serves no ranges.** It advertises no
+  `Accept-Ranges`, ignores the header and returns `200` with the whole body,
+  because its budget is enforced per request and there is no way to tell one
+  chunked download from several whole ones. Plan for a `200` answer to a `Range`
+  request: it is the complete file, and the same thing you get for a
+  server-encrypted, compressed or archived file, which has to be reproduced from
+  byte zero.
+
+An unsatisfiable range answers `416` with `Content-Range: bytes */<size>`. The
+size ranges are measured against is the size **as stored** — for a `client` or
+`sealed` file that is the ciphertext container, which is what you are
+downloading.
+
 ### GET /api/file/{slug}/preview — Inline preview
 
 Public. Serves the bytes for inline display — images, video, audio, PDFs and

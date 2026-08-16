@@ -37,7 +37,7 @@ export function downloadMember(member: PublicDirMember, keys: FolderKeys) {
 		}
 		const bytes = key.bytes;
 		return publicService
-			.fetchRaw(member.slug)
+			.fetchRawChunked(member.slug, { sizeBytes: member.size_bytes })
 			.then((cipher) => decryptBlob(cipher, bytes))
 			.then((plain) => saveBlob(plain, member.filename))
 			.catch((e) =>
@@ -91,7 +91,10 @@ export function useFolderZip(slug: string, keys: FolderKeys) {
 			try {
 				const entries: { name: string; data: Uint8Array }[] = [];
 				for (let i = 0; i < args.members.length; i++) {
-					const cipher = await publicService.fetchRaw(args.members[i].slug);
+					const cipher = await publicService.fetchRawChunked(
+						args.members[i].slug,
+						{ sizeBytes: args.members[i].size_bytes },
+					);
 					const plain = await decryptBlob(cipher, bytes);
 					entries.push({
 						name: args.members[i].filename,

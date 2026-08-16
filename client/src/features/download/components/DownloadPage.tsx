@@ -45,6 +45,7 @@ export function DownloadPage() {
 		slug,
 		info?.filename ?? "download",
 		info?.encryption_mode ?? "none",
+		info?.size_bytes,
 	);
 	const [hashAlgo, setHashAlgo] = useState<string>("");
 	// Seal & Forget with a password: the key is rebuilt here from the password

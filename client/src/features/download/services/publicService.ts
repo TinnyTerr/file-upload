@@ -1,5 +1,11 @@
 import { api, apiPath } from "@/config/api";
 import type { EncryptionMode } from "@/features/files/types";
+import {
+	CHUNKED_DOWNLOAD_THRESHOLD,
+	type DownloadProgress,
+	downloadErrorMessage,
+	rangedDownload,
+} from "../lib/downloadCore";
 
 export interface UploaderInfo {
 	username: string;
@@ -32,7 +38,39 @@ export interface PublicFileInfo {
 export const publicService = {
 	fileInfo: (slug: string) => api.get<PublicFileInfo>(`/file/${slug}/info`),
 
-	/** Fetch raw (possibly ciphertext) bytes as a Blob, with progress. */
+	/**
+	 * Fetch raw (possibly ciphertext) bytes as a Blob.
+	 *
+	 * Anything big enough to be worth it goes through the ranged chunk pool
+	 * (`lib/downloadCore.ts`), which degrades to a single stream by itself when
+	 * the server answers 200 instead of 206 — so this needs no knowledge of the
+	 * link's use budget or the blob's storage form. `sizeBytes` is only the hint
+	 * that decides whether to try; the real length comes off `Content-Range`.
+	 */
+	fetchRawChunked: (
+		slug: string,
+		opts: {
+			sizeBytes?: number;
+			onProgress?: (p: DownloadProgress) => void;
+			signal?: AbortSignal;
+		} = {},
+	): Promise<Blob> => {
+		if ((opts.sizeBytes ?? 0) < CHUNKED_DOWNLOAD_THRESHOLD) {
+			return publicService.fetchRaw(slug, (loaded, total) =>
+				opts.onProgress?.({
+					loaded,
+					total,
+					percent: total ? Math.round((loaded / total) * 100) : 0,
+				}),
+			);
+		}
+		return rangedDownload(apiPath(`/file/${slug}/raw`), {
+			onProgress: opts.onProgress,
+			signal: opts.signal,
+		});
+	},
+
+	/** Fetch raw bytes over a single connection, with progress. */
 	fetchRaw: async (
 		slug: string,
 		onProgress?: (loaded: number, total: number) => void,
@@ -40,13 +78,7 @@ export const publicService = {
 		const res = await fetch(apiPath(`/file/${slug}/raw`), {
 			credentials: "same-origin",
 		});
-		if (!res.ok) {
-			const msg =
-				res.status === 404
-					? "Link not found, expired, or exhausted."
-					: `Download failed (${res.status})`;
-			throw new Error(msg);
-		}
+		if (!res.ok) throw new Error(downloadErrorMessage(res.status));
 		const total = Number(res.headers.get("Content-Length") ?? 0);
 		if (!res.body || !onProgress) return res.blob();
 

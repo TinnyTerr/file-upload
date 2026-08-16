@@ -94,6 +94,43 @@ function streamRange(
 	stream.pipe(res);
 }
 
+/**
+ * Whether a `Range` header asks for the *start* of the file.
+ *
+ * `/raw` charges the link one use per download, and a chunked or resumed
+ * download is many requests for one download. The request covering byte zero is
+ * the one that pays: every other range is a continuation of a transfer that has
+ * already been accounted for, so it consumes no use, writes no audit row and
+ * doesn't re-stamp `last_downloaded_at`.
+ *
+ * This is only ever consulted for a link with no `max_uses` (see
+ * `rangesAllowed`), where `use_count` is a download counter rather than a
+ * budget -- so the worst a hand-written `Range: bytes=1-` can do is under-count
+ * a stat, never spend a use it should have spent.
+ */
+function isRangeStart(header: string | undefined): boolean {
+	if (!header) return true;
+	const m = /^bytes=(\d*)-/.exec(header.trim());
+	if (!m) return true;
+	return m[1] === "" ? false : Number(m[1]) === 0;
+}
+
+/**
+ * Range is served only for links with an unlimited use budget.
+ *
+ * A limited-use link enforces its budget per request, and there is no way to
+ * tell "the six parallel chunks of one download" from "six downloads" without
+ * inventing a download session. Honouring Range there would either spend the
+ * budget six ways or -- if continuations were free -- hand out the whole file
+ * for `bytes=1-` at no cost, which is the budget gone entirely. So a
+ * limited-use link doesn't advertise `Accept-Ranges` and answers the whole body
+ * with a 200, which is what the spec says an ignored Range looks like. Same
+ * reasoning as `/preview` refusing limited-use links outright.
+ */
+function rangesAllowed(link: { max_uses: number | null }): boolean {
+	return link.max_uses === null;
+}
+
 /** Content types /preview knows how to serve inline. */
 function previewableType(contentType: string | null): boolean {
 	const ct = (contentType || "").toLowerCase();
@@ -286,20 +323,33 @@ export function publicRouter(state: AppState): Router {
 				res.status(access.status).json({ detail: access.detail });
 				return;
 			}
-			if (!consumeUse(db, req.params.slug)) {
-				res.status(404).json({ detail: "not found" });
-				return;
+			const needsDecrypt = eff.mode === "server";
+			const needsDecompress = !!(f.compressed || f.archived);
+			// A transformed blob has to be reproduced from byte zero, so Range is
+			// ignored for it below and the answer is the whole body either way --
+			// which makes such a request a download, not a continuation.
+			const servesRange =
+				rangesAllowed(link) && !needsDecrypt && !needsDecompress;
+			const rangeHeader = servesRange ? req.headers.range : undefined;
+			const continuation = !isRangeStart(rangeHeader);
+
+			// One download, one use: only the request covering byte zero pays.
+			if (!continuation) {
+				if (!consumeUse(db, req.params.slug)) {
+					res.status(404).json({ detail: "not found" });
+					return;
+				}
+				db.run("UPDATE files SET last_downloaded_at = $now WHERE id = $id", {
+					$now: nowIso(),
+					$id: f.id,
+				});
+				recordAudit(db, {
+					actor: "anonymous",
+					action: "file.downloaded",
+					target: `file:${f.id}`,
+					ip: clientIp(state, req),
+				});
 			}
-			db.run("UPDATE files SET last_downloaded_at = $now WHERE id = $id", {
-				$now: nowIso(),
-				$id: f.id,
-			});
-			recordAudit(db, {
-				actor: "anonymous",
-				action: "file.downloaded",
-				target: `file:${f.id}`,
-				ip: clientIp(state, req),
-			});
 
 			let fullPath: string;
 			try {
@@ -321,15 +371,10 @@ export function publicRouter(state: AppState): Router {
 			}
 			touchBlobAccess(db, f.blob_id);
 
-			const needsDecrypt = eff.mode === "server";
-			const needsDecompress = !!(f.compressed || f.archived);
-
 			const baseHeaders: Record<string, string> = {
 				...SECURITY_HEADERS,
 				"Content-Disposition": contentDisposition(f.original_filename),
-				...(!needsDecrypt && !needsDecompress
-					? { "Accept-Ranges": "bytes" }
-					: {}),
+				...(servesRange ? { "Accept-Ranges": "bytes" } : {}),
 			};
 
 			if (needsDecrypt) {
@@ -427,7 +472,6 @@ export function publicRouter(state: AppState): Router {
 			}
 
 			const fileSize = f.stored_size_bytes;
-			const rangeHeader = req.headers.range;
 			if (rangeHeader) {
 				const parsed = parseRange(rangeHeader, fileSize);
 				if (!parsed) {
