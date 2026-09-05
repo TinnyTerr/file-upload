@@ -26,11 +26,7 @@ import { getLogger, queryBackendLogs } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
 import { requireActiveUser, requireMaster } from "../middleware/deps.ts";
-import {
-	ensurePermissions,
-	getPermissions,
-	hasPermission,
-} from "../permissions.ts";
+import { ensurePermissions, hasPermission } from "../permissions.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import {
 	allocatedQuotaBytes,
@@ -39,7 +35,6 @@ import {
 	ensureStorageSettings,
 	setGlobalStorageCap,
 	usedStorageBytes,
-	usedStorageBytesForUser,
 } from "../storage/accounting.ts";
 import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
 import { deleteThumbnail } from "../storage/thumbnail.ts";
@@ -89,33 +84,43 @@ function storageDetails(db: Db) {
 	const allocated = allocatedQuotaBytes(db);
 
 	const users = db.all<UserRow>("SELECT * FROM users ORDER BY created_at ASC");
+	// One grouped query per figure for every user, not five queries per user.
+	const groupBy = (sql: string): Map<number, number> =>
+		new Map(
+			db.all<{ k: number; n: number | null }>(sql).map((r) => [r.k, r.n ?? 0]),
+		);
+	const quotaByUser = new Map(
+		db
+			.all<{ user_id: number; quota_bytes: number }>(
+				"SELECT user_id, quota_bytes FROM permissions",
+			)
+			.map((r) => [r.user_id, r.quota_bytes]),
+	);
+	const usedByUser = groupBy(
+		"SELECT owner_id AS k, SUM(size_bytes) AS n FROM files GROUP BY owner_id",
+	);
+	const filesByUser = groupBy(
+		"SELECT owner_id AS k, COUNT(*) AS n FROM files GROUP BY owner_id",
+	);
+	const linksByUser = groupBy(
+		"SELECT f.owner_id AS k, COUNT(*) AS n FROM links l JOIN files f ON l.file_id = f.id GROUP BY f.owner_id",
+	);
+	const keysByUser = groupBy(
+		"SELECT owner_id AS k, COUNT(*) AS n FROM api_keys GROUP BY owner_id",
+	);
 	const userRows = users.map((u) => {
-		const perm = getPermissions(db, u.id);
-		const userUsed = usedStorageBytesForUser(db, u.id);
-		const linkCount =
-			db.get<CountRow>(
-				"SELECT COUNT(*) as n FROM links l JOIN files f ON l.file_id = f.id WHERE f.owner_id = $id",
-				{ $id: u.id },
-			)?.n ?? 0;
-		const fileCount =
-			db.get<CountRow>("SELECT COUNT(*) as n FROM files WHERE owner_id = $id", {
-				$id: u.id,
-			})?.n ?? 0;
-		const apiKeyCount =
-			db.get<CountRow>(
-				"SELECT COUNT(*) as n FROM api_keys WHERE owner_id = $id",
-				{ $id: u.id },
-			)?.n ?? 0;
+		const userUsed = usedByUser.get(u.id) ?? 0;
+		const quota = quotaByUser.get(u.id) ?? null;
 		return {
 			id: u.id,
 			username: u.username,
 			role: u.role,
 			used_bytes: userUsed,
-			quota_bytes: perm ? perm.quota_bytes : null,
-			quota_percent: pct(userUsed, perm ? perm.quota_bytes : null),
-			file_count: fileCount,
-			link_count: linkCount,
-			api_key_count: apiKeyCount,
+			quota_bytes: quota,
+			quota_percent: pct(userUsed, quota),
+			file_count: filesByUser.get(u.id) ?? 0,
+			link_count: linksByUser.get(u.id) ?? 0,
+			api_key_count: keysByUser.get(u.id) ?? 0,
 		};
 	});
 
@@ -126,28 +131,49 @@ function storageDetails(db: Db) {
 		lifecycleCounts[row.lifecycle_state] = row.n;
 	}
 
-	const contentTypeCounts = db
-		.all<{
-			content_type: string | null;
-			n: number;
-			stored: number | null;
-			size: number | null;
-		}>(
-			`SELECT content_type, COUNT(*) as n, SUM(stored_size_bytes) as stored, SUM(size_bytes) as size
-       FROM files GROUP BY content_type ORDER BY n DESC`,
-		)
-		.map((r) => ({
-			content_type: r.content_type || "application/octet-stream",
-			count: r.n,
-			stored_bytes: r.stored ?? 0,
-			size_bytes: r.size ?? 0,
-		}));
+	// Read once, shaped twice: `content_type_counts` (a ranked list) and
+	// `file_type_counts` (a map) are the same aggregate.
+	const typeRows = db.all<{
+		content_type: string | null;
+		n: number;
+		stored: number | null;
+		size: number | null;
+	}>(
+		`SELECT content_type, COUNT(*) as n, SUM(stored_size_bytes) as stored, SUM(size_bytes) as size
+     FROM files GROUP BY content_type ORDER BY n DESC`,
+	);
+	const contentTypeCounts = typeRows.map((r) => ({
+		content_type: r.content_type || "application/octet-stream",
+		count: r.n,
+		stored_bytes: r.stored ?? 0,
+		size_bytes: r.size ?? 0,
+	}));
 
+	// The same four buckets `linkStatus` assigns, computed in SQL rather than
+	// by loading every link row into memory.
 	const now = nowIso();
-	const linkStatusCounts = { active: 0, inactive: 0, expired: 0, used_up: 0 };
-	for (const link of db.all<LinkRow>("SELECT * FROM links")) {
-		linkStatusCounts[linkStatus(link, now)] += 1;
-	}
+	const linkBuckets = db.get<{
+		active: number | null;
+		inactive: number | null;
+		expired: number | null;
+		used_up: number | null;
+	}>(
+		`SELECT
+       SUM(active = 0) AS inactive,
+       SUM(active = 1 AND expires_at IS NOT NULL AND expires_at <= $now) AS expired,
+       SUM(active = 1 AND (expires_at IS NULL OR expires_at > $now)
+           AND max_uses IS NOT NULL AND use_count >= max_uses) AS used_up,
+       SUM(active = 1 AND (expires_at IS NULL OR expires_at > $now)
+           AND (max_uses IS NULL OR use_count < max_uses)) AS active
+     FROM links`,
+		{ $now: now },
+	);
+	const linkStatusCounts = {
+		active: linkBuckets?.active ?? 0,
+		inactive: linkBuckets?.inactive ?? 0,
+		expired: linkBuckets?.expired ?? 0,
+		used_up: linkBuckets?.used_up ?? 0,
+	};
 
 	const apiKeyStatusCounts = {
 		active:
@@ -222,14 +248,7 @@ function storageDetails(db: Db) {
 		string,
 		{ count: number; bytes: number; stored_bytes: number }
 	> = {};
-	for (const row of db.all<{
-		content_type: string | null;
-		n: number;
-		size: number | null;
-		stored: number | null;
-	}>(
-		"SELECT content_type, COUNT(*) as n, SUM(size_bytes) as size, SUM(stored_size_bytes) as stored FROM files GROUP BY content_type",
-	)) {
+	for (const row of typeRows) {
 		fileTypeCounts[row.content_type || "application/octet-stream"] = {
 			count: row.n,
 			bytes: row.size ?? 0,
