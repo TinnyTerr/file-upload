@@ -348,13 +348,52 @@ function bulkActionPermission(action: string): string {
 	return flag;
 }
 
-function requireBulkPermission(db: Db, action: string, user: UserRow): void {
-	if (user.role === "master") return;
+/**
+ * Actions whose gating flag is an ordinary, default-on user capability. Holding
+ * `can_delete_links` means "may delete *your* links", not everyone's -- so for
+ * a non-master these are pinned to the caller's own rows unless they also hold
+ * `can_manage_storage`, the flag that actually means "other people's data".
+ * Without this, `can_view_admin` alone let a user archive every file on the
+ * server. `can_manage_api_keys` / `can_manage_storage` are admin-grade (default
+ * off, granted deliberately) and keep their system-wide reach.
+ */
+const OWNER_SCOPED_ACTIONS = new Set([
+	"delete_inactive_links",
+	"archive_files",
+	"unarchive_files",
+]);
+
+/** Checks the action flag and returns the `owner_id` the candidate query must
+ * use: the caller's own id when the action is owner-scoped for them, else the
+ * one they asked for. */
+function requireBulkPermission(
+	db: Db,
+	action: string,
+	user: UserRow,
+	requestedOwnerId: number | null,
+): number | null {
+	if (user.role === "master") return requestedOwnerId;
 	const flag = bulkActionPermission(action);
 	const perm = ensurePermissions(db, user.id, { master: false });
 	if (!perm.can_view_admin || !hasPermission(perm, flag)) {
 		throw new HttpError(403, "permission denied");
 	}
+	if (hasPermission(perm, "can_manage_storage")) return requestedOwnerId;
+	if (action === "run_cleanup_jobs") {
+		// The sweeps touch every owner's rows; there is no per-owner form.
+		throw new HttpError(
+			403,
+			"running cleanup jobs requires can_manage_storage",
+		);
+	}
+	if (!OWNER_SCOPED_ACTIONS.has(action)) return requestedOwnerId;
+	if (requestedOwnerId !== null && requestedOwnerId !== user.id) {
+		throw new HttpError(
+			403,
+			"bulk actions on other users' data require can_manage_storage",
+		);
+	}
+	return user.id;
 }
 
 function dedupeIds(ids: number[]): number[] {
@@ -759,9 +798,15 @@ export function adminRouter(state: AppState): Router {
 			const ids = dedupeIds(
 				Array.isArray(body.ids) ? body.ids.map(Number) : [],
 			);
-			const ownerId = body.owner_id != null ? Number(body.owner_id) : null;
+			const requestedOwnerId =
+				body.owner_id != null ? Number(body.owner_id) : null;
 			try {
-				requireBulkPermission(db, action, user);
+				const ownerId = requireBulkPermission(
+					db,
+					action,
+					user,
+					requestedOwnerId,
+				);
 				const candidates = bulkCandidates(db, action, ids, ownerId);
 				log.info(
 					`bulk preview action=${action} actor_id=${user.id} candidate_count=${candidates.length} explicit_ids=${ids.length} owner_id=${ownerId}`,
@@ -785,12 +830,14 @@ export function adminRouter(state: AppState): Router {
 			const ids = dedupeIds(
 				Array.isArray(body.ids) ? body.ids.map(Number) : [],
 			);
-			const ownerId = body.owner_id != null ? Number(body.owner_id) : null;
+			const requestedOwnerId =
+				body.owner_id != null ? Number(body.owner_id) : null;
 			const confirm = typeof body.confirm === "string" ? body.confirm : null;
 
 			let candidates: BulkCandidate[];
+			let ownerId: number | null;
 			try {
-				requireBulkPermission(db, action, user);
+				ownerId = requireBulkPermission(db, action, user, requestedOwnerId);
 				candidates = bulkCandidates(db, action, ids, ownerId);
 			} catch (err) {
 				respondError(res, err);

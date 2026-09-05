@@ -458,7 +458,7 @@ Adding a flag means touching **all** of: `db/schema.sql`, an `ensureColumn` back
 
 - Gated by `requireMaster`, except bulk actions, which also accept a non-master holding `can_view_admin` plus the specific flag for that action (`BULK_ACTION_PERMISSIONS`).
 - Files and keys tabs group by owner username, alphabetically.
-- Bulk actions require an exact `CONFIRM <n>` phrase matching the previewed candidate count. **A bulk action with no ids and no `owner_id` targets every matching row in the system** — that's intentional, and the confirmation phrase is the only guard.
+- Bulk actions require an exact `CONFIRM <n>` phrase matching the previewed candidate count. **A bulk action with no ids and no `owner_id` targets every matching row in the system** — that's intentional, and the confirmation phrase is the only guard — **for masters and holders of `can_manage_storage`.** Any other caller is pinned to their own rows (`admin.ts::requireBulkPermission` returns the `owner_id` the query must use): `archive_files`, `unarchive_files` and `delete_inactive_links` are gated by `can_manage_lifecycle` / `can_delete_links`, which are default-on user capabilities, so without the pin `can_view_admin` alone could archive every file on the server. `run_cleanup_jobs` has no per-owner form and is refused outright.
 - API keys are hard-deleted, never soft-deleted, so they leave the panel immediately.
 - `GET /api/audit` only verifies the hash chain when asked (`?verify=1`); it's an O(all rows) rehash, so it isn't run on every page load.
 
