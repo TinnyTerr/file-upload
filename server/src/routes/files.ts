@@ -1278,9 +1278,25 @@ export function filesRouter(state: AppState): Router {
 			});
 			return;
 		}
+		// The exact size/quota checks re-run once every field has arrived (the
+		// file part may precede the fields), but the stream cap comes from the
+		// caller's real limits up front: a body far over quota is cut off at
+		// the limit instead of being written to disk in full and refused after.
+		const perm = ensurePermissions(db, user.id, {
+			master: user.role === "master",
+		});
+		const headroom = Math.max(0, perm.quota_bytes - usedBytes(state, user.id));
+		const streamCap = Math.max(
+			1,
+			Math.min(
+				ABSOLUTE_UPLOAD_CEILING,
+				perm.max_file_bytes + REQUEST_OVERHEAD_ALLOWANCE,
+				headroom + REQUEST_OVERHEAD_ALLOWANCE,
+			),
+		);
 		const bb = busboy({
 			headers: req.headers,
-			limits: { fileSize: ABSOLUTE_UPLOAD_CEILING },
+			limits: { fileSize: streamCap },
 		});
 		const fields: Record<string, string> = {};
 		let handled = false;
