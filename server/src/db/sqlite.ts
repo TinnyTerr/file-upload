@@ -47,9 +47,23 @@ export function createSqliteDb(path: string): Db {
 	}
 	const sqlite = new Database(path, { create: true });
 	sqlite.exec("PRAGMA foreign_keys = ON;");
+	// A second writer (twelve interval jobs, the cluster pollers, a burst of
+	// downloads stamping last_downloaded_at) used to get an immediate
+	// SQLITE_BUSY; now it waits up to 5 s for the lock instead.
+	sqlite.exec("PRAGMA busy_timeout = 5000;");
 	if (path !== ":memory:") {
 		sqlite.exec("PRAGMA journal_mode = WAL;");
+		// The standard WAL pairing: durable against process crash, and an OS
+		// crash can only lose the last transactions, never corrupt the file.
+		// FULL (the default) fsyncs every audit row, session touch and
+		// download stamp.
+		sqlite.exec("PRAGMA synchronous = NORMAL;");
+		// 64 MiB page cache (negative = KiB), and let reads go through the
+		// page cache via mmap instead of copying through read(2).
+		sqlite.exec("PRAGMA cache_size = -65536;");
+		sqlite.exec("PRAGMA mmap_size = 268435456;");
 	}
+	sqlite.exec("PRAGMA temp_store = MEMORY;");
 
 	// Tables first, then the additive column backfills, then indexes. An index
 	// declared over a column that only exists via ensureColumn (e.g.
