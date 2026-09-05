@@ -38,6 +38,11 @@ export function authRouter(state: AppState): Router {
 		ip: string,
 		forceMfaEnrollment: boolean,
 	): void {
+		// The failure counter clears only once the *whole* ceremony succeeds.
+		// Clearing it at the password step let an attacker holding a leaked
+		// password burn the ticket's attempts, log in again to reset, and loop --
+		// which made the second factor guessable at no cost.
+		lockout.resetSuccess(db, user.username);
 		const { cookieValue, csrfToken } = sessionManager.create(db, user.id, {
 			ip,
 			userAgent: req.header("user-agent") ?? null,
@@ -94,8 +99,6 @@ export function authRouter(state: AppState): Router {
 				res.status(401).json({ detail: "invalid credentials" });
 				return;
 			}
-
-			lockout.resetSuccess(db, username);
 
 			const credRows = credentials.listForUser(db, user.id);
 			const mfaEnforced = mfaEnforcedFor(db, user);
@@ -160,10 +163,24 @@ export function authRouter(state: AppState): Router {
 				res.status(403).json({ detail: "a passkey is required to sign in" });
 				return;
 			}
+			// A 6-digit code is guessable in a way a password is not, so this
+			// step is throttled on exactly the same counters as the password
+			// step. The ticket's own attempt cap is not enough: a fresh ticket
+			// costs one (correct) password.
+			if (!lockout.checkLoginAllowed(db, user.username, ip)) {
+				recordAudit(db, {
+					actor: user.username,
+					action: "login.locked_out",
+					ip,
+				});
+				res.status(429).json({ detail: "too many attempts, try later" });
+				return;
+			}
 			const totpCreds = credentials
 				.listForUser(db, userId)
 				.filter((c) => c.kind === "totp" && c.secret_blob);
 			const masterKey = getMasterKey(state.settings);
+			const step = credentials.totpStep();
 			const matched = totpCreds.find((c) => {
 				try {
 					const secret = openSecret(
@@ -175,8 +192,17 @@ export function authRouter(state: AppState): Router {
 					return false;
 				}
 			});
+			// A code is single-use. One that verifies but belongs to a step this
+			// credential has already accepted is a replay, and counts as a
+			// failure like any other wrong code.
+			const replayed =
+				!!matched &&
+				matched.totp_last_step !== null &&
+				step <= matched.totp_last_step;
 
-			if (!matched) {
+			if (!matched || replayed) {
+				lockout.recordFailure(db, user.username, "username");
+				lockout.recordFailure(db, ip, "ip");
 				recordAudit(db, {
 					actor: user.username,
 					action: "login.mfa_failure",
@@ -187,7 +213,7 @@ export function authRouter(state: AppState): Router {
 			}
 
 			state.secondFactorTickets.destroy(ticket);
-			credentials.touchLastUsed(db, matched.id);
+			credentials.markTotpUsed(db, matched.id, step);
 			if (typeof connId === "string" && connId) {
 				state.loginChallenges.transition(connId, { state: "done" });
 			}

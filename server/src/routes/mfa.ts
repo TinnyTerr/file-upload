@@ -95,6 +95,9 @@ export function mfaRouter(state: AppState): Router {
 				encrypted,
 				typeof label === "string" && label ? label : "Authenticator app",
 			);
+			// The confirmation code was just spent; it must not also be the first
+			// login code.
+			credentials.markTotpUsed(db, id, credentials.totpStep());
 			const enrolledUser = db.get<UserRow>(
 				"SELECT * FROM users WHERE id = $id",
 				{ $id: userId },

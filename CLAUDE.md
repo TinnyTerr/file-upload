@@ -289,7 +289,7 @@ The login flow is a multi-step ceremony, not a single POST:
 4. Usernameless WebAuthn login (`/api/auth/webauthn/login/start|finish`) skips step 1 entirely — the passkey identifies the user.
 5. `GET /api/auth/ws-token` mints a short-lived `conn_id` for the pre-login websocket (`/api/auth`), which pushes live state transitions during the ceremony. `conn_id` is a transport correlation id **only**, never an authorization credential.
 
-Failed logins feed `security/lockout.ts`, which counts per-username *and* per-IP within a rolling 15-minute window; only the username counter resets on success.
+Failed logins feed `security/lockout.ts`, which counts per-username *and* per-IP within a rolling 15-minute window. **The TOTP step feeds the same counters** — a 6-digit code is guessable in a way a password is not, and the ticket's own 5-attempt cap is no defence when a fresh ticket costs one correct password. The username counter resets only in `issueSession`, i.e. once the *whole* ceremony succeeds; resetting it at the password step let a leaked password buy unlimited code guesses. Accepted TOTP codes are single-use: `credentials.totp_last_step` records the 30 s step of the last accepted code and anything at or before it is refused (`credentials.ts::markTotpUsed`).
 
 ### Database
 

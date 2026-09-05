@@ -90,6 +90,26 @@ export function touchLastUsed(db: Db, credentialId: number): void {
 	});
 }
 
+/** RFC 6238 time step (30 s) for a given instant. */
+export function totpStep(nowMs: number = Date.now()): number {
+	return Math.floor(nowMs / 30_000);
+}
+
+/** Records that a TOTP code for `step` was accepted, so the same code (or an
+ * older one still inside the verifier's tolerance window) is refused from now
+ * on. Codes are single-use per RFC 6238 §5.2; without this a code read over a
+ * shoulder is good for the rest of its window. */
+export function markTotpUsed(
+	db: Db,
+	credentialId: number,
+	step: number,
+): void {
+	db.run(
+		"UPDATE credentials SET totp_last_step = $step, updated_at = $now WHERE id = $id",
+		{ $step: step, $now: nowIso(), $id: credentialId },
+	);
+}
+
 export function bumpSignCount(
 	db: Db,
 	credentialId: number,

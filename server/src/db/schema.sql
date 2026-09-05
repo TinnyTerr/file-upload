@@ -282,7 +282,11 @@ CREATE TABLE IF NOT EXISTS credentials (
   label TEXT,
   transports TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT
+  updated_at TEXT,
+  -- The 30-second TOTP step of the last code this credential accepted. A code
+  -- is single-use: anything at or before this step is refused, so a code seen
+  -- over a shoulder cannot be replayed inside its window.
+  totp_last_step INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_credentials_user_id ON credentials(user_id);
 

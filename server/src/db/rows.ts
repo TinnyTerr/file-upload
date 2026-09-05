@@ -30,6 +30,8 @@ export interface CredentialRow {
 	transports: string | null;
 	created_at: string;
 	updated_at: string | null;
+	/** Last accepted 30 s step for a TOTP credential; null until first use. */
+	totp_last_step: number | null;
 }
 
 export interface PermissionRow {

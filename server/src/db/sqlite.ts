@@ -78,6 +78,12 @@ export function createSqliteDb(path: string): Db {
 	ensureColumn(sqlite, "credentials", "transports", "transports TEXT");
 	ensureColumn(
 		sqlite,
+		"credentials",
+		"totp_last_step",
+		"totp_last_step INTEGER",
+	);
+	ensureColumn(
+		sqlite,
 		"cluster_nodes",
 		"role",
 		"role TEXT NOT NULL DEFAULT 'follower'",
