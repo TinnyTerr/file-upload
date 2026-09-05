@@ -28,7 +28,7 @@ import {
 	decryptFromDecompressed,
 	ensureBlobAvailable,
 } from "../storage/streaming.ts";
-import { getOrCreateThumbnail } from "../storage/thumbnail.ts";
+import { getOrCreateThumbnail, serveCachedJpeg } from "../storage/thumbnail.ts";
 
 const log = getLogger("app.public");
 const CHUNK = 256 * 1024;
@@ -717,14 +717,7 @@ export function publicRouter(state: AppState): Router {
 				res.status(403).json({ detail: "thumbnail unavailable" });
 				return;
 			}
-			const size = statSync(thumbPath).size;
-			res.writeHead(200, {
-				...BYTES_HEADERS,
-				"Content-Type": "image/jpeg",
-				"Content-Length": String(size),
-				"Cache-Control": "public, max-age=86400",
-			});
-			createReadStream(thumbPath, { highWaterMark: CHUNK }).pipe(res);
+			serveCachedJpeg(req, res, thumbPath, "public, max-age=86400");
 		}),
 	);
 

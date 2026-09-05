@@ -65,7 +65,7 @@ import {
 	plaintextStream,
 	statOrNull,
 } from "../storage/streaming.ts";
-import { getOrCreateThumbnail } from "../storage/thumbnail.ts";
+import { getOrCreateThumbnail, serveCachedJpeg } from "../storage/thumbnail.ts";
 
 const log = getLogger("app.routes.media");
 const CHUNK = 256 * 1024;
@@ -489,14 +489,7 @@ export function mediaRouter(state: AppState): Router {
 			if (!fullPath) throw new HttpError(404, "no thumbnail available");
 			const thumb = await getOrCreateThumbnail(f.id, fullPath, f.content_type);
 			if (!thumb) throw new HttpError(404, "no thumbnail available");
-			const size = statOrNull(thumb)?.size ?? 0;
-			res.writeHead(200, {
-				...BYTES_HEADERS,
-				"Content-Type": "image/jpeg",
-				"Content-Length": String(size),
-				"Cache-Control": "private, max-age=3600",
-			});
-			createReadStream(thumb, { highWaterMark: CHUNK }).pipe(res);
+			serveCachedJpeg(req, res, thumb, "private, max-age=3600");
 		}),
 	);
 

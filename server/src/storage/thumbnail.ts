@@ -1,7 +1,15 @@
-import { existsSync, mkdirSync, unlinkSync } from "node:fs";
+import {
+	createReadStream,
+	existsSync,
+	mkdirSync,
+	statSync,
+	unlinkSync,
+} from "node:fs";
 import { writeFile } from "node:fs/promises";
+import type { Request, Response } from "express";
 import sharp, { type Sharp } from "sharp";
 import { getLogger } from "../logging.ts";
+import { BYTES_HEADERS } from "../middleware/securityHeaders.ts";
 import { safeJoin, thumbnailRoot } from "./paths.ts";
 
 const log = getLogger("app.thumbnail");
@@ -125,6 +133,69 @@ async function generateThumbnail(
 	}
 }
 
+/** How many thumbnails may be generated at once. `inFlight` collapses
+ * concurrent requests for the *same* file; this bounds different ones -- a
+ * gallery page of sixty uncached videos was sixty ffmpeg processes and sixty
+ * sharp pipelines at the same moment. */
+const MAX_CONCURRENT_GENERATIONS = 4;
+let activeGenerations = 0;
+const generationWaiters: Array<() => void> = [];
+
+async function withGenerationSlot<T>(fn: () => Promise<T>): Promise<T> {
+	if (activeGenerations >= MAX_CONCURRENT_GENERATIONS) {
+		await new Promise<void>((resolve) => generationWaiters.push(resolve));
+	}
+	activeGenerations += 1;
+	try {
+		return await fn();
+	} finally {
+		activeGenerations -= 1;
+		generationWaiters.shift()?.();
+	}
+}
+
+/**
+ * Sends a cached JPEG with validators, answering `304` to a matching
+ * `If-None-Match` / `If-Modified-Since`. These routes bypass Express's
+ * automatic ETag by streaming, so without this every revalidation of a
+ * day-cached thumbnail re-sent the whole body.
+ */
+export function serveCachedJpeg(
+	req: Request,
+	res: Response,
+	path: string,
+	cacheControl: string,
+): void {
+	const st = statSync(path);
+	const mtimeSec = Math.floor(st.mtimeMs / 1000);
+	const etag = `"${st.size.toString(16)}-${mtimeSec.toString(16)}"`;
+	const inm = req.headers["if-none-match"];
+	const ims = req.headers["if-modified-since"];
+	const fresh = inm
+		? inm
+				.split(",")
+				.map((v) => v.trim())
+				.includes(etag)
+		: !!ims && Date.parse(ims) >= mtimeSec * 1000;
+	const validators = {
+		...BYTES_HEADERS,
+		ETag: etag,
+		"Last-Modified": new Date(mtimeSec * 1000).toUTCString(),
+		"Cache-Control": cacheControl,
+	};
+	if (fresh) {
+		res.writeHead(304, validators);
+		res.end();
+		return;
+	}
+	res.writeHead(200, {
+		...validators,
+		"Content-Type": "image/jpeg",
+		"Content-Length": String(st.size),
+	});
+	createReadStream(path, { highWaterMark: 256 * 1024 }).pipe(res);
+}
+
 /** Generates (and caches on disk) a small JPEG thumbnail for a file, resized to
  * fit within MAX_DIMENSION and re-encoded so it always clears social-preview
  * size limits. Videos get a play-button overlay burned into the extracted frame
@@ -141,11 +212,11 @@ export async function getOrCreateThumbnail(
 	const running = inFlight.get(fileId);
 	if (running) return running;
 
-	const promise = generateThumbnail(fileId, fullPath, contentType, out).finally(
-		() => {
-			inFlight.delete(fileId);
-		},
-	);
+	const promise = withGenerationSlot(() =>
+		generateThumbnail(fileId, fullPath, contentType, out),
+	).finally(() => {
+		inFlight.delete(fileId);
+	});
 	inFlight.set(fileId, promise);
 	return promise;
 }
