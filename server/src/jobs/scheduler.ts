@@ -115,16 +115,29 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 	];
 }
 
+/** Jobs whose previous tick hasn't returned. A job that overruns its interval
+ * (archive_idle compressing a backlog, a cluster sweep waiting on a slow peer)
+ * must not start a second copy of itself -- for archive_idle that would be two
+ * passes rewriting the same file at once. The tick is skipped, not queued. */
+const running = new Set<string>();
+
 async function runJob(
 	id: string,
 	run: () => void | Promise<unknown>,
 ): Promise<void> {
+	if (running.has(id)) {
+		log.warning(`scheduled job skipped, previous run still active job=${id}`);
+		return;
+	}
+	running.add(id);
 	try {
 		await run();
 	} catch (err) {
 		log.error(
 			`scheduled job failed job=${id}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
 		);
+	} finally {
+		running.delete(id);
 	}
 }
 
