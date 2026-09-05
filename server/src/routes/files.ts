@@ -876,7 +876,12 @@ export function receiveChunkAt(
 			req.destroy();
 			return;
 		}
-		out.write(chunk);
+		// Honour the write stream's backpressure: without the pause, a fast
+		// client on slow storage queues up to the whole chunk in memory.
+		if (!out.write(chunk)) {
+			req.pause();
+			out.once("drain", () => req.resume());
+		}
 	});
 	req.on("end", () => {
 		if (handled) return;
