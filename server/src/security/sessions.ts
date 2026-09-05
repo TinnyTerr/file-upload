@@ -112,6 +112,19 @@ export class SessionManager {
 		return row;
 	}
 
+	/** Drops rows past `expires_at`. `resolve` already refuses them, so this
+	 * changes nothing a client can see -- it just stops the table growing by
+	 * one row per login forever. Returns the number removed. */
+	pruneExpired(db: Db): number {
+		const now = nowIso();
+		const before = db.get<{ n: number }>(
+			"SELECT COUNT(*) AS n FROM sessions WHERE expires_at < $now",
+			{ $now: now },
+		)?.n;
+		db.run("DELETE FROM sessions WHERE expires_at < $now", { $now: now });
+		return before ?? 0;
+	}
+
 	destroy(db: Db, cookieValue: string | undefined): void {
 		if (!cookieValue) return;
 		const sid = unsign(this.secretKey, cookieValue);

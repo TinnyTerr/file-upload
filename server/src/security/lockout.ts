@@ -110,6 +110,26 @@ export class LockoutPolicy {
 		}
 	}
 
+	/** Drops counters that can no longer affect a decision: not locked, and
+	 * last failure older than the rolling window. Returns the number removed. */
+	pruneStale(db: Db): number {
+		const cutoff = new Date(
+			Date.now() - this.lockoutSeconds * 1000,
+		).toISOString();
+		const now = nowIso();
+		const stale = db.get<{ n: number }>(
+			`SELECT COUNT(*) AS n FROM login_attempts
+       WHERE updated_at < $cutoff AND (locked_until IS NULL OR locked_until < $now)`,
+			{ $cutoff: cutoff, $now: now },
+		)?.n;
+		db.run(
+			`DELETE FROM login_attempts
+       WHERE updated_at < $cutoff AND (locked_until IS NULL OR locked_until < $now)`,
+			{ $cutoff: cutoff, $now: now },
+		);
+		return stale ?? 0;
+	}
+
 	resetSuccess(db: Db, username: string): void {
 		db.run(
 			"DELETE FROM login_attempts WHERE identifier = $identifier AND identifier_type = 'username'",

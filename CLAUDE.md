@@ -570,6 +570,7 @@ decrypt rather than a join (mpv issues a Range request per seek), with
   - **Trusted on exactly the same terms as `clientIp`**: `TRUST_PROXY=cloudflare`, or `TRUST_PROXY=true` *plus* a `CF-Ray` header proving the request really passed through Cloudflare. Any client can send `CF-IPCountry`, so reading it ungated would let a visitor pick their own country.
   - Nothing trustworthy to report ⇒ the column stays NULL. It is never filled with a guess.
   - `T1` is **not** an ISO code — never render it as a flag or look it up in a country table. The client's `regionLabel` spells both specials out in words.
+- Expired rows are refused by `resolve()` and swept hourly by the `session_prune` job (`sessions.ts::pruneExpired`), which also drops inert `login_attempts` counters (`lockout.ts::pruneStale`). Neither changes anything a client can observe — it just stops the tables growing by a row per login forever.
 - Settings → Sessions tab: list active sessions, revoke one (password required), sign out everywhere.
 - `GET /api/auth/sessions`, `DELETE /api/auth/sessions/:id`, `DELETE /api/auth/sessions`.
 

@@ -69,6 +69,22 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 			intervalMs: HOUR_MS,
 			run: () => pruneOauth(db),
 		},
+		// Expired sessions are refused on resolve, so this is purely hygiene:
+		// one row per login, forever, was the alternative. Same for the
+		// lockout counters, which are inert once their window has passed.
+		{
+			id: "session_prune",
+			intervalMs: HOUR_MS,
+			run: () => {
+				const sessions = state.sessionManager.pruneExpired(db);
+				const attempts = state.lockout.pruneStale(db);
+				if (sessions || attempts) {
+					log.info(
+						`session prune removed sessions=${sessions} login_attempts=${attempts}`,
+					);
+				}
+			},
+		},
 		{
 			id: "cluster_heartbeat",
 			intervalMs: MINUTE_MS,
