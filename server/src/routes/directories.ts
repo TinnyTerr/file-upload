@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { closeSync, fstatSync, openSync, readSync, unlinkSync } from "node:fs";
+import { unlinkSync } from "node:fs";
+import { type FileHandle, open } from "node:fs/promises";
 import { ZipArchive } from "archiver";
 import type { Request, Response } from "express";
 import { Router } from "express";
@@ -380,24 +381,39 @@ function previewGroup(contentType: string, filename: string): string {
  * is vendored in server/ (only `archiver` for writing) so this is a minimal
  * hand-rolled parser -- sufficient for the preview feature's namelist/flag
  * needs, mirrors Python's zipfile.ZipFile inspection in _archive_preview. */
-function readZipManifest(
+/** The most of a zip's central directory that is read for a preview. The
+ * manifest shows the first 100 entries, so a directory bigger than this is
+ * simply truncated -- rather than allocating a multi-megabyte buffer per
+ * archive on the request path. */
+const MAX_CENTRAL_DIRECTORY_BYTES = 4 * 1024 * 1024;
+
+/** Reads a zip's central directory to list its entries. Two positioned reads
+ * (the end-of-central-directory record, then the directory itself), both
+ * through the async fs API: this runs once per archive in a public folder's
+ * preview manifest, and a folder of twenty archives used to block the event
+ * loop for all twenty in a row. */
+async function readZipManifest(
 	path: string,
-): { entries: string[]; entryCount: number; encrypted: boolean } | null {
-	let fd: number;
+): Promise<{
+	entries: string[];
+	entryCount: number;
+	encrypted: boolean;
+} | null> {
+	let fh: FileHandle;
 	try {
-		fd = openSync(path, "r");
+		fh = await open(path, "r");
 	} catch {
 		return null;
 	}
 	try {
-		const size = fstatSync(fd).size;
+		const size = (await fh.stat()).size;
 		const EOCD_SIG = 0x06054b50;
 		const MIN_EOCD = 22;
 		const MAX_COMMENT = 65535;
 		const tailLen = Math.min(size, MIN_EOCD + MAX_COMMENT);
 		if (tailLen < MIN_EOCD) return null;
 		const tail = Buffer.alloc(tailLen);
-		readSync(fd, tail, 0, tailLen, size - tailLen);
+		await fh.read(tail, 0, tailLen, size - tailLen);
 		let eocdOffset = -1;
 		for (let i = tail.length - MIN_EOCD; i >= 0; i--) {
 			if (tail.readUInt32LE(i) === EOCD_SIG) {
@@ -410,8 +426,8 @@ function readZipManifest(
 		const cdSize = tail.readUInt32LE(eocdOffset + 12);
 		const cdOffset = tail.readUInt32LE(eocdOffset + 16);
 		if (cdOffset + cdSize > size) return null; // zip64 or corrupt -- bail rather than misparse
-		const cd = Buffer.alloc(cdSize);
-		readSync(fd, cd, 0, cdSize, cdOffset);
+		const cd = Buffer.alloc(Math.min(cdSize, MAX_CENTRAL_DIRECTORY_BYTES));
+		await fh.read(cd, 0, cd.length, cdOffset);
 		const entries: string[] = [];
 		let encrypted = false;
 		let pos = 0;
@@ -422,6 +438,7 @@ function readZipManifest(
 			const nameLen = cd.readUInt16LE(pos + 28);
 			const extraLen = cd.readUInt16LE(pos + 30);
 			const commentLen = cd.readUInt16LE(pos + 32);
+			if (pos + 46 + nameLen > cd.length) break;
 			entries.push(cd.toString("utf-8", pos + 46, pos + 46 + nameLen));
 			pos += 46 + nameLen + extraLen + commentLen;
 		}
@@ -429,11 +446,14 @@ function readZipManifest(
 	} catch {
 		return null;
 	} finally {
-		closeSync(fd);
+		await fh.close();
 	}
 }
 
-function archivePreview(db: Db, f: FileRow): Record<string, unknown> {
+async function archivePreview(
+	db: Db,
+	f: FileRow,
+): Promise<Record<string, unknown>> {
 	if (
 		resolveFileEncryption(db, f).mode !== "none" ||
 		f.compressed ||
@@ -447,7 +467,7 @@ function archivePreview(db: Db, f: FileRow): Record<string, unknown> {
 	} catch {
 		return { status: "unreadable", reason: "corrupt or unsupported archive" };
 	}
-	const manifest = readZipManifest(full);
+	const manifest = await readZipManifest(full);
 	if (!manifest)
 		return { status: "unreadable", reason: "corrupt or unsupported archive" };
 	if (manifest.encrypted)
@@ -2370,56 +2390,59 @@ export function publicDirectoriesRouter(state: AppState): Router {
 		res.json({ ok: true, key_scope: keyScope(eff, `dir:${d.id}`) });
 	});
 
-	router.get("/d/:slug/preview-manifest", (req, res) => {
-		const resolved = resolveDirectory(db, req.params.slug);
-		if (!resolved) {
-			res.status(404).json({ detail: "not found" });
-			return;
-		}
-		const d = publicSubdirectory(db, resolved.directory, req.query.dir);
-		if (!d) {
-			res.status(404).json({ detail: "not found" });
-			return;
-		}
-		const groups: Record<string, Record<string, unknown>[]> = {
-			images: [],
-			videos: [],
-			audio: [],
-			text: [],
-			pdfs: [],
-			archives: [],
-			other: [],
-		};
-		for (const { file: f, link } of publicFiles(db, d.id)) {
-			const fileEff = resolveFileEncryption(db, f);
-			const row: Record<string, unknown> = {
-				id: f.id,
-				slug: link.slug,
-				filename: f.original_filename,
-				size_bytes: f.size_bytes,
-				content_type: f.content_type,
-				encryption_mode: fileEff.mode,
-				password_locked: fileEff.passwordLocked,
-				key_scope: keyScope(fileEff, `file:${f.id}`),
-				preview_url: `/file/${link.slug}/preview`,
-				download_url: `/file/${link.slug}/raw`,
+	router.get(
+		"/d/:slug/preview-manifest",
+		asyncHandler(async (req, res) => {
+			const resolved = resolveDirectory(db, req.params.slug);
+			if (!resolved) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			const d = publicSubdirectory(db, resolved.directory, req.query.dir);
+			if (!d) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			const groups: Record<string, Record<string, unknown>[]> = {
+				images: [],
+				videos: [],
+				audio: [],
+				text: [],
+				pdfs: [],
+				archives: [],
+				other: [],
 			};
-			const group = previewGroup(f.content_type, f.original_filename);
-			if (group === "archives") row.preview = archivePreview(db, f);
-			groups[group]!.push(row);
-		}
-		res.json({
-			id: d.id,
-			entry_id: resolved.directory.id,
-			title: d.title,
-			slug: d.slug,
-			breadcrumbs: publicBreadcrumbs(db, resolved.directory, d),
-			directories: publicSubdirectories(db, d),
-			encryption_mode: resolveDirectoryEncryption(db, d).mode,
-			file_count: Object.values(groups).reduce((sum, g) => sum + g.length, 0),
-			groups,
-		});
-	});
+			for (const { file: f, link } of publicFiles(db, d.id)) {
+				const fileEff = resolveFileEncryption(db, f);
+				const row: Record<string, unknown> = {
+					id: f.id,
+					slug: link.slug,
+					filename: f.original_filename,
+					size_bytes: f.size_bytes,
+					content_type: f.content_type,
+					encryption_mode: fileEff.mode,
+					password_locked: fileEff.passwordLocked,
+					key_scope: keyScope(fileEff, `file:${f.id}`),
+					preview_url: `/file/${link.slug}/preview`,
+					download_url: `/file/${link.slug}/raw`,
+				};
+				const group = previewGroup(f.content_type, f.original_filename);
+				if (group === "archives") row.preview = await archivePreview(db, f);
+				groups[group]!.push(row);
+			}
+			res.json({
+				id: d.id,
+				entry_id: resolved.directory.id,
+				title: d.title,
+				slug: d.slug,
+				breadcrumbs: publicBreadcrumbs(db, resolved.directory, d),
+				directories: publicSubdirectories(db, d),
+				encryption_mode: resolveDirectoryEncryption(db, d).mode,
+				file_count: Object.values(groups).reduce((sum, g) => sum + g.length, 0),
+				groups,
+			});
+		}),
+	);
 
 	router.post(
 		"/d/:slug/save",
