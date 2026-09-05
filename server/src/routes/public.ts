@@ -544,13 +544,20 @@ export function publicRouter(state: AppState): Router {
 				return;
 			}
 			if (eff.mode === "server") {
-				// Same gate /raw applies, including the per-slug throttle when the
-				// secret is a password. Preview consumes no link use, but a
-				// limited-use link never reaches here at all (checked above).
+				// Same gate /raw applies. The guess counter is keyed on the key
+				// scope, never the link slug: /d/:slug/info publishes every member
+				// file's slug, so a per-slug counter would hand out one fresh
+				// budget per member against the same folder password. Preview
+				// consumes no link use, but a limited-use link never reaches here
+				// at all (checked above).
 				const ek = typeof req.query.ek === "string" ? req.query.ek : null;
-				const access = checkLinkAccess(state, req.params.slug, eff, ek, {
-					allowMissingSecret: true,
-				});
+				const access = checkLinkAccess(
+					state,
+					keyScopeOf(eff, `file:${f.id}`),
+					eff,
+					ek,
+					{ allowMissingSecret: true },
+				);
 				if (!access.ok) {
 					res.status(access.status).json({ detail: access.detail });
 					return;
