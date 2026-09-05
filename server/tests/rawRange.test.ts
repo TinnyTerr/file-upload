@@ -24,7 +24,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-	process.env.FILEUPLOAD_STORAGE = undefined;
+	delete process.env.FILEUPLOAD_STORAGE;
 	rmSync(storageDir, { recursive: true, force: true });
 });
 

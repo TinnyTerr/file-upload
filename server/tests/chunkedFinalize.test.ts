@@ -24,8 +24,8 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-	process.env.FILEUPLOAD_STORAGE = undefined;
-	process.env.FILEUPLOAD_CHUNK_SIZE = undefined;
+	delete process.env.FILEUPLOAD_STORAGE;
+	delete process.env.FILEUPLOAD_CHUNK_SIZE;
 	rmSync(storageDir, { recursive: true, force: true });
 });
 
