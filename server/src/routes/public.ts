@@ -16,6 +16,7 @@ import { consumeUse, resolveActiveLink } from "../links.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp } from "../middleware/auth.ts";
+import { BYTES_HEADERS } from "../middleware/securityHeaders.ts";
 import { checkLinkAccess } from "../security/accessLock.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
 import { escapeHtml, sendSpa } from "../spa.ts";
@@ -32,24 +33,10 @@ import { getOrCreateThumbnail } from "../storage/thumbnail.ts";
 const log = getLogger("app.public");
 const CHUNK = 256 * 1024;
 
-const CSP =
-	"default-src 'self'; " +
-	"script-src 'self'; " +
-	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-	"font-src 'self' https://fonts.gstatic.com; " +
-	"img-src 'self' data: blob:; " +
-	"media-src 'self' blob:; " +
-	"frame-src 'self'; " +
-	"worker-src 'self' blob:; " +
-	"connect-src 'self'; " +
-	"object-src 'none'";
-const SECURITY_HEADERS: Record<string, string> = {
-	"X-Content-Type-Options": "nosniff",
-	"Referrer-Policy": "no-referrer",
-	"Content-Security-Policy": CSP,
-};
-
-function contentDisposition(filename: string): string {
+function contentDisposition(
+	filename: string,
+	type: "attachment" | "inline" = "attachment",
+): string {
 	const cleaned = [...filename]
 		.filter((c) => c.codePointAt(0)! >= 0x20)
 		.join("");
@@ -59,7 +46,7 @@ function contentDisposition(filename: string): string {
 		.replace(/"/g, "_")
 		.replace(/\\/g, "_");
 	const encoded = encodeURIComponent(cleaned);
-	return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encoded}`;
+	return `${type}; filename="${asciiFallback}"; filename*=UTF-8''${encoded}`;
 }
 
 function parseRange(header: string, fileSize: number): [number, number] | null {
@@ -372,7 +359,7 @@ export function publicRouter(state: AppState): Router {
 			touchBlobAccess(db, f.blob_id);
 
 			const baseHeaders: Record<string, string> = {
-				...SECURITY_HEADERS,
+				...BYTES_HEADERS,
 				"Content-Disposition": contentDisposition(f.original_filename),
 				...(servesRange ? { "Accept-Ranges": "bytes" } : {}),
 			};
@@ -478,7 +465,7 @@ export function publicRouter(state: AppState): Router {
 					res
 						.status(416)
 						.set({
-							...SECURITY_HEADERS,
+							...BYTES_HEADERS,
 							"Accept-Ranges": "bytes",
 							"Content-Range": `bytes */${fileSize}`,
 						})
@@ -612,8 +599,12 @@ export function publicRouter(state: AppState): Router {
 					source = decompressStream(fullPath, f.size_bytes);
 				}
 				res.writeHead(200, {
-					...SECURITY_HEADERS,
+					...BYTES_HEADERS,
 					"Content-Type": f.content_type || "application/octet-stream",
+					"Content-Disposition": contentDisposition(
+						f.original_filename,
+						"inline",
+					),
 				});
 				try {
 					for await (const chunk of source) {
@@ -632,8 +623,14 @@ export function publicRouter(state: AppState): Router {
 
 			const fileSize = statSync(fullPath).size;
 			const headers: Record<string, string> = {
-				...SECURITY_HEADERS,
+				...BYTES_HEADERS,
 				"Accept-Ranges": "bytes",
+				// Named so a "save" from the preview keeps the real filename;
+				// `inline` because this endpoint exists to be rendered.
+				"Content-Disposition": contentDisposition(
+					f.original_filename,
+					"inline",
+				),
 			};
 			const rangeHeader = req.headers.range;
 			if (rangeHeader) {
@@ -642,7 +639,7 @@ export function publicRouter(state: AppState): Router {
 					res
 						.status(416)
 						.set({
-							...SECURITY_HEADERS,
+							...BYTES_HEADERS,
 							"Accept-Ranges": "bytes",
 							"Content-Range": `bytes */${fileSize}`,
 						})
@@ -722,7 +719,7 @@ export function publicRouter(state: AppState): Router {
 			}
 			const size = statSync(thumbPath).size;
 			res.writeHead(200, {
-				...SECURITY_HEADERS,
+				...BYTES_HEADERS,
 				"Content-Type": "image/jpeg",
 				"Content-Length": String(size),
 				"Cache-Control": "public, max-age=86400",
@@ -732,7 +729,6 @@ export function publicRouter(state: AppState): Router {
 	);
 
 	router.get("/file/:slug", (req, res) => {
-		res.set(SECURITY_HEADERS);
 		sendSpa(res, fileMetaTags(req, state, req.params.slug));
 	});
 

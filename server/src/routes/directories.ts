@@ -47,6 +47,7 @@ import {
 	requirePermission,
 	requireScopeOrSession,
 } from "../middleware/deps.ts";
+import { BYTES_HEADERS } from "../middleware/securityHeaders.ts";
 import { ensurePermissions } from "../permissions.ts";
 import {
 	type AccessCheck,
@@ -73,23 +74,6 @@ import { serializeFiles } from "./files.ts";
 import { previewEligible } from "./public.ts";
 
 const log = getLogger("app.routes.directories");
-
-const CSP =
-	"default-src 'self'; " +
-	"script-src 'self'; " +
-	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-	"font-src 'self' https://fonts.gstatic.com; " +
-	"img-src 'self' data: blob:; " +
-	"media-src 'self' blob:; " +
-	"frame-src 'self'; " +
-	"worker-src 'self' blob:; " +
-	"connect-src 'self'; " +
-	"object-src 'none'";
-const SECURITY_HEADERS: Record<string, string> = {
-	"X-Content-Type-Options": "nosniff",
-	"Referrer-Policy": "no-referrer",
-	"Content-Security-Policy": CSP,
-};
 
 const MAX_EPOCH_MS = 8640000000000000; // Date's max representable instant.
 
@@ -2740,7 +2724,7 @@ export function publicDirectoriesRouter(state: AppState): Router {
 
 			const zipName =
 				(d.title || "bundle").trim().replace(/"/g, "") || "bundle";
-			res.set(SECURITY_HEADERS);
+			res.set(BYTES_HEADERS);
 			res.setHeader("Content-Type", "application/zip");
 			res.setHeader(
 				"Content-Disposition",
@@ -2809,7 +2793,6 @@ export function publicDirectoriesRouter(state: AppState): Router {
 	router.get("/d/:slug", (req, res) => {
 		const resolved = resolveDirectory(db, req.params.slug);
 		const meta = resolved ? directoryPageMeta(req, db, resolved.directory) : "";
-		res.set(SECURITY_HEADERS);
 		sendSpa(res, meta);
 	});
 

@@ -100,12 +100,21 @@ const CHUNK_UPLOAD_SIZE = 16 * 1024 * 1024;
 const CHUNK_SESSION_TTL = 12 * 3600;
 const CHUNK_TOKEN_AAD = Buffer.from("chunked-upload-v1");
 
+/** Declared content types that would let a browser execute or render the
+ * upload as a same-origin document. Stored as octet-stream instead, so
+ * `/preview` (which serves `text/*` inline) never hands them out under a type
+ * that runs. The byte routes also carry a sandbox CSP as the second wall. */
 const UNSAFE_CT = new Set([
 	"text/html",
 	"text/xhtml",
 	"text/xhtml+xml",
 	"image/svg+xml",
 	"application/xhtml+xml",
+	"text/javascript",
+	"application/javascript",
+	"application/x-javascript",
+	"text/xml",
+	"application/xml",
 ]);
 
 interface SumRow {

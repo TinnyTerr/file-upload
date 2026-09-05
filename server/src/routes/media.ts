@@ -52,6 +52,7 @@ import {
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
 import { optionalOauthViewer, requireActiveUser } from "../middleware/deps.ts";
+import { BYTES_HEADERS } from "../middleware/securityHeaders.ts";
 import { ensurePermissions } from "../permissions.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
@@ -68,13 +69,6 @@ import { getOrCreateThumbnail } from "../storage/thumbnail.ts";
 
 const log = getLogger("app.routes.media");
 const CHUNK = 256 * 1024;
-
-const SECURITY_HEADERS: Record<string, string> = {
-	"X-Content-Type-Options": "nosniff",
-	"Referrer-Policy": "no-referrer",
-	// Media bytes only; never let a stream response be interpreted as a page.
-	"Content-Security-Policy": "default-src 'none'; sandbox",
-};
 
 const VISIBILITIES = new Set(["public", "restricted"]);
 const KINDS = new Set(["movie", "series"]);
@@ -422,7 +416,7 @@ export function mediaRouter(state: AppState): Router {
 			if (!thumb) throw new HttpError(404, "no poster available");
 			const size = statOrNull(thumb)?.size ?? 0;
 			res.writeHead(200, {
-				...SECURITY_HEADERS,
+				...BYTES_HEADERS,
 				"Content-Type": "image/jpeg",
 				"Content-Length": String(size),
 				"Cache-Control": "private, max-age=3600",
@@ -467,7 +461,7 @@ export function mediaRouter(state: AppState): Router {
 				lines.push(`${baseUrl(req)}/api/media/stream/${f.id}${suffix}`);
 			}
 			res.writeHead(200, {
-				...SECURITY_HEADERS,
+				...BYTES_HEADERS,
 				"Content-Type": "audio/x-mpegurl; charset=utf-8",
 				"Cache-Control": "no-store",
 				"Content-Disposition": `attachment; filename="${dir.slug}.m3u"`,
@@ -497,7 +491,7 @@ export function mediaRouter(state: AppState): Router {
 			if (!thumb) throw new HttpError(404, "no thumbnail available");
 			const size = statOrNull(thumb)?.size ?? 0;
 			res.writeHead(200, {
-				...SECURITY_HEADERS,
+				...BYTES_HEADERS,
 				"Content-Type": "image/jpeg",
 				"Content-Length": String(size),
 				"Cache-Control": "private, max-age=3600",
@@ -545,7 +539,7 @@ export function mediaRouter(state: AppState): Router {
 			});
 
 			const headers: Record<string, string> = {
-				...SECURITY_HEADERS,
+				...BYTES_HEADERS,
 				"Content-Type": f.content_type || "application/octet-stream",
 				"Cache-Control": "private, no-store",
 			};
@@ -560,7 +554,7 @@ export function mediaRouter(state: AppState): Router {
 						res
 							.status(416)
 							.set({
-								...SECURITY_HEADERS,
+								...BYTES_HEADERS,
 								"Accept-Ranges": "bytes",
 								"Content-Range": `bytes */${fileSize}`,
 							})
