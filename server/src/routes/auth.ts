@@ -58,6 +58,16 @@ export function authRouter(state: AppState): Router {
 		});
 	}
 
+	/** Whether a passkey ceremony on this `conn_id` follows a verified password
+	 * (the challenge was moved to `awaiting_second_factor` by `/login`) or is
+	 * the whole login. The two get different user-verification demands --
+	 * security/webauthn.ts. */
+	function isSecondFactor(connId: string): boolean {
+		return (
+			state.loginChallenges.get(connId)?.state === "awaiting_second_factor"
+		);
+	}
+
 	router.get("/ws-token", (req, res) => {
 		if (!state.wsTokenRateLimiter.allow(clientIp(state, req))) {
 			res.status(429).json({ detail: "too many attempts, try later" });
@@ -243,7 +253,10 @@ export function authRouter(state: AppState): Router {
 				typeof providedConnId === "string" && providedConnId
 					? providedConnId
 					: state.loginChallenges.create();
-			const options = await buildAuthenticationOptions(rpContext);
+			const options = await buildAuthenticationOptions(
+				rpContext,
+				!isSecondFactor(connId),
+			);
 			state.loginChallenges.setWebauthnChallenge(connId, options.challenge);
 			res.json({ options, conn_id: connId });
 		}),
@@ -314,6 +327,7 @@ export function authRouter(state: AppState): Router {
 						counter: credRow.sign_count,
 						transports,
 					},
+					!isSecondFactor(connId),
 				);
 			} catch (err) {
 				recordAudit(db, {

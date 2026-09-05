@@ -286,7 +286,7 @@ The login flow is a multi-step ceremony, not a single POST:
 1. `POST /api/auth/login` verifies the password. If the user has enrolled credentials **and** MFA is enforced (`mfa_required`, or role `master`), it returns `{status: "mfa_required", mfa_ticket, methods}` instead of a session.
 2. The ticket (`security/secondFactorTickets.ts`) is single-use, 2-minute TTL, 5-attempt cap. It is *not* proof of authentication on its own.
 3. `POST /api/auth/totp/verify-login` or the WebAuthn login pair completes the ceremony and issues the session.
-4. Usernameless WebAuthn login (`/api/auth/webauthn/login/start|finish`) skips step 1 entirely — the passkey identifies the user.
+4. Usernameless WebAuthn login (`/api/auth/webauthn/login/start|finish`) skips step 1 entirely — the passkey identifies the user. **When the passkey is the whole login it must be user-verified** (`userVerification: "required"`, PIN/biometric); the same endpoints serve the passkey-after-password step, where a `conn_id` in `awaiting_second_factor` keeps it at `preferred` so PIN-less security keys still work as a second factor (`auth.ts::isSecondFactor`, `security/webauthn.ts`).
 5. `GET /api/auth/ws-token` mints a short-lived `conn_id` for the pre-login websocket (`/api/auth`), which pushes live state transitions during the ceremony. `conn_id` is a transport correlation id **only**, never an authorization credential.
 6. **Enrolling a factor takes the current password, like removing one** (`POST /api/account/mfa/totp/setup` and `/webauthn/register/start` both require `current_password`; `mfa.ts::reauthenticated`). A stolen session cookie must not be able to add a passkey that outlives the victim's password change. Wrong answers feed the account lockout counter.
 

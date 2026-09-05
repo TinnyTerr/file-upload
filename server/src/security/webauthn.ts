@@ -102,10 +102,21 @@ export async function verifyRegistration(
 	});
 }
 
-export async function buildAuthenticationOptions(rpContext: { rpID: string }) {
+/**
+ * `requireUv` is the difference between a passkey that *is* the login and one
+ * that follows a password. On its own, an assertion with no PIN/biometric
+ * proves possession of the authenticator and nothing else -- an unattended
+ * device or a lifted key signs in with a touch -- so the passwordless path
+ * demands user verification. As a second factor the password already covers
+ * "something you know", so PIN-less security keys stay usable there.
+ */
+export async function buildAuthenticationOptions(
+	rpContext: { rpID: string },
+	requireUv: boolean,
+) {
 	return generateAuthenticationOptions({
 		rpID: rpContext.rpID,
-		userVerification: "preferred",
+		userVerification: requireUv ? "required" : "preferred",
 	});
 }
 
@@ -114,6 +125,7 @@ export async function verifyAuthentication(
 	response: AuthenticationResponseJSON,
 	expectedChallenge: string,
 	credential: WebAuthnCredential,
+	requireUv: boolean,
 ): Promise<VerifiedAuthenticationResponse> {
 	return verifyAuthenticationResponse({
 		response,
@@ -121,6 +133,6 @@ export async function verifyAuthentication(
 		expectedOrigin: rpContext.origin,
 		expectedRPID: rpContext.rpID,
 		credential,
-		requireUserVerification: false,
+		requireUserVerification: requireUv,
 	});
 }
