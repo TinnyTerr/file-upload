@@ -77,7 +77,7 @@ import {
 	releaseBlob,
 	unlinkQueued,
 } from "../storage/blobs.ts";
-import { compressFile, shouldCompress } from "../storage/compress.ts";
+import { compressIfWorthwhile, shouldCompress } from "../storage/compress.ts";
 import { safeJoin, storageRoot } from "../storage/paths.ts";
 import {
 	blobsEqual,
@@ -431,11 +431,24 @@ export async function finalizeStoredFile(
 		if (UNSAFE_CT.has(ct)) ct = "application/octet-stream";
 
 		if (opts.compress && encryptionMode !== "client" && shouldCompress(ct)) {
+			// Only adopt the compressed copy if it actually saved anything --
+			// `shouldCompress` goes on the declared content type, which is wrong
+			// often enough (octet-stream, office documents, a .tar of already
+			// compressed content) that storing the result unconditionally could
+			// make the file *larger* and cost it `Accept-Ranges` forever. When it
+			// isn't worth it, `compressIfWorthwhile` has already cleaned up and
+			// the untouched work file stays as `current`.
 			const compressed = `${basePath}.zst.work`;
-			await compressFile(current, compressed);
-			unlinkSync(current);
-			current = compressed;
-			fileCompressed = true;
+			const packed = await compressIfWorthwhile(
+				current,
+				compressed,
+				opts.stored,
+			);
+			if (packed !== null) {
+				unlinkSync(current);
+				current = compressed;
+				fileCompressed = true;
+			}
 		}
 
 		const displayName = opts.randomizeFilename

@@ -1,15 +1,15 @@
 import { randomBytes } from "node:crypto";
-import { createWriteStream, existsSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decryptStream } from "../crypto/aead.ts";
+import { decryptStream, decryptStreamFrom } from "../crypto/aead.ts";
 import { resolveFileEncryption } from "../crypto/effectiveEncryption.ts";
 import { openBox } from "../crypto/secretbox.ts";
 import type { FileRow } from "../db/rows.ts";
 import type { Db } from "../db/types.ts";
 import { HttpError } from "../httpError.ts";
-import { decompressStream } from "./compress.ts";
+import { decompressGuarded, decompressStream } from "./compress.ts";
 import { safeJoin, storageRoot } from "./paths.ts";
 
 /** Mirrors app/routes/directories.py::_safe_arcname -- flatten to a safe
@@ -64,7 +64,7 @@ function newTempfile(suffix: string): string {
  * Exported for reuse by routes/public.ts's raw-download decompress/decrypt
  * helpers, which used to buffer the whole file in memory before this. */
 export async function writeStreamToFile(
-	stream: AsyncGenerator<Buffer>,
+	stream: AsyncIterable<Buffer>,
 	dest: string,
 ): Promise<void> {
 	const out = createWriteStream(dest);
@@ -111,59 +111,33 @@ export async function memberSource(
 	const needsDecrypt = eff.mode === "server";
 	if (!needsDecompress && !needsDecrypt) return [full, false];
 
-	const decompressFirst = !!(f.archived && !f.compressed);
+	let key: Buffer | null = null;
+	if (needsDecrypt) {
+		if (!eff.keyBlob) throw new HttpError(500, "encryption key not stored");
+		key = openBox(masterKey, Buffer.from(eff.keyBlob));
+	}
 
-	let src = full;
-	let intermediate: string | null = null;
+	// zip streaming needs a real file to seek in, so one temp copy is
+	// unavoidable -- but only one. Both transforms used to be materialized
+	// separately, so a compressed *and* encrypted member cost two full-size
+	// temp files and two extra passes; composed, the intermediate never exists.
+	// The order rule is the same one storage/streaming.ts documents: the
+	// archive job produces ZSTD(ENC(x)), everything else ENC(ZSTD(x)).
+	let source: AsyncIterable<Buffer>;
+	if (f.archived && !f.compressed) {
+		source = decompressStream(full, f.size_bytes);
+		if (key) source = decryptStreamFrom(key, source);
+	} else {
+		source = key ? decryptStream(key, full) : createReadStream(full);
+		if (needsDecompress) source = decompressGuarded(source, f.size_bytes);
+	}
+
+	const plain = newTempfile(".plain");
 	try {
-		if (decompressFirst) {
-			// ZSTD(ENC(x)) -- decompress, then decrypt.
-			if (needsDecompress) {
-				const dec = newTempfile(".dec");
-				intermediate = dec;
-				await writeStreamToFile(decompressStream(src, f.size_bytes), dec);
-				src = dec;
-			}
-			if (needsDecrypt) {
-				if (!eff.keyBlob) throw new HttpError(500, "encryption key not stored");
-				const key = openBox(masterKey, Buffer.from(eff.keyBlob));
-				const plain = newTempfile(".plain");
-				try {
-					await writeStreamToFile(decryptStream(key, src), plain);
-				} catch (err) {
-					await unlink(plain).catch(() => {});
-					throw err;
-				}
-				if (intermediate) await unlink(intermediate).catch(() => {});
-				return [plain, true];
-			}
-			return [src, true];
-		}
-
-		// ENC(ZSTD(x)) -- decrypt, then decompress.
-		if (needsDecrypt) {
-			if (!eff.keyBlob) throw new HttpError(500, "encryption key not stored");
-			const key = openBox(masterKey, Buffer.from(eff.keyBlob));
-			const dec = newTempfile(".dec");
-			intermediate = dec;
-			await writeStreamToFile(decryptStream(key, src), dec);
-			src = dec;
-		}
-		if (needsDecompress) {
-			const plain = newTempfile(".plain");
-			try {
-				await writeStreamToFile(decompressStream(src, f.size_bytes), plain);
-			} catch (err) {
-				await unlink(plain).catch(() => {});
-				throw err;
-			}
-			if (intermediate) await unlink(intermediate).catch(() => {});
-			return [plain, true];
-		}
-
-		return [src, true];
+		await writeStreamToFile(source, plain);
 	} catch (err) {
-		if (intermediate) await unlink(intermediate).catch(() => {});
+		await unlink(plain).catch(() => {});
 		throw err;
 	}
+	return [plain, true];
 }

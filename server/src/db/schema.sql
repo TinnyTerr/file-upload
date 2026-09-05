@@ -102,6 +102,10 @@ CREATE TABLE IF NOT EXISTS content_blobs (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_content_blobs_sha256 ON content_blobs(sha256);
+-- The dedup lookup in storage/blobs.ts::attachBlob filters on
+-- (stored_sha256, transform_key), not on sha256 -- without this it full-scanned
+-- content_blobs on every single upload.
+CREATE INDEX IF NOT EXISTS ix_content_blobs_stored ON content_blobs(stored_sha256, transform_key);
 
 CREATE TABLE IF NOT EXISTS directories (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

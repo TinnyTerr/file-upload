@@ -19,7 +19,7 @@ import {
 } from "../storage/accounting.ts";
 import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
 import {
-	compressFile,
+	compressIfWorthwhile,
 	decompressStream,
 	shouldCompress,
 } from "../storage/compress.ts";
@@ -132,7 +132,19 @@ export async function archiveIdleJob(db: Db): Promise<number> {
 				$id: f.id,
 			});
 			const original = f.stored_size_bytes || statSync(src).size;
-			await compressFile(src, tmp);
+			// Archiving compresses in place, so a file zstd can't shrink would
+			// be rewritten to the same size (or larger) and lose `Accept-Ranges`
+			// for nothing. Settle it as archived, untouched -- the same outcome
+			// as the already-compressed case above.
+			if ((await compressIfWorthwhile(src, tmp, original)) === null) {
+				db.run("UPDATE files SET lifecycle_state = 'archived' WHERE id = $id", {
+					$id: f.id,
+				});
+				log.info(
+					`archive idle job marked archived file_id=${f.id} reason=compression_not_worthwhile`,
+				);
+				continue;
+			}
 			renameSync(tmp, src);
 			const stored = statSync(src).size;
 			const saved = Math.max(0, original - stored);
@@ -322,7 +334,17 @@ export async function archiveFileCore(
 		db.run("UPDATE files SET lifecycle_state = 'archiving' WHERE id = $id", {
 			$id: f.id,
 		});
-		await compressFile(src, tmp);
+		// Same rule as the idle sweep: a file compression can't shrink is
+		// recorded as archived rather than rewritten to no benefit.
+		if ((await compressIfWorthwhile(src, tmp, original)) === null) {
+			db.run("UPDATE files SET lifecycle_state = 'archived' WHERE id = $id", {
+				$id: f.id,
+			});
+			log.info(
+				`archive marked file archived without recompressing file_id=${f.id} reason=compression_not_worthwhile`,
+			);
+			return serializeFileLifecycle(fileRow(db, f.id)!);
+		}
 		renameSync(tmp, src);
 		const stored = statSync(src).size;
 		const saved = Math.max(0, original - stored);

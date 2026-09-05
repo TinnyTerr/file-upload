@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { type FileHandle, open } from "node:fs/promises";
 
 /**
@@ -124,37 +125,105 @@ export async function encryptFile(
 	}
 }
 
-export async function* decryptStream(
+/**
+ * Pulls exact-length runs of bytes off a byte stream, buffering the remainder.
+ *
+ * The container is fixed-stride (`PLAINTEXT_CHUNK + TAG_LEN` per chunk, short
+ * final chunk), so reading it needs "give me exactly N bytes" over a source
+ * that hands out arbitrary chunk sizes. Reads are large relative to a stream's
+ * own chunks, so at most a couple of buffers are ever joined per read.
+ */
+class ByteReader {
+	private pending: Buffer[] = [];
+	private buffered = 0;
+	private ended = false;
+
+	constructor(private readonly it: AsyncIterator<Buffer>) {}
+
+	/** Up to `size` bytes; shorter only when the source is exhausted. */
+	async read(size: number): Promise<Buffer> {
+		while (this.buffered < size && !this.ended) {
+			const { value, done } = await this.it.next();
+			if (done) {
+				this.ended = true;
+				break;
+			}
+			if (!value || value.length === 0) continue;
+			this.pending.push(value);
+			this.buffered += value.length;
+		}
+		if (this.buffered === 0) return Buffer.alloc(0);
+		const joined =
+			this.pending.length === 1
+				? this.pending[0]!
+				: Buffer.concat(this.pending, this.buffered);
+		const take = Math.min(size, joined.length);
+		const rest = joined.subarray(take);
+		this.pending = rest.length ? [rest] : [];
+		this.buffered = rest.length;
+		return joined.subarray(0, take);
+	}
+
+	/** Releases the underlying source (closing a file descriptor, etc.). */
+	async close(): Promise<void> {
+		await this.it.return?.();
+	}
+}
+
+/**
+ * Decrypt a FUPL container arriving as a byte stream rather than a file.
+ *
+ * The stream form is what lets `ZSTD(ENC(x))` be read as one composed
+ * pipeline: the archive job's output decompresses straight into this instead
+ * of being staged to a temp file first (storage/streaming.ts). Sequential
+ * reads are equivalent to the positioned reads this replaced -- the container
+ * was only ever consumed front to back.
+ */
+export async function* decryptStreamFrom(
 	key: Buffer,
-	path: string,
+	source: AsyncIterable<Buffer>,
 ): AsyncGenerator<Buffer> {
-	const fh = await open(path, "r");
+	const reader = new ByteReader(source[Symbol.asyncIterator]());
 	try {
-		const header = await readExact(fh, HEADER_SIZE, 0);
+		const header = await reader.read(HEADER_SIZE);
 		if (header.length < HEADER_SIZE || !header.subarray(0, 4).equals(MAGIC)) {
 			throw new Error("not a FUPL file");
 		}
 		if (header[4] !== VERSION) throw new Error("unsupported version");
-		const baseNonce = header.subarray(5, 17);
+		const baseNonce = Buffer.from(header.subarray(5, 17));
 		const total = header.readUInt32BE(17);
 		// encrypt_file always writes at least one chunk; total == 0 means a
 		// corrupted/forged header. Don't silently decrypt to an empty result.
 		if (total <= 0) throw new Error("invalid chunk count");
 
-		const { size } = await fh.stat();
-		let pos = HEADER_SIZE;
+		const stride = PLAINTEXT_CHUNK + TAG_LEN;
 		for (let idx = 0; idx < total; idx++) {
 			const isLast = idx === total - 1;
-			const want = isLast ? size - pos : PLAINTEXT_CHUNK + TAG_LEN;
-			const ct = await readExact(fh, want, pos);
-			pos += ct.length;
-			if (ct.length < (isLast ? TAG_LEN : PLAINTEXT_CHUNK + TAG_LEN)) {
+			const ct = await reader.read(stride);
+			if (ct.length < (isLast ? TAG_LEN : stride)) {
 				throw new Error(`truncated at chunk ${idx}`);
 			}
-			const plaintext = openChunk(key, idx, isLast, Buffer.from(baseNonce), ct);
+			const plaintext = openChunk(key, idx, isLast, baseNonce, ct);
 			if (plaintext.length > 0) yield plaintext;
 		}
+		// Anything past the declared chunk count is not part of the container.
+		// The positioned-read version folded trailing bytes into the final
+		// chunk, where GCM rejected them; refuse them explicitly instead of
+		// decrypting a valid prefix out of a padded file.
+		if ((await reader.read(1)).length > 0) {
+			throw new Error("trailing data after final chunk");
+		}
 	} finally {
-		await fh.close();
+		await reader.close();
 	}
+}
+
+export function decryptStream(
+	key: Buffer,
+	path: string,
+): AsyncGenerator<Buffer> {
+	return decryptStreamFrom(
+		key,
+		createReadStream(path, { highWaterMark: PLAINTEXT_CHUNK }),
+	);
 }

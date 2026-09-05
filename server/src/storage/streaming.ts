@@ -11,13 +11,12 @@ import { type Stats, statSync } from "node:fs";
 import type { AppState } from "../appState.ts";
 import { fetchBlobFromPeers } from "../cluster/blobs.ts";
 import { getMasterKey } from "../config.ts";
-import { decryptStream } from "../crypto/aead.ts";
+import { decryptStream, decryptStreamFrom } from "../crypto/aead.ts";
 import { resolveFileEncryption } from "../crypto/effectiveEncryption.ts";
 import { openBox } from "../crypto/secretbox.ts";
 import type { FileRow } from "../db/rows.ts";
 import type { Db } from "../db/types.ts";
-import { decompressStream } from "./compress.ts";
-import { writeStreamToFile } from "./zip.ts";
+import { decompressGuarded, decompressStream } from "./compress.ts";
 
 /** Read-time cluster failover: if this file is a deduped, content-addressed
  * blob (blob_id set) and the local bytes are missing, try pulling them from
@@ -56,49 +55,32 @@ export function isDirectlyStreamable(db: Db, f: FileRow): boolean {
 	);
 }
 
-export async function* decompressFromDecrypted(
+/** `ENC(ZSTD(x))` -- the upload-time producer. Decrypt, then decompress.
+ *
+ * Composed as streams, so nothing is staged on disk and the first plaintext
+ * byte leaves as soon as the first ciphertext chunk has been opened. This used
+ * to decrypt the whole file into a temp directory before decompressing any of
+ * it: a full extra write and read of the file per download, and a time to
+ * first byte that scaled with the file rather than being constant. */
+export function decompressFromDecrypted(
 	path: string,
 	originalSize: number,
 	key: Buffer,
 ): AsyncGenerator<Buffer> {
-	// upload-time compression: stored as ENC(ZSTD(x)) -> decrypt, then decompress.
-	// decryptStream reads from disk directly; we can't decompress a live async
-	// generator with node:zlib's stream API, so stream through a temp file --
-	// writeStreamToFile honors backpressure instead of buffering the whole
-	// (potentially huge) file in memory before writing it out.
-	const { mkdtemp, unlink, rm } = await import("node:fs/promises");
-	const { tmpdir } = await import("node:os");
-	const { join } = await import("node:path");
-	const dir = await mkdtemp(join(tmpdir(), "fu-raw-"));
-	const tmp1 = join(dir, "step1");
-	try {
-		await writeStreamToFile(decryptStream(key, path), tmp1);
-		for await (const c of decompressStream(tmp1, originalSize)) yield c;
-	} finally {
-		await unlink(tmp1).catch(() => {});
-		await rm(dir, { recursive: true, force: true }).catch(() => {});
-	}
+	return decompressGuarded(decryptStream(key, path), originalSize);
 }
 
-export async function* decryptFromDecompressed(
+/** `ZSTD(ENC(x))` -- the archive job's producer. Decompress, then decrypt.
+ *
+ * The mirror image of the above, and temp-file-free for the same reason:
+ * `decryptStreamFrom` reads the container off a byte stream instead of
+ * needing it to exist as a file first. */
+export function decryptFromDecompressed(
 	path: string,
 	originalSize: number,
 	key: Buffer,
 ): AsyncGenerator<Buffer> {
-	// archive job: stored as ZSTD(ENC(x)) -> decompress, then decrypt. Same
-	// streamed-through-a-temp-file approach as decompressFromDecrypted above.
-	const { mkdtemp, unlink, rm } = await import("node:fs/promises");
-	const { tmpdir } = await import("node:os");
-	const { join } = await import("node:path");
-	const dir = await mkdtemp(join(tmpdir(), "fu-raw-"));
-	const tmp1 = join(dir, "step1");
-	try {
-		await writeStreamToFile(decompressStream(path, originalSize), tmp1);
-		for await (const c of decryptStream(key, tmp1)) yield c;
-	} finally {
-		await unlink(tmp1).catch(() => {});
-		await rm(dir, { recursive: true, force: true }).catch(() => {});
-	}
+	return decryptStreamFrom(key, decompressStream(path, originalSize));
 }
 
 export class PlaintextUnavailable extends Error {}
