@@ -115,6 +115,16 @@ function pump(
 	ws.on("error", unsubscribe);
 }
 
+/** Whether a handshake's `Origin` names the host the request arrived at. */
+function sameHost(origin: string, host: string | undefined): boolean {
+	if (!host) return false;
+	try {
+		return new URL(origin).host.toLowerCase() === host.toLowerCase();
+	} catch {
+		return false;
+	}
+}
+
 function safeTokenEqual(presented: string, expected: string): boolean {
 	const a = Buffer.from(presented);
 	const b = Buffer.from(expected);
@@ -132,6 +142,24 @@ export function setupWebSockets(server: HttpServer, state: AppState): void {
 		const url = new URL(req.url ?? "/", "http://internal");
 		const path = url.pathname;
 		const ip = peerIp(state, req);
+
+		// The cookie-authenticated sockets take the same cross-site stance as
+		// the cookie itself (SameSite=strict): a browser handshake from another
+		// origin is refused outright rather than relying on the cookie being
+		// withheld. Non-browser clients send no Origin and are unaffected; the
+		// cluster firehose is token-authenticated and exempt.
+		if (path === "/api/ws/events" || path === "/api/auth") {
+			const origin = req.headers.origin;
+			if (origin && !sameHost(origin, req.headers.host)) {
+				rejectUpgrade(
+					socket,
+					path,
+					ip,
+					`cross-origin handshake from ${origin}`,
+				);
+				return;
+			}
+		}
 
 		if (path === "/api/ws/events") {
 			const cookies = parseCookies(req.headers.cookie);
