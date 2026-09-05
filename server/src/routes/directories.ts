@@ -7,7 +7,9 @@ import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
 import { getMasterKey } from "../config.ts";
 import {
+	createEncryptionResolver,
 	type EffectiveEncryption,
+	type EncryptionResolver,
 	keyScopeOf,
 	recoverAccessSecret,
 	resolveDirectoryEncryption,
@@ -27,7 +29,6 @@ import {
 	ancestorChain,
 	buildPathIndex,
 	depthOf,
-	directoryRole,
 	getDirectory,
 	isEditor,
 	isSelfOrDescendant,
@@ -157,28 +158,47 @@ function resolveDirectory(db: Db, slug: string): ResolvedDirectory | null {
 	return { directory: d, link };
 }
 
+/** `COUNT(*) GROUP BY` over the page's ids -- one query for the page, not one
+ * per row. Ids with no rows are simply absent from the map. */
+function countsBy(
+	db: Db,
+	column: "directory_id" | "parent_directory_id",
+	table: "files" | "directories",
+	ids: number[],
+): Map<number, number> {
+	const out = new Map<number, number>();
+	if (!ids.length) return out;
+	for (const r of db.all<{ k: number; n: number }>(
+		`SELECT ${column} AS k, COUNT(*) AS n FROM ${table}
+     WHERE ${column} IN (${ids.map((_, i) => `$i${i}`).join(",")}) GROUP BY ${column}`,
+		Object.fromEntries(ids.map((id, i) => [`$i${i}`, id])),
+	)) {
+		out.set(r.k, r.n);
+	}
+	return out;
+}
+
 function serializeDirectories(
 	state: AppState,
 	req: Request,
 	dirs: DirectoryRow[],
 	user?: UserRow,
+	/** See serializeFiles: a system-wide listing passes a preloaded resolver. */
+	enc: EncryptionResolver = createEncryptionResolver(state.db),
 ): Record<string, unknown>[] {
 	const { db } = state;
+	const ids = dirs.map((d) => d.id);
+	const fileCounts = countsBy(db, "directory_id", "files", ids);
+	const childCounts = countsBy(db, "parent_directory_id", "directories", ids);
+	const masterKey = getMasterKey(state.settings);
 	return dirs.map((d) => {
-		const fileCount = db.get<FileCountRow>(
-			"SELECT COUNT(*) as n FROM files WHERE directory_id = $id",
-			{
-				$id: d.id,
-			},
-		)!.n;
-		const subdirectoryCount = db.get<FileCountRow>(
-			"SELECT COUNT(*) as n FROM directories WHERE parent_directory_id = $id",
-			{ $id: d.id },
-		)!.n;
+		const fileCount = fileCounts.get(d.id) ?? 0;
+		const subdirectoryCount = childCounts.get(d.id) ?? 0;
 		// Effective state, not the row's own columns: an inheriting folder's key
 		// lives on the break point above it (crypto/effectiveEncryption.ts).
 		// `encryption_overridden` is what tells the UI which of the two it is.
-		const eff = resolveDirectoryEncryption(db, d);
+		// Resolved once and reused for the access key and the role walk below.
+		const eff = enc.directory(d);
 		return {
 			id: d.id,
 			owner_id: d.owner_id,
@@ -192,12 +212,12 @@ function serializeDirectories(
 			inherited_from_directory_id: eff.sourceDirectoryId,
 			password_locked: eff.passwordLocked,
 			key_check_blob: eff.keyCheckBlob,
-			access_key: recoverDirAccessKey(state, d),
+			access_key: recoverAccessSecret(masterKey, eff),
 			file_count: fileCount,
 			total_bytes: d.total_bytes,
 			expires_at: d.expires_at,
 			created_at: d.created_at,
-			role: user ? directoryRole(db, d, user) : null,
+			role: user ? enc.tree.role(d, user) : null,
 			// Media library publication state, so the folder list can offer
 			// publish/unpublish without a second round trip (routes/media.ts).
 			is_library: !!d.is_library,
@@ -2201,7 +2221,9 @@ export function adminDirectoriesRouter(state: AppState): Router {
 		// readable at all (directoryTree.ts::buildPathIndex — one query, not one
 		// ancestor walk per row).
 		const pathOf = buildPathIndex(db);
-		const rows = serializeDirectories(state, req, dirs);
+		const enc = createEncryptionResolver(db);
+		enc.tree.preloadAll();
+		const rows = serializeDirectories(state, req, dirs, undefined, enc);
 		res.json({
 			directories: rows.map((row, i) => ({
 				...row,

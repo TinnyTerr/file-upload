@@ -28,15 +28,24 @@ export function getDirectory(db: Db, id: number): DirectoryRow | null {
  * rather than looping forever or silently truncating the chain, since a
  * truncated chain would resolve to the wrong encryption key. */
 export function ancestorChain(db: Db, directoryId: number): DirectoryRow[] {
+	return walkAncestors((id) => getDirectory(db, id), directoryId);
+}
+
+/** The walk behind `ancestorChain`, over whatever row source the caller has --
+ * the database directly, or a per-request `TreeCache`. */
+function walkAncestors(
+	rowOf: (id: number) => DirectoryRow | null,
+	directoryId: number,
+): DirectoryRow[] {
 	const chain: DirectoryRow[] = [];
 	const seen = new Set<number>([directoryId]);
-	let current = getDirectory(db, directoryId);
+	let current = rowOf(directoryId);
 	while (current?.parent_directory_id != null) {
 		const parentId = current.parent_directory_id;
 		if (seen.has(parentId)) {
 			throw new HttpError(500, `directory tree cycle at directory ${parentId}`);
 		}
-		const parent = getDirectory(db, parentId);
+		const parent = rowOf(parentId);
 		// A dangling parent id is treated as "this is where the chain ends"
 		// rather than an error: the FK makes it unreachable in practice, and a
 		// half-replicated peer shouldn't 500 every read.
@@ -150,6 +159,78 @@ export function directoryRole(
 export function isEditor(db: Db, d: DirectoryRow, user: UserRow): boolean {
 	const role = directoryRole(db, d, user);
 	return role === "owner" || role === "editor";
+}
+
+/**
+ * Per-request memory of directory rows and everything derived from walking
+ * them. `ancestorChain` and `directoryRole` cost a query per level, which is
+ * right for one folder and wrong for a listing: serializing N files or folders
+ * walked the tree N times (twice, in fact -- once for the effective encryption
+ * and once more to recover the access key), and looked collaborators up at
+ * every level of every walk. Build one of these per request and every row
+ * is read at most once; `preloadAll` turns a system-wide listing into a
+ * single query.
+ */
+export interface TreeCache {
+	row(id: number): DirectoryRow | null;
+	/** `ancestorChain`, from cached rows. */
+	chain(d: DirectoryRow): DirectoryRow[];
+	/** `directoryRole`, from cached rows and one collaborator query per user. */
+	role(d: DirectoryRow, user: UserRow): string | null;
+	/** Reads the whole table once; every later miss is then a real absence. */
+	preloadAll(): void;
+}
+
+export function createTreeCache(db: Db): TreeCache {
+	const rows = new Map<number, DirectoryRow | null>();
+	let complete = false;
+	const collaborators = new Map<number, Map<number, string>>();
+
+	const row = (id: number): DirectoryRow | null => {
+		const hit = rows.get(id);
+		if (hit !== undefined) return hit;
+		const fetched = complete ? null : getDirectory(db, id);
+		rows.set(id, fetched);
+		return fetched;
+	};
+
+	const grantsFor = (userId: number): Map<number, string> => {
+		const hit = collaborators.get(userId);
+		if (hit) return hit;
+		const grants = new Map<number, string>();
+		for (const g of db.all<{ directory_id: number; role: string }>(
+			"SELECT directory_id, role FROM directory_collaborators WHERE user_id = $user",
+			{ $user: userId },
+		)) {
+			grants.set(g.directory_id, g.role);
+		}
+		collaborators.set(userId, grants);
+		return grants;
+	};
+
+	return {
+		row,
+		chain(d) {
+			if (!rows.has(d.id)) rows.set(d.id, d);
+			return walkAncestors(row, d.id);
+		},
+		role(d, user) {
+			if (user.role === "master") return "owner";
+			const grants = grantsFor(user.id);
+			for (const node of [d, ...this.chain(d)]) {
+				if (node.owner_id === user.id) return "owner";
+				const granted = grants.get(node.id);
+				if (granted) return granted;
+			}
+			return null;
+		},
+		preloadAll() {
+			for (const r of db.all<DirectoryRow>("SELECT * FROM directories")) {
+				rows.set(r.id, r);
+			}
+			complete = true;
+		},
+	};
 }
 
 /** The nearest row at-or-above `directory` that holds its own key, i.e. the one

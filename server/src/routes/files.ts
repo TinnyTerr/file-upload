@@ -24,6 +24,9 @@ import { replicateFile } from "../cluster/replication.ts";
 import { configValue, getMasterKey } from "../config.ts";
 import { encryptFile } from "../crypto/aead.ts";
 import {
+	createEncryptionResolver,
+	type EffectiveEncryption,
+	type EncryptionResolver,
 	keyScopeOf,
 	recoverAccessSecret,
 	resolveDirectoryEncryption,
@@ -72,7 +75,7 @@ import {
 	attachBlob,
 	createHashers,
 	type FileHashes,
-	fileHashes,
+	fileHashesForBlobs,
 	hashFile,
 	releaseBlob,
 	unlinkQueued,
@@ -640,11 +643,12 @@ export async function finalizeStoredFile(
 /** The `?ek=` secret for a server-mode file. Resolved, since a file inside a
  * folder normally has no access blob of its own -- the folder's is the one that
  * opens it (crypto/effectiveEncryption.ts). */
-function recoverAccessKey(state: AppState, f: FileRow): string | null {
-	return recoverAccessSecret(
-		getMasterKey(state.settings),
-		resolveFileEncryption(state.db, f),
-	);
+function recoverAccessKey(
+	state: AppState,
+	f: FileRow,
+	eff: EffectiveEncryption = resolveFileEncryption(state.db, f),
+): string | null {
+	return recoverAccessSecret(getMasterKey(state.settings), eff);
 }
 
 /** Throttled per slug when the file's secret is a password rather than a random
@@ -1149,8 +1153,16 @@ export function serializeFiles(
 	state: AppState,
 	req: Request,
 	files: FileRow[],
+	/** A caller listing the whole system passes a preloaded resolver so the
+	 * folder tree is read once rather than lazily per distinct folder. */
+	enc: EncryptionResolver = createEncryptionResolver(state.db),
 ): Record<string, unknown>[] {
 	const { db } = state;
+	// One query for every blob's digests, not one per row.
+	const hashesByBlob = fileHashesForBlobs(
+		db,
+		files.flatMap((f) => (f.blob_id ? [f.blob_id] : [])),
+	);
 	const ownerIds = [...new Set(files.map((f) => f.owner_id))];
 	const usernameMap = new Map<number, string>();
 	if (ownerIds.length) {
@@ -1181,7 +1193,9 @@ export function serializeFiles(
 		const links = linksByFile.get(f.id) ?? [];
 		// Effective state -- an inheriting file's key lives on the folder above it
 		// (crypto/effectiveEncryption.ts); `encryption_overridden` says which.
-		const eff = resolveFileEncryption(db, f);
+		// Resolved once here and shared with the access-key recovery below --
+		// it used to be walked twice per row.
+		const eff = enc.file(f);
 		return {
 			id: f.id,
 			owner_id: f.owner_id,
@@ -1193,7 +1207,7 @@ export function serializeFiles(
 			saved_from_file_id: f.saved_from_file_id,
 			size_bytes: f.size_bytes,
 			stored_size_bytes: f.stored_size_bytes,
-			hashes: fileHashes(db, f),
+			hashes: f.blob_id ? (hashesByBlob.get(f.blob_id) ?? {}) : {},
 			content_type: f.content_type,
 			encryption_mode: eff.mode,
 			encryption_overridden: !!f.encryption_overridden,
@@ -1214,7 +1228,7 @@ export function serializeFiles(
 			is_permanent: !!f.is_permanent,
 			expires_at: f.expires_at,
 			last_downloaded_at: f.last_downloaded_at,
-			access_key: recoverAccessKey(state, f),
+			access_key: recoverAccessKey(state, f, eff),
 			created_at: f.created_at,
 			links: links.map((lk) => ({
 				id: lk.id,
@@ -2924,7 +2938,11 @@ export function adminFilesRouter(state: AppState): Router {
 			"SELECT * FROM files ORDER BY created_at DESC",
 		);
 		const pathOf = buildPathIndex(db);
-		const rows = serializeFiles(state, req, files);
+		// Every file in the system: read the folder tree once up front rather
+		// than faulting each folder in as its first file is serialized.
+		const enc = createEncryptionResolver(db);
+		enc.tree.preloadAll();
+		const rows = serializeFiles(state, req, files, enc);
 		res.json({
 			files: rows.map((row, i) => ({
 				...row,

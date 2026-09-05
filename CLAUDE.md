@@ -673,7 +673,7 @@ the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - **Sealing takes the delete gate, not the edit gate.** `POST /files/:id/seal` is irreversible and leaves the file unreadable even to its owner, so it requires `can_delete` *and* ownership — an editor of the containing folder may move and rename, nothing more.
 - **A folder created inside someone else's tree belongs to that tree's owner.** Otherwise an editor owns it, and `POST /directories/:id/collaborators` (owner-only by design) becomes re-delegatable.
 - **Replicating a file must ship its whole ancestor chain**, root first. `parent_directory_id` is a real FK on a peer running `foreign_keys = ON`, and the containing folder's parent may never have been replicated.
-- **Don't ancestor-walk per row in a listing.** `ancestorChain` costs a query per level; `buildPathIndex` reads the table once and resolves any number of rows in memory. The admin panel renders every file in the system.
+- **Don't ancestor-walk per row in a listing.** `ancestorChain` costs a query per level; `buildPathIndex` reads the table once and resolves any number of rows in memory. The admin panel renders every file in the system. The same goes for encryption and roles: `serializeFiles` / `serializeDirectories` take an `EncryptionResolver` (`crypto/effectiveEncryption.ts::createEncryptionResolver`, over a `directoryTree.ts::TreeCache`) that resolves each folder once per request and answers `role` from one collaborator query; the system-wide admin listings `preloadAll()` it. They used to resolve every row's encryption *twice* (once for the mode, once more inside the access-key recovery) and walk the collaborator table at every level of every row.
 
 ---
 

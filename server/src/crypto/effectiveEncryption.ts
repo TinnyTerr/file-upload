@@ -27,7 +27,12 @@ import { timingSafeEqual } from "node:crypto";
 import { openBox } from "../crypto/secretbox.ts";
 import type { DirectoryRow, FileRow } from "../db/rows.ts";
 import type { Db } from "../db/types.ts";
-import { getDirectory, nearestOverride } from "../directoryTree.ts";
+import {
+	createTreeCache,
+	getDirectory,
+	nearestOverride,
+	type TreeCache,
+} from "../directoryTree.ts";
 
 export interface EffectiveEncryption {
 	/** `none` | `server` | `client` (| `sealed`, once phase 8 lands). */
@@ -119,6 +124,62 @@ export function resolveFileEncryption(
 	const dir = getDirectory(db, file.directory_id);
 	if (!dir) return own;
 	return resolveDirectoryEncryption(db, dir);
+}
+
+/**
+ * `resolveDirectoryEncryption` / `resolveFileEncryption` with a memory: each
+ * folder is resolved once per request, and the walk runs over a `TreeCache`
+ * rather than a query per level. Same answers as the two functions above --
+ * a break point's own columns, otherwise the nearest overridden ancestor's,
+ * falling back to the root -- just not recomputed per row. Use this from any
+ * listing; the plain functions stay right for a single row.
+ */
+export interface EncryptionResolver {
+	directory(d: DirectoryRow): EffectiveEncryption;
+	file(f: FileRow): EffectiveEncryption;
+	readonly tree: TreeCache;
+}
+
+export function createEncryptionResolver(
+	db: Db,
+	tree: TreeCache = createTreeCache(db),
+): EncryptionResolver {
+	const byDirectory = new Map<number, EffectiveEncryption>();
+	const directory = (d: DirectoryRow): EffectiveEncryption => {
+		const hit = byDirectory.get(d.id);
+		if (hit) return hit;
+		let eff: EffectiveEncryption;
+		if (d.encryption_overridden) {
+			eff = fromDirectory(d, false);
+		} else {
+			const chain = tree.chain(d);
+			const breakPoint =
+				chain.find((a) => a.encryption_overridden) ??
+				chain[chain.length - 1] ??
+				d;
+			eff = fromDirectory(breakPoint, true);
+		}
+		byDirectory.set(d.id, eff);
+		return eff;
+	};
+	return {
+		tree,
+		directory,
+		file(f) {
+			const own: EffectiveEncryption = {
+				mode: f.encryption_mode,
+				keyBlob: f.enc_key_blob,
+				accessBlob: f.enc_access_blob,
+				passwordLocked: !!f.access_is_password,
+				keyCheckBlob: null,
+				sourceDirectoryId: null,
+				ownerDirectoryId: null,
+			};
+			if (f.encryption_overridden || f.directory_id === null) return own;
+			const dir = tree.row(f.directory_id);
+			return dir ? directory(dir) : own;
+		},
+	};
 }
 
 /** The plaintext access secret behind `?ek=` for a server-mode node, or null

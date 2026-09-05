@@ -149,7 +149,31 @@ export function fileHashes(db: Db, file: FileRow): Record<string, string> {
 				$id: file.blob_id,
 			})
 		: undefined;
-	if (!blob) return {};
+	return blob ? hashesOf(blob) : {};
+}
+
+/** `fileHashes` for a whole listing: one query over the distinct blob ids
+ * instead of one per row. Missing ids (a file with no blob) simply aren't in
+ * the map. */
+export function fileHashesForBlobs(
+	db: Db,
+	blobIds: number[],
+): Map<number, Record<string, string>> {
+	const out = new Map<number, Record<string, string>>();
+	const ids = [...new Set(blobIds)];
+	if (!ids.length) return out;
+	const rows = db.all<ContentBlobRow>(
+		`SELECT id, sha256, sha1, md5, blake2b FROM content_blobs
+     WHERE id IN (${ids.map((_, i) => `$b${i}`).join(",")})`,
+		Object.fromEntries(ids.map((id, i) => [`$b${i}`, id])),
+	);
+	for (const blob of rows) out.set(blob.id, hashesOf(blob));
+	return out;
+}
+
+function hashesOf(
+	blob: Pick<ContentBlobRow, "sha256" | "sha1" | "md5" | "blake2b">,
+): Record<string, string> {
 	const all: Record<string, string> = {
 		sha256: blob.sha256,
 		sha1: blob.sha1,
