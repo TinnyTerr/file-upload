@@ -21,7 +21,9 @@ export function safeArcname(name: string, seen: Set<string>): string {
 		.filter((c) => c.codePointAt(0)! >= 0x20)
 		.join("")
 		.trim();
-	if (!base) base = "file";
+	// Separators are already stripped, so a bare "." / ".." can't traverse --
+	// but a member literally named ".." still trips naive extractors.
+	if (!base || base === "." || base === "..") base = "file";
 	const dotIdx = base.indexOf(".");
 	let stem = dotIdx === -1 ? base : base.slice(0, dotIdx);
 	let dot = dotIdx === -1 ? "" : ".";
