@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { Router } from "express";
+import { type Request, type Response, Router } from "express";
 import { authenticator } from "otplib";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
@@ -50,18 +50,53 @@ export function mfaRouter(state: AppState): Router {
 		});
 	});
 
-	router.post("/totp/setup", requireSession(state), requireCsrf, (req, res) => {
+	/**
+	 * Enrolling a factor is the mirror image of removing one and takes the
+	 * same gate: the current password. Without it a stolen session cookie
+	 * could add a passkey that survives the victim changing their password
+	 * -- durable takeover from a transient compromise. Wrong answers feed the
+	 * account's lockout counter so this can't be used to guess the password.
+	 */
+	async function reauthenticated(
+		req: Request,
+		res: Response,
+	): Promise<UserRow | null> {
+		const { current_password: currentPassword } = req.body ?? {};
 		const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 			$id: req.sessionRow!.user_id,
 		})!;
-		const secret = authenticator.generateSecret();
-		const otpauthUrl = authenticator.keyuri(
-			user.username,
-			"FileUpload",
-			secret,
-		);
-		res.json({ secret, otpauth_url: otpauthUrl });
-	});
+		const ip = clientIp(state, req);
+		if (!state.lockout.checkLoginAllowed(db, user.username, ip)) {
+			res.status(429).json({ detail: "too many attempts, try again later" });
+			return null;
+		}
+		if (
+			typeof currentPassword !== "string" ||
+			!(await verifyPassword(currentPassword, user.password_hash))
+		) {
+			state.lockout.recordFailure(db, user.username, "username");
+			res.status(401).json({ detail: "invalid credentials" });
+			return null;
+		}
+		return user;
+	}
+
+	router.post(
+		"/totp/setup",
+		requireSession(state),
+		requireCsrf,
+		asyncHandler(async (req, res) => {
+			const user = await reauthenticated(req, res);
+			if (!user) return;
+			const secret = authenticator.generateSecret();
+			const otpauthUrl = authenticator.keyuri(
+				user.username,
+				"FileUpload",
+				secret,
+			);
+			res.json({ secret, otpauth_url: otpauthUrl });
+		}),
+	);
 
 	router.post(
 		"/totp/confirm",
@@ -117,9 +152,8 @@ export function mfaRouter(state: AppState): Router {
 		requireSession(state),
 		requireCsrf,
 		asyncHandler(async (req, res) => {
-			const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
-				$id: req.sessionRow!.user_id,
-			})!;
+			const user = await reauthenticated(req, res);
+			if (!user) return;
 			let rpContext: { rpID: string; origin: string };
 			try {
 				rpContext = resolveRpContext(state.settings, req);

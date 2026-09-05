@@ -38,9 +38,8 @@ function TotpSetupModal({
 		toast.success("Authenticator app added");
 	});
 
-	// biome-ignore lint/correctness/useExhaustiveDependencies: deliberately keyed on `open` alone -- this runs the open/close transition. start()/reset() are re-created every render and start() advances state.step, so adding them loops.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: deliberately keyed on `open` alone -- this runs the close transition. reset() is re-created every render, so adding it loops.
 	React.useEffect(() => {
-		if (open && state.step === "idle") void start();
 		if (!open) reset();
 	}, [open]);
 
@@ -65,8 +64,73 @@ function TotpSetupModal({
 					onOpenChange={onOpenChange}
 				/>
 			)}
-			{state.step === "idle" && error && <ErrorMsg message={error} />}
+			{state.step === "idle" && (
+				// Enrolling a factor takes the current password, like removing one:
+				// a stolen session must not be able to add a passkey that outlives
+				// a password change.
+				<ReauthForm
+					description="Confirm your password to add an authenticator app."
+					error={error}
+					onSubmit={start}
+					onOpenChange={onOpenChange}
+				/>
+			)}
 		</SubModal>
+	);
+}
+
+function ReauthForm({
+	description,
+	error,
+	onSubmit,
+	onOpenChange,
+}: {
+	description: string;
+	error: string | null;
+	onSubmit: (currentPassword: string) => Promise<void>;
+	onOpenChange: (v: boolean) => void;
+}) {
+	const [pw, setPw] = useState("");
+	const [submitting, setSubmitting] = useState(false);
+
+	const handleSubmit = async (e: React.FormEvent) => {
+		e.preventDefault();
+		setSubmitting(true);
+		try {
+			await onSubmit(pw);
+		} finally {
+			setSubmitting(false);
+		}
+	};
+
+	return (
+		<form onSubmit={handleSubmit} className="space-y-4">
+			<p className="text-sm text-muted-foreground">{description}</p>
+			<div className="space-y-1.5">
+				<Label htmlFor="mfa-reauth-password">Current password</Label>
+				<PasswordInput
+					id="mfa-reauth-password"
+					value={pw}
+					onChange={(e) => setPw(e.target.value)}
+					autoComplete="current-password"
+					autoFocus
+					required
+				/>
+			</div>
+			{error && <ErrorMsg message={error} />}
+			<div className="flex justify-end gap-2">
+				<Button
+					type="button"
+					variant="ghost"
+					onClick={() => onOpenChange(false)}
+				>
+					Cancel
+				</Button>
+				<Button type="submit" loading={submitting} disabled={!pw}>
+					Continue
+				</Button>
+			</div>
+		</form>
 	);
 }
 
@@ -178,14 +242,15 @@ function PasskeyAddForm({
 }: {
 	submitting: boolean;
 	error: string | null;
-	onRegister: (label?: string) => void;
+	onRegister: (currentPassword: string, label?: string) => void;
 	onOpenChange: (v: boolean) => void;
 }) {
 	const [label, setLabel] = useState("");
+	const [pw, setPw] = useState("");
 
 	const handleSubmit = (e: React.FormEvent) => {
 		e.preventDefault();
-		void onRegister(label || undefined);
+		void onRegister(pw, label || undefined);
 	};
 
 	return (
@@ -194,6 +259,16 @@ function PasskeyAddForm({
 				Your browser will prompt you to use a fingerprint, face scan, security
 				key, or device PIN.
 			</p>
+			<div className="space-y-1.5">
+				<Label htmlFor="passkey-reauth-password">Current password</Label>
+				<PasswordInput
+					id="passkey-reauth-password"
+					value={pw}
+					onChange={(e) => setPw(e.target.value)}
+					autoComplete="current-password"
+					required
+				/>
+			</div>
 			<div className="space-y-1.5">
 				<Label>Label (optional)</Label>
 				<Input
@@ -211,7 +286,7 @@ function PasskeyAddForm({
 				>
 					Cancel
 				</Button>
-				<Button type="submit" loading={submitting}>
+				<Button type="submit" loading={submitting} disabled={!pw}>
 					Continue
 				</Button>
 			</div>

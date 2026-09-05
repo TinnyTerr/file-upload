@@ -88,3 +88,27 @@ describe("TOTP login step", () => {
 		expect(again.status).toBe(401);
 	});
 });
+
+describe("MFA enrolment re-authentication", () => {
+	let h: Harness;
+	afterEach(() => h.close());
+
+	test("starting an enrolment needs the current password", async () => {
+		h = await makeHarness();
+		const user = await makeUser(h.db, "enroller");
+		const { cookie, csrf } = h.signIn(user);
+		const post = (body: unknown) =>
+			h.request("/api/account/mfa/totp/setup", {
+				method: "POST",
+				cookie,
+				csrf,
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			});
+		expect((await post({})).status).toBe(401);
+		expect((await post({ current_password: "nope" })).status).toBe(401);
+		const ok = await post({ current_password: PASSWORD });
+		expect(ok.status).toBe(200);
+		expect((await ok.json()) as { secret: string }).toHaveProperty("secret");
+	});
+});

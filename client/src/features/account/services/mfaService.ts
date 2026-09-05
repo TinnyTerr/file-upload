@@ -18,9 +18,10 @@ export const mfaService = {
 			.get<{ credentials: MfaCredential[] }>("/account/mfa")
 			.then((r) => r.credentials),
 
-	totpSetup: () =>
+	totpSetup: (current_password: string) =>
 		api.post<{ secret: string; otpauth_url: string }>(
 			"/account/mfa/totp/setup",
+			{ json: { current_password } },
 		),
 
 	totpConfirm: (body: { secret: string; code: string; label?: string }) =>
@@ -33,9 +34,10 @@ export const mfaService = {
 			json: { current_password },
 		}),
 
-	webauthnRegisterStart: () =>
+	webauthnRegisterStart: (current_password: string) =>
 		api.post<{ options: PublicKeyCredentialCreationOptionsJSON }>(
 			"/account/mfa/webauthn/register/start",
+			{ json: { current_password } },
 		),
 
 	webauthnRegisterFinish: (

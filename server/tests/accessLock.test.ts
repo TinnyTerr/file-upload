@@ -86,9 +86,9 @@ describe("password-locked link throttle", () => {
 			429,
 		);
 		// ... so a sibling's slug does not start a fresh budget.
-		expect(
-			(await h.request(`/api/file/${b}/preview?ek=another`)).status,
-		).toBe(429);
+		expect((await h.request(`/api/file/${b}/preview?ek=another`)).status).toBe(
+			429,
+		);
 		// And the right password is refused too while locked, which is the
 		// behaviour a lockout is supposed to have.
 		expect(
@@ -103,8 +103,6 @@ describe("password-locked link throttle", () => {
 		for (let i = 0; i < 5; i++) {
 			await h.request(`/api/file/${a}/preview?ek=wrong${i}`);
 		}
-		expect((await h.request(`/api/file/${b}/raw?ek=another`)).status).toBe(
-			429,
-		);
+		expect((await h.request(`/api/file/${b}/raw?ek=another`)).status).toBe(429);
 	});
 });

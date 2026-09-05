@@ -99,11 +99,7 @@ export function totpStep(nowMs: number = Date.now()): number {
  * older one still inside the verifier's tolerance window) is refused from now
  * on. Codes are single-use per RFC 6238 §5.2; without this a code read over a
  * shoulder is good for the rest of its window. */
-export function markTotpUsed(
-	db: Db,
-	credentialId: number,
-	step: number,
-): void {
+export function markTotpUsed(db: Db, credentialId: number, step: number): void {
 	db.run(
 		"UPDATE credentials SET totp_last_step = $step, updated_at = $now WHERE id = $id",
 		{ $step: step, $now: nowIso(), $id: credentialId },

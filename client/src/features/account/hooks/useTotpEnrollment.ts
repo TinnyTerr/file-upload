@@ -12,10 +12,11 @@ export function useTotpEnrollment(onEnrolled: () => void) {
 	const [state, setState] = useState<EnrollState>({ step: "idle" });
 	const [error, setError] = useState<string | null>(null);
 
-	const start = async () => {
+	const start = async (currentPassword: string) => {
 		setError(null);
 		try {
-			const { secret, otpauth_url } = await mfaService.totpSetup();
+			const { secret, otpauth_url } =
+				await mfaService.totpSetup(currentPassword);
 			setState({ step: "secret-issued", secret, otpauthUrl: otpauth_url });
 		} catch (err) {
 			setError(errorMessage(err));

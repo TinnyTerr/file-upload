@@ -7,11 +7,12 @@ export function usePasskeyEnrollment(onEnrolled: () => void) {
 	const [submitting, setSubmitting] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 
-	const register = async (label?: string) => {
+	const register = async (currentPassword: string, label?: string) => {
 		setSubmitting(true);
 		setError(null);
 		try {
-			const { options } = await mfaService.webauthnRegisterStart();
+			const { options } =
+				await mfaService.webauthnRegisterStart(currentPassword);
 			const response = await startRegistration({ optionsJSON: options });
 			await mfaService.webauthnRegisterFinish(response, label);
 			onEnrolled();
