@@ -3,29 +3,24 @@
 #
 # Docs: https://www.react.doctor/ci
 # Source: https://github.com/millionco/react-doctor
-#
-# Gitea notes (differences from the upstream GitHub workflow):
-#   - Action refs are fully qualified URLs. Gitea only falls back to github.com
-#     when the instance's DEFAULT_ACTIONS_URL says so; spelling out the host
-#     works on any instance.
-#   - The `ready_for_review` pull_request activity type does not exist in Gitea,
-#     so it is dropped.
-#   - The reporting features talk to the GitHub REST API. Gitea's API is not
-#     GitHub-compatible, so the sticky comment, inline review comments and the
-#     commit status are turned off — findings land in the job log instead.
 
 name: React Doctor
 
 on:
   # Scans the PR's changed files, reporting only the new issues introduced relative to the merge base of the target branch.
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
   # Scans `main` on every push to track the health-score trend and catch regressions that slipped past PR review.
   push:
     branches: ["main"]
 
 permissions:
   contents: read
+  # The sticky summary comment and the inline review comments are both written
+  # through the pull-request API, and the check mark on the commit through the
+  # statuses API.
+  pull-requests: write
+  statuses: write
 
 # Cancels any in-flight scan for the same PR (or branch, on push) the moment a new commit arrives, so reviewers only ever see the latest run.
 concurrency:
@@ -37,11 +32,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # fetch-depth: 0 gives React Doctor the full git history it needs to find the merge base with the target branch. Without it a shallow checkout has no merge base, so PR runs can't compare against the base and fall back to reporting every issue in the changed files (pre-existing ones included) instead of only the ones the PR introduced.
-      - uses: https://github.com/actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - uses: https://github.com/millionco/react-doctor@v2
+      - uses: millionco/react-doctor@v2
         # Advisory: React Doctor reports findings in the job log but never fails
         # the check. When the signal is trusted, graduate the gate by setting
         # blocking to "error" (fail on new error-severity findings) or "warning"
@@ -49,9 +44,6 @@ jobs:
         # Full reference: https://www.react.doctor/ci
         with:
           directory: client
-          comment: false # No sticky PR summary comment — needs the GitHub API
-          review-comments: false # No inline review comments — needs the GitHub API
-          commit-status: false # No commit status — needs the GitHub API
           # blocking: error        # Gate level: "none" (advisory, the default) | "warning" | "error"
           # scope: full            # On PRs, scan the whole project instead of just changed files
           # version: "0.4.0"       # Pin to a specific react-doctor version instead of "latest"
