@@ -161,6 +161,9 @@ CREATE INDEX IF NOT EXISTS ix_directories_slug ON directories(slug);
 CREATE INDEX IF NOT EXISTS ix_directories_parent_directory_id ON directories(parent_directory_id);
 CREATE INDEX IF NOT EXISTS ix_directories_is_library ON directories(is_library);
 CREATE INDEX IF NOT EXISTS ix_directories_owner_id ON directories(owner_id);
+CREATE INDEX IF NOT EXISTS ix_directories_created_at ON directories(created_at);
+-- routes/media.ts's /library listing: WHERE is_library = 1 ORDER BY library_published_at
+CREATE INDEX IF NOT EXISTS ix_directories_library_published_at ON directories(library_published_at);
 
 CREATE TABLE IF NOT EXISTS files (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -210,6 +213,11 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS ix_files_blob_id ON files(blob_id);
 CREATE INDEX IF NOT EXISTS ix_files_directory_id ON files(directory_id);
 CREATE INDEX IF NOT EXISTS ix_files_owner_id ON files(owner_id);
+-- The lifecycle sweeps (jobs/lifecycle.ts) filter on these hourly; the admin
+-- listing sorts on created_at. Each was a full scan of `files` without one.
+CREATE INDEX IF NOT EXISTS ix_files_lifecycle_state ON files(lifecycle_state);
+CREATE INDEX IF NOT EXISTS ix_files_expires_at ON files(expires_at);
+CREATE INDEX IF NOT EXISTS ix_files_created_at ON files(created_at);
 
 CREATE TABLE IF NOT EXISTS links (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -228,6 +236,8 @@ CREATE TABLE IF NOT EXISTS links (
 );
 CREATE INDEX IF NOT EXISTS ix_links_slug ON links(slug);
 CREATE INDEX IF NOT EXISTS ix_links_file_id ON links(file_id);
+-- link_expiry runs every ten minutes.
+CREATE INDEX IF NOT EXISTS ix_links_expires_at ON links(expires_at);
 
 CREATE TABLE IF NOT EXISTS directory_links (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -258,6 +268,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   last_used_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_api_keys_key_hash ON api_keys(key_hash);
+CREATE INDEX IF NOT EXISTS ix_api_keys_owner_id ON api_keys(owner_id);
 
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -270,6 +281,8 @@ CREATE TABLE IF NOT EXISTS audit_log (
   entry_hash TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_audit_log_created_at ON audit_log(created_at);
+-- GET /api/audit lists DISTINCT action on every page load.
+CREATE INDEX IF NOT EXISTS ix_audit_log_action ON audit_log(action);
 
 CREATE TABLE IF NOT EXISTS credentials (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -289,6 +302,8 @@ CREATE TABLE IF NOT EXISTS credentials (
   totp_last_step INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_credentials_user_id ON credentials(user_id);
+-- Usernameless passkey login looks the credential up by its WebAuthn id.
+CREATE INDEX IF NOT EXISTS ix_credentials_webauthn_id ON credentials(webauthn_id);
 
 CREATE TABLE IF NOT EXISTS storage_settings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -471,6 +486,8 @@ CREATE TABLE IF NOT EXISTS local_blob_cache (
   blob_id INTEGER PRIMARY KEY REFERENCES content_blobs(id) ON DELETE CASCADE,
   last_accessed_at TEXT NOT NULL
 );
+-- cluster/cacheEviction.ts orders candidates by this.
+CREATE INDEX IF NOT EXISTS ix_local_blob_cache_last_accessed_at ON local_blob_cache(last_accessed_at);
 
 CREATE TABLE IF NOT EXISTS cluster_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -546,6 +563,7 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
 CREATE INDEX IF NOT EXISTS ix_oauth_tokens_token_hash ON oauth_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS ix_oauth_tokens_grant_id ON oauth_tokens(grant_id);
 CREATE INDEX IF NOT EXISTS ix_oauth_tokens_user_id ON oauth_tokens(user_id);
+CREATE INDEX IF NOT EXISTS ix_oauth_tokens_expires_at ON oauth_tokens(expires_at);
 
 -- Cluster-wide row identity (cluster/identity.ts, redesign §5.6). UNIQUE and
 -- nullable together: SQLite permits any number of NULLs in a unique index, so
