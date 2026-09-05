@@ -9,6 +9,7 @@ import {
 	type PermissionFlag,
 } from "../permissions.ts";
 import { bindOrReject, hashKey } from "../security/apiKeys.ts";
+import { csrfMatches } from "../security/csrf.ts";
 import {
 	ACCESS_TOKEN_PREFIX,
 	findLiveToken,
@@ -316,8 +317,7 @@ export function getUploadUser(state: AppState): RequestHandler {
 			res.status(401).json({ detail: "not authenticated" });
 			return;
 		}
-		const csrf = req.header("x-csrf-token") ?? "";
-		if (!csrf || csrf !== row.csrf_token) {
+		if (!csrfMatches(req.header("x-csrf-token"), row)) {
 			res.status(403).json({ detail: "invalid or missing CSRF token" });
 			return;
 		}
