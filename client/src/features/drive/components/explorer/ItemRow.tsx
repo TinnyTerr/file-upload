@@ -108,6 +108,7 @@ export function ItemRow({
 					return (
 						<div
 							key={col.id}
+							role="gridcell"
 							className="flex min-w-0 shrink-0 items-center gap-2 px-2 py-1.5"
 							style={{ width, minWidth: col.minWidth }}
 						>
@@ -164,6 +165,7 @@ export function ItemRow({
 					return (
 						<div
 							key={col.id}
+							role="gridcell"
 							className="shrink-0 px-2 py-1.5"
 							style={{ width, minWidth: col.minWidth }}
 						>
@@ -176,6 +178,7 @@ export function ItemRow({
 					return (
 						<div
 							key={col.id}
+							role="gridcell"
 							className="flex shrink-0 items-center justify-end gap-1 px-2 py-1.5 text-xs text-muted-foreground"
 							style={{ width, minWidth: col.minWidth }}
 						>
@@ -191,6 +194,7 @@ export function ItemRow({
 				return (
 					<div
 						key={col.id}
+						role="gridcell"
 						className={cn(
 							"shrink-0 truncate px-2 py-1.5 text-xs text-muted-foreground",
 							col.align === "right" && "text-right",

@@ -212,7 +212,7 @@ export function FileList() {
 				{prefs.view === "details" && <ColumnHeaderRow columns={columns} />}
 				<div
 					ref={virtualRef}
-					role={prefs.view === "details" ? "rowgroup" : "grid"}
+					role="rowgroup"
 					className={cn(
 						"relative w-full",
 						prefs.view === "icons" && "p-3",
@@ -251,6 +251,9 @@ export function FileList() {
 	return (
 		<div
 			ref={scrollRef}
+			role="grid"
+			aria-multiselectable="true"
+			aria-rowcount={rows.length}
 			{...background.dropProps}
 			className={cn(
 				"relative h-full overflow-auto outline-none",
