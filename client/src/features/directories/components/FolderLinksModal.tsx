@@ -142,6 +142,11 @@ export function FolderLinksModal({
 													<Button
 														variant="ghost"
 														size="icon"
+														aria-label={
+															link.hide_uploader
+																? "Show uploader"
+																: "Hide uploader"
+														}
 														onClick={() =>
 															update.mutate({
 																linkId: link.id,
@@ -158,6 +163,11 @@ export function FolderLinksModal({
 													<Button
 														variant="ghost"
 														size="icon"
+														aria-label={
+															link.active
+																? "Deactivate link"
+																: "Reactivate link"
+														}
 														onClick={() =>
 															update.mutate({
 																linkId: link.id,
@@ -173,6 +183,7 @@ export function FolderLinksModal({
 														variant="ghost"
 														size="icon"
 														className="text-destructive"
+														aria-label="Delete link"
 														loading={del.isPending}
 														onClick={() => onDelete(link)}
 													>

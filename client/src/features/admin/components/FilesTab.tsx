@@ -107,6 +107,7 @@ function AdminFileRow({
 								<Button
 									variant="ghost"
 									size="icon"
+									aria-label="Unarchive"
 									loading={unarchive.isPending}
 									onClick={() => unarchive.mutate(file.id)}
 								>
@@ -118,6 +119,7 @@ function AdminFileRow({
 								<Button
 									variant="ghost"
 									size="icon"
+									aria-label="Archive"
 									loading={archive.isPending}
 									onClick={() => archive.mutate(file.id)}
 								>
@@ -130,6 +132,7 @@ function AdminFileRow({
 								variant="ghost"
 								size="icon"
 								className="text-destructive"
+								aria-label="Delete file"
 								loading={del.isPending}
 								onClick={onDelete}
 							>

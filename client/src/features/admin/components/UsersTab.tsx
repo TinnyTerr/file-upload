@@ -132,6 +132,7 @@ export function UsersTab() {
 											<Button
 												variant="ghost"
 												size="icon"
+												aria-label={`Edit ${u.username}`}
 												onClick={() => {
 													setEditing(u);
 													setFormOpen(true);
@@ -144,6 +145,7 @@ export function UsersTab() {
 											<Button
 												variant="ghost"
 												size="icon"
+												aria-label={`Permissions for ${u.username}`}
 												onClick={() => setPermsFor(u)}
 											>
 												<Shield />
@@ -159,6 +161,7 @@ export function UsersTab() {
 													variant="ghost"
 													size="icon"
 													className="text-destructive"
+													aria-label={`Delete ${u.username}`}
 													disabled={u.id === me?.id}
 													loading={remove.isPending}
 													onClick={() => onDelete(u)}

@@ -432,6 +432,7 @@ export function SecurityTab() {
 									variant="ghost"
 									size="icon"
 									className="shrink-0 text-destructive"
+									aria-label={`Remove ${c.label || "authenticator app"}`}
 									onClick={() => setRemoveTarget(c)}
 								>
 									<Trash2 className="size-4" />
@@ -476,6 +477,7 @@ export function SecurityTab() {
 									variant="ghost"
 									size="icon"
 									className="shrink-0 text-destructive"
+									aria-label={`Remove ${c.label || "passkey"}`}
 									onClick={() => setRemoveTarget(c)}
 								>
 									<Trash2 className="size-4" />

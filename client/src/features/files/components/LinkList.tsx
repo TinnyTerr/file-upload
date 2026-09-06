@@ -109,6 +109,9 @@ export function LinkList({ file }: { file: FileObject }) {
 										<Button
 											variant="ghost"
 											size="icon"
+											aria-label={
+												link.hide_uploader ? "Show uploader" : "Hide uploader"
+											}
 											onClick={() =>
 												edit.mutate({
 													linkId: link.id,
@@ -123,6 +126,9 @@ export function LinkList({ file }: { file: FileObject }) {
 										<Button
 											variant="ghost"
 											size="icon"
+											aria-label={
+												link.active ? "Deactivate link" : "Reactivate link"
+											}
 											onClick={() =>
 												edit.mutate({ linkId: link.id, active: !link.active })
 											}
@@ -135,6 +141,7 @@ export function LinkList({ file }: { file: FileObject }) {
 											variant="ghost"
 											size="icon"
 											className="text-destructive"
+											aria-label="Delete link"
 											onClick={() => onDelete(link)}
 										>
 											<Trash2 />

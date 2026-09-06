@@ -1166,6 +1166,7 @@ function SessionsTab() {
 									variant="ghost"
 									size="icon"
 									className="shrink-0 text-destructive"
+									aria-label="Revoke session"
 									onClick={() => {
 										setRevokeTarget(s.id);
 										setError(null);
