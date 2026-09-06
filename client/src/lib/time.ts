@@ -48,6 +48,15 @@ export function relativeTime(iso: string | null | undefined): string {
 	return "now";
 }
 
+/** Format a countdown like "45s" / "12m" / "3h" for an in-progress transfer.
+ * "—" once there's nothing left to estimate from (null, zero, negative). */
+export function formatEta(seconds: number | null | undefined): string {
+	if (!seconds || seconds <= 0) return "—";
+	if (seconds < 60) return `${Math.round(seconds)}s`;
+	if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+	return `${Math.round(seconds / 3600)}h`;
+}
+
 /**
  * Parse a human duration string ("24h", "7d", "30m", "90s", "1w") into seconds.
  * Returns null if the input is empty/invalid.

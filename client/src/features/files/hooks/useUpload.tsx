@@ -30,6 +30,11 @@ export interface UploadItem {
 	percent: number;
 	error?: string;
 	outcome?: UploadOutcome;
+	/** Smoothed bytes/sec for the current phase. Undefined until there are
+	 * enough samples to say anything, and cleared once the item settles. */
+	speedBps?: number;
+	/** Estimated seconds left in the current phase at `speedBps`. */
+	etaSeconds?: number;
 }
 
 let seq = 0;
@@ -82,6 +87,11 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 	const [busy, setBusy] = useState(false);
 	const controllers = useRef(new Map<string, AbortController>());
 	const retryData = useRef(new Map<string, RetryData>());
+	// Last (time, bytes, smoothed speed) sample per item, for turning the raw
+	// percent ticks performUpload reports into a speed/ETA worth showing.
+	const speedTrackers = useRef(
+		new Map<string, { t: number; bytes: number; speed: number }>(),
+	);
 	// How many uploads (the sequential batch, plus any independent retries)
 	// are running right now -- `busy` is derived from whether this is above
 	// zero, so a retry kicked off after its batch finished still holds the
@@ -120,6 +130,35 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 		return () => window.removeEventListener("beforeunload", onBeforeUnload);
 	}, [busy]);
 
+	/** Turns a raw percent tick into a smoothed speed and an ETA, by comparing
+	 * it against the item's last sample. Exponential smoothing so one slow or
+	 * fast tick (a chunk boundary, a GC pause) doesn't jerk the display. */
+	const sampleSpeed = useCallback(
+		(id: string, totalBytes: number, percent: number) => {
+			const bytes = Math.round((totalBytes * percent) / 100);
+			const now = performance.now();
+			const prev = speedTrackers.current.get(id);
+			let speed = prev?.speed;
+			if (prev) {
+				const dt = (now - prev.t) / 1000;
+				const db = bytes - prev.bytes;
+				// Ignore ticks too close together to measure, or a chunk retry's
+				// backward jump -- either would produce a nonsense instant rate.
+				if (dt > 0.2 && db >= 0) {
+					const instant = db / dt;
+					speed = speed ? speed * 0.7 + instant * 0.3 : instant;
+				}
+			}
+			speedTrackers.current.set(id, { t: now, bytes, speed: speed ?? 0 });
+			const etaSeconds =
+				speed && speed > 0
+					? Math.round((totalBytes - bytes) / speed)
+					: undefined;
+			return { speedBps: speed || undefined, etaSeconds };
+		},
+		[],
+	);
+
 	/** Runs one already-queued item. Shared by the batch loop in `start` and
 	 * by `retry`, which is really just this same step run again later. */
 	const runOne = useCallback(
@@ -139,9 +178,19 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 					presetKey,
 					signal: controller.signal,
 					onProgress: ({ phase, percent }) =>
-						update(id, { status: phase, percent }),
+						update(id, {
+							status: phase,
+							percent,
+							...sampleSpeed(id, file.size, percent),
+						}),
 				});
-				update(id, { status: "done", percent: 100, outcome });
+				update(id, {
+					status: "done",
+					percent: 100,
+					outcome,
+					speedBps: undefined,
+					etaSeconds: undefined,
+				});
 				return { filename, outcome };
 			} catch (err) {
 				if (err instanceof DOMException && err.name === "AbortError") {
@@ -154,9 +203,10 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 				return null;
 			} finally {
 				controllers.current.delete(id);
+				speedTrackers.current.delete(id);
 			}
 		},
-		[update],
+		[update, sampleSpeed],
 	);
 
 	const start = useCallback(
@@ -242,6 +292,8 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 				percent: 0,
 				error: undefined,
 				outcome: undefined,
+				speedBps: undefined,
+				etaSeconds: undefined,
 			});
 			beginActive();
 			runOne(id, filename, data.file, data.options, data.presetKey)

@@ -14,7 +14,7 @@ import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { formatBytes } from "@/lib/bytes";
-import { relativeTime } from "@/lib/time";
+import { formatEta, relativeTime } from "@/lib/time";
 import type { TorrentJob, TorrentStatus } from "../types";
 
 const STATUS_BADGE: Record<
@@ -39,13 +39,6 @@ const DEBRID_PHASE: Record<string, string> = {
 	compressing: "Real-Debrid is packaging the files…",
 	uploading: "Real-Debrid is finishing up…",
 };
-
-function formatEta(seconds: number | null): string {
-	if (!seconds || seconds <= 0) return "—";
-	if (seconds < 60) return `${seconds}s`;
-	if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
-	return `${Math.round(seconds / 3600)}h`;
-}
 
 function transferLine(t: TorrentJob): string {
 	const rate = `${formatBytes(t.dl_speed)}/s · ETA ${formatEta(t.eta_seconds)}`;
