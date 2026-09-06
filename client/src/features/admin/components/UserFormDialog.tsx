@@ -1,3 +1,4 @@
+import type * as React from "react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -59,7 +60,8 @@ function UserForm({ onClose, editing }: Omit<Props, "open">) {
 		editing?.mfa_required ?? false,
 	);
 
-	const onSubmit = async () => {
+	const onSubmit = async (e: React.FormEvent) => {
+		e.preventDefault();
 		if (isEdit && editing) {
 			await update.mutateAsync({
 				id: editing.id,
@@ -94,7 +96,7 @@ function UserForm({ onClose, editing }: Omit<Props, "open">) {
 				</DialogDescription>
 			</DialogHeader>
 
-			<div className="space-y-3">
+			<form id="user-form" onSubmit={onSubmit} className="space-y-3">
 				<div className="space-y-1.5">
 					<Label htmlFor="u-name">Username</Label>
 					<Input
@@ -149,14 +151,15 @@ function UserForm({ onClose, editing }: Omit<Props, "open">) {
 						Master accounts always require MFA once enrolled.
 					</p>
 				)}
-			</div>
+			</form>
 
 			<DialogFooter>
-				<Button variant="ghost" onClick={onClose}>
+				<Button type="button" variant="ghost" onClick={onClose}>
 					Cancel
 				</Button>
 				<Button
-					onClick={onSubmit}
+					type="submit"
+					form="user-form"
 					loading={pending}
 					disabled={!username || (!isEdit && password.length < 12)}
 				>

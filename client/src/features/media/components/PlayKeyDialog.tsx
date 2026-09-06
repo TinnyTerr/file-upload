@@ -1,4 +1,5 @@
 import { KeyRound, TriangleAlert } from "lucide-react";
+import type * as React from "react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -20,6 +21,7 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { formatDateTime } from "@/lib/time";
 import { usePlayKeys } from "../hooks/useMedia";
 import type { MintedPlayKey } from "../types";
 
@@ -64,7 +66,8 @@ export function PlayKeyDialog({
 		}
 	};
 
-	const onMint = async () => {
+	const onMint = async (e: React.FormEvent) => {
+		e.preventDefault();
 		if (!target) return;
 		const key = await mint.mutateAsync({
 			...(target.fileId !== undefined
@@ -116,8 +119,7 @@ export function PlayKeyDialog({
 							<TriangleAlert className="mt-0.5 size-3.5 shrink-0" />
 							<span>
 								Anyone holding this URL can play the title until it expires (
-								{new Date(minted.expires_at).toLocaleString()}) or you revoke
-								it.
+								{formatDateTime(minted.expires_at)}) or you revoke it.
 								{minted.bound_ip
 									? ` It only works from ${minted.bound_ip}.`
 									: ""}
@@ -125,7 +127,7 @@ export function PlayKeyDialog({
 						</p>
 					</div>
 				) : (
-					<div className="space-y-4">
+					<form id="play-key-form" onSubmit={onMint} className="space-y-4">
 						<div className="space-y-2">
 							<Label htmlFor="playkey-ttl">Expires after</Label>
 							<Select value={ttl} onValueChange={setTtl}>
@@ -163,7 +165,7 @@ export function PlayKeyDialog({
 								onCheckedChange={setBindIp}
 							/>
 						</div>
-					</div>
+					</form>
 				)}
 
 				<DialogFooter>
@@ -171,10 +173,18 @@ export function PlayKeyDialog({
 						<Button onClick={() => close(false)}>Done</Button>
 					) : (
 						<>
-							<Button variant="ghost" onClick={() => close(false)}>
+							<Button
+								type="button"
+								variant="ghost"
+								onClick={() => close(false)}
+							>
 								Cancel
 							</Button>
-							<Button onClick={onMint} disabled={mint.isPending}>
+							<Button
+								type="submit"
+								form="play-key-form"
+								disabled={mint.isPending}
+							>
 								{mint.isPending ? "Creating…" : "Create key"}
 							</Button>
 						</>

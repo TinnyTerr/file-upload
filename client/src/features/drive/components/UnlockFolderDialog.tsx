@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { errorMessage } from "@/config/api";
 import { verifyFolderKey } from "@/features/directories/lib/folderKey";
 import type { Directory } from "@/features/directories/types";
 
@@ -58,8 +59,11 @@ export function UnlockFolderDialog({
 			setValue("");
 			onOpenChange(false);
 			onUnlocked(key);
-		} catch (err: any) {
-			setError(err?.message || "That key doesn't open this folder.");
+		} catch (err) {
+			// AES-GCM auth-tag failure (the common case: a wrong key) throws with
+			// no useful message in most browsers, so this fallback is the message
+			// that actually shows up for the dialog's whole reason for existing.
+			setError(errorMessage(err) || "That key doesn't open this folder.");
 		} finally {
 			setBusy(false);
 		}

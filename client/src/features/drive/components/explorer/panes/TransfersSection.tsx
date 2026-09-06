@@ -29,7 +29,7 @@ export function TransfersSection({
 						)}
 					/>
 					<p className="text-xs text-muted-foreground">
-						Folder: {treeProgress.completed + 1} of {treeProgress.total}
+						Folder: {treeProgress.completed} of {treeProgress.total}
 						{treeProgress.current ? ` · ${treeProgress.current}` : ""}
 					</p>
 				</div>

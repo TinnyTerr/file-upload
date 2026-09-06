@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
 	DropdownMenu,
@@ -117,6 +118,7 @@ export function AddressBar() {
 			(c) => c.title.toLowerCase() === wanted.toLowerCase(),
 		);
 		if (hit) navigate(drivePath(hit.id));
+		else toast.error(`No folder named "${wanted}" in the current path.`);
 	};
 
 	const visible =

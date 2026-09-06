@@ -1,5 +1,6 @@
 import { UploadCloud } from "lucide-react";
 import { useRef, useState } from "react";
+import { readDroppedItems } from "@/features/drive/lib/dropEntries";
 import { cn } from "@/lib/cn";
 
 /** Drag-and-drop or click-to-pick file selector. */
@@ -9,17 +10,21 @@ export function Dropzone({
 	directory = false,
 	hint,
 }: {
-	onFiles: (files: File[]) => void;
+	onFiles: (files: File[], isTree: boolean) => void;
 	multiple?: boolean;
 	directory?: boolean;
 	hint?: string;
 }) {
 	const inputRef = useRef<HTMLInputElement>(null);
 	const [dragging, setDragging] = useState(false);
+	// dragenter/dragleave fire per element and bubble, so leaving a child (any
+	// icon or text node inside the zone) briefly looks identical to leaving the
+	// zone itself. A depth counter is what tells the two apart.
+	const dragDepth = useRef(0);
 
 	const pick = (list: FileList | null) => {
 		if (!list || !list.length) return;
-		onFiles(Array.from(list));
+		onFiles(Array.from(list), false);
 	};
 
 	// webkitdirectory/directory are non-standard; a typed record avoids JSX
@@ -36,14 +41,33 @@ export function Dropzone({
 			onKeyDown={(e) =>
 				(e.key === "Enter" || e.key === " ") && inputRef.current?.click()
 			}
-			onDragOver={(e) => {
+			onDragEnter={(e) => {
 				e.preventDefault();
+				dragDepth.current += 1;
 				setDragging(true);
 			}}
-			onDragLeave={() => setDragging(false)}
+			onDragOver={(e) => e.preventDefault()}
+			onDragLeave={() => {
+				dragDepth.current -= 1;
+				if (dragDepth.current <= 0) {
+					dragDepth.current = 0;
+					setDragging(false);
+				}
+			}}
 			onDrop={(e) => {
 				e.preventDefault();
+				dragDepth.current = 0;
 				setDragging(false);
+				// Dropping a folder needs webkitGetAsEntry to see inside it --
+				// DataTransfer.files flattens a directory to nothing.
+				if (directory) {
+					const items = Array.from(e.dataTransfer.items);
+					const files = Array.from(e.dataTransfer.files);
+					void readDroppedItems(items, files).then((payload) =>
+						onFiles(payload.files, payload.isTree),
+					);
+					return;
+				}
 				pick(e.dataTransfer.files);
 			}}
 			className={cn(
@@ -72,7 +96,8 @@ export function Dropzone({
 				multiple={multiple}
 				{...dirProps}
 				onChange={(e) => {
-					pick(e.target.files);
+					if (directory) onFiles(Array.from(e.target.files ?? []), true);
+					else pick(e.target.files);
 					e.target.value = "";
 				}}
 			/>

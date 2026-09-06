@@ -11,6 +11,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { errorMessage } from "@/config/api";
 import { PERMISSION_META } from "@/config/permissions";
 import { useAdminUsers } from "../hooks/useAdminUsers";
 import type { AdminUser, UserPermissions } from "../types";
@@ -39,8 +40,8 @@ export function PermissionsDialog({
 		try {
 			await setPermissions.mutateAsync({ id: user.id, permissions: draft });
 			onClose();
-		} catch (err: any) {
-			setError(err.message || "Failed to save permissions.");
+		} catch (err) {
+			setError(errorMessage(err));
 		}
 	};
 

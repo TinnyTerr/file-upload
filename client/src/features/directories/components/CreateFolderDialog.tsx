@@ -1,4 +1,5 @@
 import { FolderPlus, Info } from "lucide-react";
+import type * as React from "react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +21,7 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { Tooltip } from "@/components/ui/tooltip";
+import { errorMessage } from "@/config/api";
 import { useAuth } from "@/features/auth/hooks/auth";
 import { useRevealedKeys } from "@/features/drive/hooks/useRevealedKeys";
 import {
@@ -73,7 +75,8 @@ export function CreateFolderDialog({
 
 	const nested = parent !== null;
 
-	const onCreate = async () => {
+	const onCreate = async (e: React.FormEvent) => {
+		e.preventDefault();
 		setError(null);
 		setCreatingKey(true);
 		try {
@@ -112,8 +115,8 @@ export function CreateFolderDialog({
 				});
 				setShareOpen(true);
 			}
-		} catch (err: any) {
-			setError(err.message || "Failed to create folder");
+		} catch (err) {
+			setError(errorMessage(err));
 		} finally {
 			setCreatingKey(false);
 		}
@@ -140,7 +143,11 @@ export function CreateFolderDialog({
 								: "Create an empty folder, then add files to it later."}
 						</DialogDescription>
 					</DialogHeader>
-					<div className="space-y-3">
+					<form
+						id="create-folder-form"
+						onSubmit={onCreate}
+						className="space-y-3"
+					>
 						<div className="space-y-1.5">
 							<Label htmlFor="new-folder-title">Title</Label>
 							<Input
@@ -188,16 +195,21 @@ export function CreateFolderDialog({
 								</Select>
 							</div>
 						)}
-					</div>
+					</form>
 					{error && (
 						<div className="text-sm font-medium text-destructive">{error}</div>
 					)}
 					<DialogFooter>
-						<Button variant="ghost" onClick={() => setOpen(false)}>
+						<Button
+							type="button"
+							variant="ghost"
+							onClick={() => setOpen(false)}
+						>
 							Cancel
 						</Button>
 						<Button
-							onClick={onCreate}
+							type="submit"
+							form="create-folder-form"
 							loading={create.isPending || creatingKey}
 						>
 							Create folder

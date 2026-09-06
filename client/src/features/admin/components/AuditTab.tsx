@@ -10,6 +10,7 @@ import {
 	ShieldQuestion,
 } from "lucide-react";
 import { useState } from "react";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -30,6 +31,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
+import { errorMessage } from "@/config/api";
 import { formatDateTime } from "@/lib/time";
 import { useAudit, useClusterAudit } from "../hooks/useAdminData";
 import { adminService } from "../services/adminService";
@@ -72,6 +74,10 @@ export function AuditTab() {
 	const verifyChain = useMutation({
 		mutationFn: () => adminService.audit({ limit: 1, offset: 0, verify: true }),
 		onSuccess: (data) => setVerifiedResult(data.chain_ok),
+		onError: (err) =>
+			toast.error("Chain verification failed", {
+				description: errorMessage(err),
+			}),
 	});
 
 	const local = useAudit({

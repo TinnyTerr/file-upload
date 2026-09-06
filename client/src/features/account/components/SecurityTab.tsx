@@ -19,6 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { QRCode } from "@/components/ui/qr-code";
 import { errorMessage } from "@/config/api";
+import { formatDate } from "@/lib/time";
 import { usePasskeyEnrollment } from "../hooks/usePasskeyEnrollment";
 import { useTotpEnrollment } from "../hooks/useTotpEnrollment";
 import { type MfaCredential, mfaService } from "../services/mfaService";
@@ -425,7 +426,7 @@ export function SecurityTab() {
 										{c.label || "Authenticator app"}
 									</p>
 									<p className="text-xs text-muted-foreground">
-										Added {new Date(c.created_at).toLocaleDateString()}
+										Added {formatDate(c.created_at)}
 									</p>
 								</div>
 								<Button
@@ -470,7 +471,7 @@ export function SecurityTab() {
 								<div className="min-w-0 flex-1">
 									<p className="text-sm font-medium">{c.label || "Passkey"}</p>
 									<p className="text-xs text-muted-foreground">
-										Added {new Date(c.created_at).toLocaleDateString()}
+										Added {formatDate(c.created_at)}
 									</p>
 								</div>
 								<Button

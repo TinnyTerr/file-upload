@@ -117,7 +117,7 @@ function HaltList({ halts }: { halts: ClusterHalt[] }) {
 					<PauseCircle className="size-3.5 text-warning" />
 					<span>{haltLabel(h.scope)}</span>
 					<span className="text-muted-foreground">
-						· until {new Date(h.until * 1000).toLocaleTimeString()}
+						· {relativeTime(new Date(h.until * 1000).toISOString())}
 					</span>
 				</li>
 			))}

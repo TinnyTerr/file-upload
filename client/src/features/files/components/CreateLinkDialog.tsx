@@ -1,4 +1,5 @@
 import { EyeOff, Plus } from "lucide-react";
+import type * as React from "react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,6 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { errorMessage } from "@/config/api";
 import { parseDuration } from "@/lib/time";
 import { useLinks } from "../hooks/useLinks";
 
@@ -24,7 +26,8 @@ export function CreateLinkDialog({ fileId }: { fileId: number }) {
 	const [hideUploader, setHideUploader] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 
-	const onCreate = async () => {
+	const onCreate = async (e: React.FormEvent) => {
+		e.preventDefault();
 		setError(null);
 		try {
 			await mint.mutateAsync({
@@ -37,8 +40,8 @@ export function CreateLinkDialog({ fileId }: { fileId: number }) {
 			setMaxUses("");
 			setExpiresIn("");
 			setHideUploader(false);
-		} catch (err: any) {
-			setError(err.message || "Failed to create link");
+		} catch (err) {
+			setError(errorMessage(err));
 		}
 	};
 
@@ -56,7 +59,7 @@ export function CreateLinkDialog({ fileId }: { fileId: number }) {
 						Create an additional link with its own limits.
 					</DialogDescription>
 				</DialogHeader>
-				<div className="space-y-3">
+				<form id="create-link-form" onSubmit={onCreate} className="space-y-3">
 					<div className="space-y-1.5">
 						<Label htmlFor="max-uses">Max downloads</Label>
 						<Input
@@ -93,15 +96,19 @@ export function CreateLinkDialog({ fileId }: { fileId: number }) {
 							onCheckedChange={setHideUploader}
 						/>
 					</div>
-				</div>
+				</form>
 				{error && (
 					<div className="text-sm font-medium text-destructive">{error}</div>
 				)}
 				<DialogFooter>
-					<Button variant="ghost" onClick={() => setOpen(false)}>
+					<Button type="button" variant="ghost" onClick={() => setOpen(false)}>
 						Cancel
 					</Button>
-					<Button onClick={onCreate} loading={mint.isPending}>
+					<Button
+						type="submit"
+						form="create-link-form"
+						loading={mint.isPending}
+					>
 						Create link
 					</Button>
 				</DialogFooter>

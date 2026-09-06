@@ -1,4 +1,5 @@
 import { AppWindow, Plus, Trash2 } from "lucide-react";
+import type * as React from "react";
 import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -57,7 +58,8 @@ export function OauthAppsSection() {
 		setOpen(false);
 	};
 
-	const onCreate = async () => {
+	const onCreate = async (e: React.FormEvent) => {
+		e.preventDefault();
 		const uris = redirectUris
 			.split("\n")
 			.map((u) => u.trim())
@@ -104,7 +106,10 @@ export function OauthAppsSection() {
 				</CardHeader>
 				<CardContent className="space-y-4">
 					{open && (
-						<div className="space-y-4 rounded-md border border-border p-3">
+						<form
+							onSubmit={onCreate}
+							className="space-y-4 rounded-md border border-border p-3"
+						>
 							<div className="space-y-1.5">
 								<Label htmlFor="oauth-app-name">Name</Label>
 								<Input
@@ -175,19 +180,19 @@ export function OauthAppsSection() {
 								/>
 							</div>
 							<div className="flex justify-end gap-2">
-								<Button variant="ghost" size="sm" onClick={reset}>
+								<Button type="button" variant="ghost" size="sm" onClick={reset}>
 									Cancel
 								</Button>
 								<Button
+									type="submit"
 									size="sm"
-									onClick={onCreate}
 									loading={create.isPending}
 									disabled={!canSubmit}
 								>
 									Register
 								</Button>
 							</div>
-						</div>
+						</form>
 					)}
 
 					{list.isLoading ? (
