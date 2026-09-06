@@ -37,6 +37,7 @@ import { SecurityTab } from "@/features/account/components/SecurityTab";
 import { accountService } from "@/features/account/services/accountService";
 import { ME_QUERY_KEY, useAuth } from "@/features/auth/hooks/auth";
 import { cn } from "@/lib/cn";
+import { type Theme, useTheme } from "@/providers/ThemeProvider";
 
 // ---------------------------------------------------------------------------
 // Shared primitives
@@ -747,20 +748,6 @@ function AccountTab() {
 // Preferences tab
 // ---------------------------------------------------------------------------
 
-type Theme = "system" | "light" | "dark";
-
-function applyTheme(theme: Theme) {
-	const root = document.documentElement;
-	root.classList.remove("light", "dark");
-	if (theme === "dark") root.classList.add("dark");
-	else if (theme === "light") root.classList.add("light");
-	else {
-		if (window.matchMedia("(prefers-color-scheme: dark)").matches)
-			root.classList.add("dark");
-	}
-	localStorage.setItem("fu_theme", theme);
-}
-
 const THEME_OPTIONS: {
 	value: Theme;
 	label: string;
@@ -778,14 +765,7 @@ const THEME_OPTIONS: {
 ];
 
 function PreferencesTab() {
-	const [theme, setTheme] = useState<Theme>(
-		() => (localStorage.getItem("fu_theme") as Theme | null) ?? "system",
-	);
-
-	const handleTheme = (t: Theme) => {
-		setTheme(t);
-		applyTheme(t);
-	};
+	const { theme, setTheme } = useTheme();
 
 	return (
 		<div className="space-y-6">
@@ -803,7 +783,7 @@ function PreferencesTab() {
 				{THEME_OPTIONS.map((opt) => (
 					<button
 						key={opt.value}
-						onClick={() => handleTheme(opt.value)}
+						onClick={() => setTheme(opt.value)}
 						className={cn(
 							"flex flex-col items-center gap-2 rounded-xl border px-3 py-4 text-sm font-medium transition-all duration-150",
 							theme === opt.value

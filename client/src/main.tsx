@@ -8,22 +8,23 @@ import { RevealedKeyProvider } from "@/features/drive/hooks/useRevealedKeys";
 import { UploadProvider } from "@/features/files/hooks/useUpload";
 import { DialogProvider } from "@/providers/DialogProvider";
 import { QueryProvider } from "@/providers/QueryProvider";
+import { ThemeProvider } from "@/providers/ThemeProvider";
 import { ToastProvider } from "@/providers/ToastProvider";
 import App from "./App";
 import "./index.css";
 
-// Apply saved theme before first paint (avoids FOUC)
+// Apply saved theme before first paint (avoids FOUC). `ThemeProvider` is the
+// ongoing reactive owner once mounted; this only has to get the very first
+// frame right, so it duplicates rather than imports that logic.
 (function applyTheme() {
 	const saved = localStorage.getItem("fu_theme") ?? "system";
+	const dark =
+		saved === "dark" ||
+		(saved !== "light" &&
+			window.matchMedia("(prefers-color-scheme: dark)").matches);
 	const root = document.documentElement;
 	root.classList.remove("light", "dark");
-	if (saved === "dark") root.classList.add("dark");
-	else if (saved === "light") root.classList.add("light");
-	else {
-		// system: follow OS preference
-		if (window.matchMedia("(prefers-color-scheme: dark)").matches)
-			root.classList.add("dark");
-	}
+	root.classList.add(dark ? "dark" : "light");
 })();
 
 createRoot(document.getElementById("root")!).render(
@@ -31,25 +32,27 @@ createRoot(document.getElementById("root")!).render(
 		{/* Outermost on purpose: a provider that throws while mounting must still
 		    reach a rendered error page, not a blank document. */}
 		<RootErrorBoundary>
-			<QueryProvider>
-				<AuthProvider>
-					<TooltipProvider delayDuration={200}>
-						<DialogProvider>
-							<UploadProvider>
-								{/* Above the router on purpose: a revealed key must survive the
-								    refetch, the navigation and the reload that the mutation
-								    producing it can trigger. */}
-								<RevealedKeyProvider>
-									<BrowserRouter>
-										<App />
-									</BrowserRouter>
-									<ToastProvider />
-								</RevealedKeyProvider>
-							</UploadProvider>
-						</DialogProvider>
-					</TooltipProvider>
-				</AuthProvider>
-			</QueryProvider>
+			<ThemeProvider>
+				<QueryProvider>
+					<AuthProvider>
+						<TooltipProvider delayDuration={200}>
+							<DialogProvider>
+								<UploadProvider>
+									{/* Above the router on purpose: a revealed key must survive the
+									    refetch, the navigation and the reload that the mutation
+									    producing it can trigger. */}
+									<RevealedKeyProvider>
+										<BrowserRouter>
+											<App />
+										</BrowserRouter>
+										<ToastProvider />
+									</RevealedKeyProvider>
+								</UploadProvider>
+							</DialogProvider>
+						</TooltipProvider>
+					</AuthProvider>
+				</QueryProvider>
+			</ThemeProvider>
 		</RootErrorBoundary>
 	</StrictMode>,
 );

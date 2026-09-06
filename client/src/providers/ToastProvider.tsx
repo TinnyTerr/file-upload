@@ -6,16 +6,18 @@ import {
 	XCircle,
 } from "lucide-react";
 import { Toaster } from "sonner";
+import { useTheme } from "./ThemeProvider";
 
 /** Global toast surface. Use `toast` from sonner anywhere to push messages. */
 export function ToastProvider() {
+	const { resolvedTheme } = useTheme();
 	return (
 		<Toaster
-			theme="dark"
+			theme={resolvedTheme}
 			position="bottom-right"
 			closeButton
 			richColors={false}
-			className="dark"
+			className={resolvedTheme}
 			toastOptions={{
 				classNames: {
 					toast:

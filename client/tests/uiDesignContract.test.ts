@@ -62,14 +62,17 @@ describe("UI design contracts", () => {
 		expect(css).not.toContain("0.74 0.13 200");
 	});
 
-	test("popup surfaces inherit the dark app theme", () => {
+	test("popup surfaces inherit the app theme", () => {
 		const dialog = read("src/components/ui/dialog.tsx");
 		const sheet = read("src/components/ui/sheet.tsx");
 		const toast = read("src/providers/ToastProvider.tsx");
 
 		expect(dialog).toContain("bg-popover/95");
 		expect(sheet).toContain("bg-popover/95");
-		expect(toast).toContain('theme="dark"');
+		// Sonner's own dark/light theme follows the app's live theme rather than
+		// being pinned to dark -- ThemeProvider is the one place that changes.
+		expect(toast).toContain("useTheme");
+		expect(toast).toContain("theme={resolvedTheme}");
 		expect(toast).toContain("!bg-popover");
 		expect(toast).toContain("!text-popover-foreground");
 	});
