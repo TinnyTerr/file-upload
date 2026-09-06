@@ -6,6 +6,7 @@ import {
 	ShieldX,
 	Users,
 } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card, CardContent } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -85,6 +86,24 @@ export function AdminPage() {
 		},
 	].filter((t) => t.allowed);
 
+	const [params, setParams] = useSearchParams();
+	// Falls back to the first allowed tab rather than trusting the URL blindly
+	// -- a bookmarked ?tab= for a permission this account has lost, or a typo,
+	// must not render a blank Tabs with no active trigger.
+	const requested = params.get("tab");
+	const activeTab =
+		tabs.find((t) => t.value === requested)?.value ?? tabs[0]?.value ?? "";
+	const setActiveTab = (value: string) => {
+		setParams(
+			(prev) => {
+				const next = new URLSearchParams(prev);
+				next.set("tab", value);
+				return next;
+			},
+			{ replace: true },
+		);
+	};
+
 	return (
 		<div className="space-y-6">
 			<PageHeader
@@ -102,7 +121,7 @@ export function AdminPage() {
 					description="Your account can view the admin area but has no management permissions assigned."
 				/>
 			) : (
-				<Tabs defaultValue={tabs[0].value}>
+				<Tabs value={activeTab} onValueChange={setActiveTab}>
 					<TabsList
 						aria-label="Admin section"
 						className="flex w-full flex-wrap"
