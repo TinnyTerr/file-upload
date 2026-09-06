@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PasswordStrengthMeter } from "@/components/ui/password-strength-meter";
 import {
 	Select,
 	SelectContent,
@@ -52,6 +53,7 @@ function UserForm({ onClose, editing }: Omit<Props, "open">) {
 	const isEdit = !!editing;
 	const [username, setUsername] = useState(editing?.username ?? "");
 	const [password, setPassword] = useState("");
+	const [confirmPassword, setConfirmPassword] = useState("");
 	const [role, setRole] = useState<string>(editing?.role ?? "user");
 	const [canUpload, setCanUpload] = useState(
 		editing?.permissions?.can_upload ?? true,
@@ -82,6 +84,7 @@ function UserForm({ onClose, editing }: Omit<Props, "open">) {
 	};
 
 	const pending = create.isPending || update.isPending;
+	const mismatch = password.length > 0 && password !== confirmPassword;
 
 	return (
 		<>
@@ -114,6 +117,21 @@ function UserForm({ onClose, editing }: Omit<Props, "open">) {
 						value={password}
 						onChange={(e) => setPassword(e.target.value)}
 					/>
+					<PasswordStrengthMeter password={password} />
+				</div>
+				<div className="space-y-1.5">
+					<Label htmlFor="u-pass-confirm">Confirm password</Label>
+					<Input
+						id="u-pass-confirm"
+						type="password"
+						autoComplete="new-password"
+						value={confirmPassword}
+						onChange={(e) => setConfirmPassword(e.target.value)}
+						aria-invalid={mismatch}
+					/>
+					{mismatch && (
+						<p className="text-xs text-destructive">Passwords don't match.</p>
+					)}
 				</div>
 				<div className="space-y-1.5">
 					<Label>Role</Label>
@@ -161,7 +179,7 @@ function UserForm({ onClose, editing }: Omit<Props, "open">) {
 					type="submit"
 					form="user-form"
 					loading={pending}
-					disabled={!username || (!isEdit && password.length < 12)}
+					disabled={!username || mismatch || (!isEdit && password.length < 12)}
 				>
 					{isEdit ? "Save" : "Create user"}
 				</Button>

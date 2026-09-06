@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PasswordStrengthMeter } from "@/components/ui/password-strength-meter";
 import { useAuth } from "../hooks/auth";
 import { useChangeCredentials } from "../hooks/useChangeCredentials";
 
@@ -28,6 +29,9 @@ export function ChangePage() {
 			setForm((f) => ({ ...f, [k]: e.target.value }));
 
 	const mustChange = mustChangeCredentials || user?.must_change_credentials;
+	const mismatch =
+		form.confirm_password.length > 0 &&
+		form.new_password !== form.confirm_password;
 
 	return (
 		<div className="mx-auto max-w-lg">
@@ -92,10 +96,17 @@ export function ChangePage() {
 									autoComplete="new-password"
 									value={form.confirm_password}
 									onChange={set("confirm_password")}
+									aria-invalid={mismatch}
 									required
 								/>
+								{mismatch && (
+									<p className="text-xs text-destructive">
+										Passwords don't match.
+									</p>
+								)}
 							</div>
 						</div>
+						<PasswordStrengthMeter password={form.new_password} />
 						<p className="text-xs text-muted-foreground">
 							Minimum {minPassword} characters.
 						</p>
