@@ -186,6 +186,27 @@ describe("q — search", () => {
 		expect(body.files).toEqual([]);
 		expect(body.total).toEqual({ directories: 0, files: 0 });
 	});
+
+	test("LIKE metacharacters in the query are literal, not wildcards", async () => {
+		// Pushing q into a SQL LIKE (P6) means a literal % or _ in the search
+		// text must not act as a wildcard, and must not match unrelated files
+		// that happen to contain the escape character itself.
+		makeFile(h.db, {
+			ownerId: userId,
+			name: "100%_done.txt",
+			directoryId: work,
+		});
+
+		const literal = await browse("?scope=all&q=100%25_done");
+		expect(literal.files.map((f) => f.original_filename)).toEqual([
+			"100%_done.txt",
+		]);
+
+		// An unescaped "_" would also match "1000done" (single-char wildcard);
+		// an unescaped "%" would match anything. Neither should turn up here.
+		const noWildcardMatch = await browse("?scope=all&q=100xdone");
+		expect(noWildcardMatch.files).toEqual([]);
+	});
 });
 
 describe("type", () => {

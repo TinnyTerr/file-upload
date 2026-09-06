@@ -392,9 +392,7 @@ const MAX_CENTRAL_DIRECTORY_BYTES = 4 * 1024 * 1024;
  * through the async fs API: this runs once per archive in a public folder's
  * preview manifest, and a folder of twenty archives used to block the event
  * loop for all twenty in a row. */
-async function readZipManifest(
-	path: string,
-): Promise<{
+async function readZipManifest(path: string): Promise<{
 	entries: string[];
 	entryCount: number;
 	encrypted: boolean;
@@ -764,19 +762,29 @@ export function directoriesRouter(state: AppState): Router {
 	 * takes named parameters only (db/types.ts), so the IN list is built as
 	 * $d0,$d1,... rather than positional placeholders. Chunked because SQLite
 	 * caps a statement at SQLITE_MAX_VARIABLE_NUMBER bindings. */
-	function filesUnder(dirs: DirectoryRow[]): FileRow[] {
+	/** `LIKE` pattern for a case-insensitive substring search, with the
+	 * pattern metacharacters in the user's text escaped. Filtering in SQL is
+	 * what keeps a search over "everything I can reach" from reading every
+	 * file row -- key blobs included -- into memory to run `.includes()`. */
+	function likeContains(q: string): string {
+		return `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+	}
+	const NAME_FILTER = "LOWER(original_filename) LIKE $q ESCAPE '\\'";
+
+	function filesUnder(dirs: DirectoryRow[], q = ""): FileRow[] {
 		const ids = dirs.map((d) => d.id);
 		const out: FileRow[] = [];
 		for (let i = 0; i < ids.length; i += 400) {
 			const chunk = ids.slice(i, i + 400);
-			const params: Record<string, number> = {};
+			const params: Record<string, number | string> = {};
 			const names = chunk.map((id, j) => {
 				params[`$d${j}`] = id;
 				return `$d${j}`;
 			});
+			if (q) params.$q = likeContains(q);
 			out.push(
 				...db.all<FileRow>(
-					`SELECT * FROM files WHERE directory_id IN (${names.join(",")})`,
+					`SELECT * FROM files WHERE directory_id IN (${names.join(",")})${q ? ` AND ${NAME_FILTER}` : ""}`,
 					params,
 				),
 			);
@@ -867,10 +875,10 @@ export function directoriesRouter(state: AppState): Router {
 				// exactly what `all` collects -- the two coincide here.
 				dirs = reachableDirectories(user);
 				files = wantFiles
-					? filesUnder(dirs).concat(
+					? filesUnder(dirs, q).concat(
 							db.all<FileRow>(
-								"SELECT * FROM files WHERE directory_id IS NULL AND owner_id = $id",
-								{ $id: user.id },
+								`SELECT * FROM files WHERE directory_id IS NULL AND owner_id = $id${q ? ` AND ${NAME_FILTER}` : ""}`,
+								q ? { $id: user.id, $q: likeContains(q) } : { $id: user.id },
 							),
 						)
 					: [];
@@ -880,7 +888,7 @@ export function directoriesRouter(state: AppState): Router {
 				// its own descendants (and its files get counted twice below).
 				dirs = subtree(db, parent!.id).filter((d) => d.id !== parent!.id);
 				// The bounding folder's own files do belong to its subtree, though.
-				files = wantFiles ? filesUnder([parent!, ...dirs]) : [];
+				files = wantFiles ? filesUnder([parent!, ...dirs], q) : [];
 			} else {
 				dirs = parent
 					? db.all<DirectoryRow>(
@@ -908,6 +916,9 @@ export function directoriesRouter(state: AppState): Router {
 			}
 
 			// ── filter ──
+			// Folders are filtered here (they were needed whole to find their
+			// files); the wide scopes filtered files in SQL above, the level
+			// scope's small page is filtered here too.
 			if (q) {
 				dirs = dirs.filter((d) => d.title.toLowerCase().includes(q));
 				files = files.filter((f) =>
