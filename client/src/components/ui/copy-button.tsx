@@ -1,5 +1,6 @@
 import { Check, Copy } from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 import { cn } from "@/lib/cn";
 import { copyToClipboard } from "@/lib/copy";
 import { Button, type ButtonProps } from "./button";
@@ -30,7 +31,13 @@ export function CopyButton({
 
 	const onCopy = async () => {
 		const ok = await copyToClipboard(value);
-		if (!ok) return;
+		if (!ok) {
+			// Plain-HTTP LAN installs don't get the Clipboard API at all -- the
+			// visible "copied" checkmark never appearing would otherwise look
+			// like the click did nothing.
+			toast.error("Couldn't copy — select and copy manually");
+			return;
+		}
 		setCopied(true);
 		clearTimeout(timer.current);
 		timer.current = setTimeout(() => setCopied(false), 1400);
