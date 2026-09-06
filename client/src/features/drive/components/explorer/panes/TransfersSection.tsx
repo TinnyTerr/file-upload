@@ -13,7 +13,7 @@ export function TransfersSection({
 }: {
 	treeProgress: TreeProgress | null;
 }) {
-	const { items, busy, cancel, clearFinished } = useUpload();
+	const { items, busy, cancel, retry, clearFinished } = useUpload();
 
 	if (!items.length && !treeProgress) return null;
 
@@ -36,7 +36,7 @@ export function TransfersSection({
 			)}
 			{items.length > 0 && (
 				<>
-					<UploadQueue items={items} onCancel={cancel} />
+					<UploadQueue items={items} onCancel={cancel} onRetry={retry} />
 					{!busy && (
 						<Button
 							variant="ghost"

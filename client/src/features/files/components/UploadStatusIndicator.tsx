@@ -24,7 +24,7 @@ const ACTIVE_STATUSES = new Set([
  * away from the Files tab, where the upload was started.
  */
 export function UploadStatusIndicator() {
-	const { items, cancel, clearFinished } = useUpload();
+	const { items, cancel, retry, clearFinished } = useUpload();
 	const navigate = useNavigate();
 
 	if (!items.length) return null;
@@ -69,7 +69,7 @@ export function UploadStatusIndicator() {
 				</div>
 				<DropdownMenuSeparator className="-mx-3" />
 				<div className="mt-2 max-h-80 overflow-y-auto">
-					<UploadQueue items={items} onCancel={cancel} />
+					<UploadQueue items={items} onCancel={cancel} onRetry={retry} />
 				</div>
 				{activeCount === 0 && (
 					<>

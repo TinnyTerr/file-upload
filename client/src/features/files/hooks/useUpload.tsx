@@ -46,8 +46,22 @@ interface UploadState {
 		presetKey?: Uint8Array,
 	) => Promise<{ filename: string; outcome: UploadOutcome }[]>;
 	cancel: (id: string) => void;
+	/** Re-runs a failed or cancelled item with the same file and options it
+	 * was originally queued with. No-op once the tab holding the `File` has
+	 * navigated away and cleared the queue. */
+	retry: (id: string) => void;
 	clearFinished: () => void;
 	reset: () => void;
+}
+
+/** What `retry` needs that a finished `UploadItem` doesn't carry: the actual
+ * bytes, and the options they were queued with. Kept out of `UploadItem`
+ * itself so a `File` (and a raw key) never end up in something rendered or
+ * inspected as ordinary list state. */
+interface RetryData {
+	file: File;
+	options: UploadOptions;
+	presetKey?: Uint8Array;
 }
 
 const UploadContext = createContext<UploadState | null>(null);
@@ -67,12 +81,36 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 	const [items, setItems] = useState<UploadItem[]>([]);
 	const [busy, setBusy] = useState(false);
 	const controllers = useRef(new Map<string, AbortController>());
+	const retryData = useRef(new Map<string, RetryData>());
+	// How many uploads (the sequential batch, plus any independent retries)
+	// are running right now -- `busy` is derived from whether this is above
+	// zero, so a retry kicked off after its batch finished still holds the
+	// beforeunload guard up, and a retry kicked off *during* a batch doesn't
+	// let the batch's own completion drop it early.
+	const activeCount = useRef(0);
+	const beginActive = useCallback(() => {
+		activeCount.current += 1;
+		setBusy(true);
+	}, []);
+	const endActive = useCallback(() => {
+		activeCount.current -= 1;
+		if (activeCount.current <= 0) setBusy(false);
+	}, []);
 
 	const update = useCallback((id: string, patch: Partial<UploadItem>) => {
 		setItems((prev) =>
 			prev.map((it) => (it.id === id ? { ...it, ...patch } : it)),
 		);
 	}, []);
+
+	const invalidateAfterUpload = useCallback(() => {
+		qc.invalidateQueries({ queryKey: filesKeys.list });
+		qc.invalidateQueries({ queryKey: filesKeys.usage });
+		// The Drive explorer shows one level at a time; the upload may have
+		// landed in a level other than the one currently on screen.
+		qc.invalidateQueries({ queryKey: driveKeys.all });
+		qc.invalidateQueries({ queryKey: dirKeys.list });
+	}, [qc]);
 
 	// A closed tab can't finish encrypting or uploading whatever's in flight.
 	useEffect(() => {
@@ -81,6 +119,45 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 		window.addEventListener("beforeunload", onBeforeUnload);
 		return () => window.removeEventListener("beforeunload", onBeforeUnload);
 	}, [busy]);
+
+	/** Runs one already-queued item. Shared by the batch loop in `start` and
+	 * by `retry`, which is really just this same step run again later. */
+	const runOne = useCallback(
+		async (
+			id: string,
+			filename: string,
+			file: File,
+			options: UploadOptions,
+			presetKey?: Uint8Array,
+		): Promise<{ filename: string; outcome: UploadOutcome } | null> => {
+			const controller = new AbortController();
+			controllers.current.set(id, controller);
+			try {
+				const outcome = await performUpload({
+					file,
+					options,
+					presetKey,
+					signal: controller.signal,
+					onProgress: ({ phase, percent }) =>
+						update(id, { status: phase, percent }),
+				});
+				update(id, { status: "done", percent: 100, outcome });
+				return { filename, outcome };
+			} catch (err) {
+				if (err instanceof DOMException && err.name === "AbortError") {
+					update(id, { status: "cancelled" });
+				} else {
+					const msg = err instanceof Error ? err.message : "Upload failed";
+					update(id, { status: "error", error: msg });
+					toast.error(`Upload failed: ${filename}`, { description: msg });
+				}
+				return null;
+			} finally {
+				controllers.current.delete(id);
+			}
+		},
+		[update],
+	);
 
 	const start = useCallback(
 		async (
@@ -128,49 +205,52 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 				percent: 0,
 			}));
 			setItems((prev) => [...prev, ...queued]);
-			setBusy(true);
 
-			// Sequential uploads keep memory + bandwidth predictable.
-			for (let i = 0; i < accepted.length; i++) {
-				const item = queued[i];
-				const controller = new AbortController();
-				controllers.current.set(item.id, controller);
-				try {
-					const outcome = await performUpload({
-						file: accepted[i],
+			beginActive();
+			try {
+				// Sequential uploads keep memory + bandwidth predictable.
+				for (let i = 0; i < accepted.length; i++) {
+					const item = queued[i];
+					const file = accepted[i];
+					retryData.current.set(item.id, { file, options, presetKey });
+					const result = await runOne(
+						item.id,
+						item.filename,
+						file,
 						options,
 						presetKey,
-						signal: controller.signal,
-						onProgress: ({ phase, percent }) =>
-							update(item.id, { status: phase, percent }),
-					});
-					update(item.id, { status: "done", percent: 100, outcome });
-					succeeded.push({ filename: item.filename, outcome });
-				} catch (err) {
-					if (err instanceof DOMException && err.name === "AbortError") {
-						update(item.id, { status: "cancelled" });
-					} else {
-						const msg = err instanceof Error ? err.message : "Upload failed";
-						update(item.id, { status: "error", error: msg });
-						toast.error(`Upload failed: ${item.filename}`, {
-							description: msg,
-						});
-					}
-				} finally {
-					controllers.current.delete(item.id);
+					);
+					if (result) succeeded.push(result);
 				}
+			} finally {
+				endActive();
 			}
 
-			setBusy(false);
-			qc.invalidateQueries({ queryKey: filesKeys.list });
-			qc.invalidateQueries({ queryKey: filesKeys.usage });
-			// The Drive explorer shows one level at a time; the upload may have
-			// landed in a level other than the one currently on screen.
-			qc.invalidateQueries({ queryKey: driveKeys.all });
-			qc.invalidateQueries({ queryKey: dirKeys.list });
+			if (succeeded.length) invalidateAfterUpload();
 			return succeeded;
 		},
-		[qc, update, usage.data],
+		[usage.data, runOne, beginActive, endActive, invalidateAfterUpload],
+	);
+
+	const retry = useCallback(
+		(id: string) => {
+			const data = retryData.current.get(id);
+			const filename = items.find((it) => it.id === id)?.filename;
+			if (!data || !filename) return;
+			update(id, {
+				status: "queued",
+				percent: 0,
+				error: undefined,
+				outcome: undefined,
+			});
+			beginActive();
+			runOne(id, filename, data.file, data.options, data.presetKey)
+				.then((result) => {
+					if (result) invalidateAfterUpload();
+				})
+				.finally(endActive);
+		},
+		[items, update, runOne, beginActive, endActive, invalidateAfterUpload],
 	);
 
 	const cancel = useCallback((id: string) => {
@@ -178,14 +258,24 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 	}, []);
 
 	const clearFinished = useCallback(() => {
-		setItems((prev) =>
-			prev.filter((it) => !["done", "error", "cancelled"].includes(it.status)),
-		);
+		setItems((prev) => {
+			const kept = new Set<string>();
+			const next = prev.filter((it) => {
+				const done = ["done", "error", "cancelled"].includes(it.status);
+				if (!done) kept.add(it.id);
+				return !done;
+			});
+			for (const id of retryData.current.keys()) {
+				if (!kept.has(id)) retryData.current.delete(id);
+			}
+			return next;
+		});
 	}, []);
 
 	const reset = useCallback(() => {
 		for (const c of controllers.current.values()) c.abort();
 		controllers.current.clear();
+		retryData.current.clear();
 		setItems([]);
 	}, []);
 
@@ -193,7 +283,16 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 
 	return (
 		<UploadContext.Provider
-			value={{ items, completed, busy, start, cancel, clearFinished, reset }}
+			value={{
+				items,
+				completed,
+				busy,
+				start,
+				cancel,
+				retry,
+				clearFinished,
+				reset,
+			}}
 		>
 			{children}
 		</UploadContext.Provider>

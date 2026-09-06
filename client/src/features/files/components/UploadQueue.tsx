@@ -1,4 +1,4 @@
-import { AlertCircle, CheckCircle2, Lock, X } from "lucide-react";
+import { AlertCircle, CheckCircle2, Lock, RotateCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -27,9 +27,11 @@ function StatusIcon({ status }: { status: UploadItem["status"] }) {
 export function UploadQueue({
 	items,
 	onCancel,
+	onRetry,
 }: {
 	items: UploadItem[];
 	onCancel: (id: string) => void;
+	onRetry?: (id: string) => void;
 }) {
 	if (!items.length) return null;
 
@@ -40,6 +42,7 @@ export function UploadQueue({
 					item.status === "encrypting" ||
 					item.status === "uploading" ||
 					item.status === "finalizing";
+				const failed = item.status === "error" || item.status === "cancelled";
 				return (
 					<li
 						key={item.id}
@@ -63,9 +66,23 @@ export function UploadQueue({
 											variant="ghost"
 											size="icon"
 											className="size-6"
+											aria-label="Cancel upload"
 											onClick={() => onCancel(item.id)}
 										>
 											<X className="size-3.5" />
+										</Button>
+									</Tooltip>
+								)}
+								{failed && onRetry && (
+									<Tooltip content="Retry">
+										<Button
+											variant="ghost"
+											size="icon"
+											className="size-6"
+											aria-label="Retry upload"
+											onClick={() => onRetry(item.id)}
+										>
+											<RotateCw className="size-3.5" />
 										</Button>
 									</Tooltip>
 								)}
