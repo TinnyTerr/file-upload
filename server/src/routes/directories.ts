@@ -2345,6 +2345,9 @@ export function publicDirectoriesRouter(state: AppState): Router {
 			uploader,
 			// Saving copies the folder the link points at, never a subfolder.
 			already_saved: alreadySaved,
+			// The link's own expiry -- unrelated to anything inside the tree it
+			// shares, which has no expiry of its own.
+			expires_at: link.expires_at,
 			files: pairs.map(({ file, link: lk }) => {
 				// A file can be its own break point inside an otherwise-uniform
 				// folder, so each member says which key it wants rather than

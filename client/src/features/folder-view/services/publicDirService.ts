@@ -58,6 +58,8 @@ export interface PublicDirInfo {
 	files: PublicDirMember[];
 	uploader: UploaderInfo | null;
 	already_saved: boolean;
+	/** The *link's* own expiry, not any node inside the tree it shares. */
+	expires_at: string | null;
 }
 
 export const publicDirService = {

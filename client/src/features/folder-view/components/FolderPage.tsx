@@ -18,6 +18,7 @@ import { useAuth } from "@/features/auth/hooks/auth";
 import { EncryptionBanner } from "@/features/download/components/EncryptionBanner";
 import { formatBytes } from "@/lib/bytes";
 import { readClientKeyFromHash, readServerKeyFromQuery } from "@/lib/download";
+import { relativeTime } from "@/lib/time";
 import { usePageTitle } from "@/lib/usePageTitle";
 import { useFolderKeys } from "../hooks/useFolderKeys";
 import { useDirInfo, useFolderZip } from "../hooks/useFolderView";
@@ -152,6 +153,11 @@ export function FolderPage() {
 									`${info.directories.length} folder${info.directories.length === 1 ? "" : "s"} · `}
 								{info.file_count} files · {formatBytes(info.total_bytes)}
 							</p>
+							{info.expires_at && (
+								<p className="mt-1 text-xs text-muted-foreground">
+									Expires {relativeTime(info.expires_at)}
+								</p>
+							)}
 						</div>
 						{!atEntry && (
 							<Button

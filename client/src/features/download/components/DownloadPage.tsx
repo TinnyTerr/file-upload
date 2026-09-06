@@ -26,6 +26,7 @@ import {
 } from "@/features/files/lib/sealKey";
 import { formatBytes } from "@/lib/bytes";
 import { readClientKeyFromHash, readServerKeyFromQuery } from "@/lib/download";
+import { relativeTime } from "@/lib/time";
 import { usePageTitle } from "@/lib/usePageTitle";
 import { useDownload } from "../hooks/useDownload";
 import { useFileInfo } from "../hooks/useFileInfo";
@@ -144,6 +145,11 @@ export function DownloadPage() {
 									</Badge>
 								)}
 							</div>
+							{info.expires_at && (
+								<p className="mt-1 text-xs text-muted-foreground">
+									Expires {relativeTime(info.expires_at)}
+								</p>
+							)}
 						</div>
 					</div>
 
