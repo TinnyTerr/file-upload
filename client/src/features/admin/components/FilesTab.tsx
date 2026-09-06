@@ -1,3 +1,4 @@
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
 	Archive,
 	ArchiveRestore,
@@ -9,7 +10,7 @@ import {
 	Trash2,
 	User,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -162,6 +163,50 @@ function AdminFileRow({
 	);
 }
 
+/** One owner's file list, virtualized so an account with thousands of
+ * uploads doesn't mount thousands of `Card`s the moment its section opens. */
+function FileListVirtual({
+	files,
+	selection,
+}: {
+	files: FileObject[];
+	selection: ReturnType<typeof useSelection>;
+}) {
+	const scrollRef = useRef<HTMLDivElement>(null);
+	const virtualizer = useVirtualizer({
+		count: files.length,
+		getScrollElement: () => scrollRef.current,
+		estimateSize: () => 88,
+		overscan: 6,
+	});
+
+	return (
+		<div ref={scrollRef} className="max-h-[32rem] overflow-y-auto pl-2">
+			<div className="relative" style={{ height: virtualizer.getTotalSize() }}>
+				{virtualizer.getVirtualItems().map((v) => {
+					const file = files[v.index];
+					if (!file) return null;
+					return (
+						<div
+							key={file.id}
+							ref={virtualizer.measureElement}
+							data-index={v.index}
+							className="absolute top-0 left-0 w-full pb-2"
+							style={{ transform: `translateY(${v.start}px)` }}
+						>
+							<AdminFileRow
+								file={file}
+								selected={selection.has(file.id)}
+								onToggle={() => selection.toggle(file.id)}
+							/>
+						</div>
+					);
+				})}
+			</div>
+		</div>
+	);
+}
+
 function UserSection({
 	username,
 	files,
@@ -202,18 +247,7 @@ function UserSection({
 					)}
 				/>
 			</div>
-			{!collapsed && (
-				<div className="space-y-2 pl-2">
-					{files.map((f) => (
-						<AdminFileRow
-							key={f.id}
-							file={f}
-							selected={selection.has(f.id)}
-							onToggle={() => selection.toggle(f.id)}
-						/>
-					))}
-				</div>
-			)}
+			{!collapsed && <FileListVirtual files={files} selection={selection} />}
 		</div>
 	);
 }

@@ -27,9 +27,5 @@ export function useInvalidateDrive() {
 		qc.invalidateQueries({ queryKey: dirKeys.list });
 		qc.invalidateQueries({ queryKey: filesKeys.list });
 		qc.invalidateQueries({ queryKey: filesKeys.usage });
-		// The admin panel lists every file and every folder in the system, so a
-		// drive change staled it too. `useDeleteFile` already does this; the
-		// drive's own move/rename/delete path did not.
-		qc.invalidateQueries({ queryKey: ["admin"] });
 	}, [qc]);
 }

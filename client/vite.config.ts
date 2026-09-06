@@ -49,10 +49,12 @@ export default defineConfig({
 						"@radix-ui/react-label",
 						"@radix-ui/react-slot",
 					],
+					// `qrcode` is deliberately absent: it is only used by the MFA setup
+					// page and share modal, and naming it here would pull it into the
+					// chunk every page loads.
 					vendor: [
 						"lucide-react",
 						"sonner",
-						"qrcode",
 						"class-variance-authority",
 						"tailwind-merge",
 						"clsx",

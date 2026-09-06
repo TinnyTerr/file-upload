@@ -1,5 +1,5 @@
 import { LogOut, Settings, User as UserIcon } from "lucide-react";
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,14 @@ import {
 import { accountService } from "@/features/account/services/accountService";
 import { useAuth } from "@/features/auth/hooks/auth";
 import { cn } from "@/lib/cn";
-import { SettingsModal } from "./SettingsModal";
+
+// SettingsModal pulls in the security tab's passkey/TOTP QR code renderer
+// (the `qrcode` package), which has no reason to sit in every page's initial
+// bundle when the modal is opened from a menu click. Loaded once, on first
+// open; `mounted` then keeps it around so later opens/closes still animate.
+const SettingsModal = lazy(() =>
+	import("./SettingsModal").then((m) => ({ default: m.SettingsModal })),
+);
 
 function Avatar({
 	user,
@@ -51,6 +58,7 @@ export function UserMenu({ collapsed = false }: { collapsed?: boolean }) {
 	const { user, logout } = useAuth();
 	const navigate = useNavigate();
 	const [settingsOpen, setSettingsOpen] = useState(false);
+	const [settingsMounted, setSettingsMounted] = useState(false);
 
 	const onLogout = async () => {
 		await logout();
@@ -104,7 +112,12 @@ export function UserMenu({ collapsed = false }: { collapsed?: boolean }) {
 						</Badge>
 					</DropdownMenuLabel>
 					<DropdownMenuSeparator />
-					<DropdownMenuItem onClick={() => setSettingsOpen(true)}>
+					<DropdownMenuItem
+						onClick={() => {
+							setSettingsMounted(true);
+							setSettingsOpen(true);
+						}}
+					>
 						<Settings /> Settings
 					</DropdownMenuItem>
 					<DropdownMenuSeparator />
@@ -114,7 +127,11 @@ export function UserMenu({ collapsed = false }: { collapsed?: boolean }) {
 				</DropdownMenuContent>
 			</DropdownMenu>
 
-			<SettingsModal open={settingsOpen} onOpenChange={setSettingsOpen} />
+			{settingsMounted && (
+				<Suspense fallback={null}>
+					<SettingsModal open={settingsOpen} onOpenChange={setSettingsOpen} />
+				</Suspense>
+			)}
 		</>
 	);
 }
