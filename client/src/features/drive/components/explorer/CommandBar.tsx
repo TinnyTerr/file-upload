@@ -8,6 +8,7 @@ import {
 	Info,
 	Lock,
 	type LucideIcon,
+	PanelLeft,
 	Pencil,
 	Scissors,
 	Share2,
@@ -127,6 +128,19 @@ export function CommandBar({
 
 	return (
 		<div className="flex flex-wrap items-center gap-1 border-b border-border px-2 py-1">
+			<Tooltip content="Show or hide the navigation pane">
+				<Button
+					variant="ghost"
+					size="icon"
+					className={cn("size-8", prefs.navOpen && "bg-secondary")}
+					aria-pressed={prefs.navOpen}
+					onClick={() => updatePrefs({ navOpen: !prefs.navOpen })}
+					aria-label="Navigation pane"
+				>
+					<PanelLeft />
+				</Button>
+			</Tooltip>
+
 			{newMenu}
 			{uploadMenu}
 
