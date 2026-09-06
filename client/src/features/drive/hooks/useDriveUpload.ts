@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { errorMessage } from "@/config/api";
 import {
@@ -41,6 +41,15 @@ export function useDriveTreeUpload() {
 	const invalidate = useInvalidateDrive();
 	const [progress, setProgress] = useState<TreeProgress | null>(null);
 	const [busy, setBusy] = useState(false);
+
+	// Closing the tab mid-tree-upload abandons whatever hasn't reached the
+	// server yet, with no way to resume it -- worth an "are you sure".
+	useEffect(() => {
+		if (!busy) return;
+		const onBeforeUnload = (e: BeforeUnloadEvent) => e.preventDefault();
+		window.addEventListener("beforeunload", onBeforeUnload);
+		return () => window.removeEventListener("beforeunload", onBeforeUnload);
+	}, [busy]);
 
 	const uploadTree = useCallback(
 		async (args: {

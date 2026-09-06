@@ -4,6 +4,7 @@ import {
 	type ReactNode,
 	useCallback,
 	useContext,
+	useEffect,
 	useRef,
 	useState,
 } from "react";
@@ -64,6 +65,14 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 			prev.map((it) => (it.id === id ? { ...it, ...patch } : it)),
 		);
 	}, []);
+
+	// A closed tab can't finish encrypting or uploading whatever's in flight.
+	useEffect(() => {
+		if (!busy) return;
+		const onBeforeUnload = (e: BeforeUnloadEvent) => e.preventDefault();
+		window.addEventListener("beforeunload", onBeforeUnload);
+		return () => window.removeEventListener("beforeunload", onBeforeUnload);
+	}, [busy]);
 
 	const start = useCallback(
 		async (
