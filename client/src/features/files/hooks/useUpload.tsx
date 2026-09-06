@@ -9,8 +9,10 @@ import {
 	useState,
 } from "react";
 import { toast } from "sonner";
+import { useAuth } from "@/features/auth/hooks/auth";
 import { dirKeys } from "@/features/directories/hooks/queryKeys";
 import { driveKeys } from "@/features/drive/hooks/queryKeys";
+import { formatBytes } from "@/lib/bytes";
 import {
 	performUpload,
 	type UploadOutcome,
@@ -18,6 +20,7 @@ import {
 } from "../lib/uploadCore";
 import type { UploadOptions } from "../types";
 import { filesKeys } from "./queryKeys";
+import { useUsage } from "./useUsage";
 
 export interface UploadItem {
 	id: string;
@@ -56,6 +59,11 @@ const UploadContext = createContext<UploadState | null>(null);
  */
 export function UploadProvider({ children }: { children: ReactNode }) {
 	const qc = useQueryClient();
+	const { user } = useAuth();
+	// UploadProvider sits above the router and mounts on public pages too
+	// (download/folder links, login) -- only ask for usage once someone is
+	// actually signed in, or an anonymous visitor's tab fires a 401 for it.
+	const usage = useUsage(!!user);
 	const [items, setItems] = useState<UploadItem[]>([]);
 	const [busy, setBusy] = useState(false);
 	const controllers = useRef(new Map<string, AbortController>());
@@ -81,8 +89,38 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 			presetKey?: Uint8Array,
 		): Promise<{ filename: string; outcome: UploadOutcome }[]> => {
 			if (!files.length) return [];
+
+			// Reject up front what the server would reject anyway -- no point
+			// paying for a full encrypt+upload to learn about a 413 at the end.
+			// Skipped entirely if usage hasn't loaded yet; the server still
+			// enforces both limits regardless.
+			let accepted = files;
+			const limits = usage.data;
+			if (limits) {
+				accepted = [];
+				let planned = 0;
+				const remaining = Math.max(0, limits.quota_bytes - limits.used_bytes);
+				for (const f of files) {
+					if (f.size > limits.max_file_bytes) {
+						toast.error(`${f.name} is too large`, {
+							description: `The per-file limit is ${formatBytes(limits.max_file_bytes)}.`,
+						});
+						continue;
+					}
+					if (planned + f.size > remaining) {
+						toast.error(`${f.name} won't fit in your quota`, {
+							description: `Only ${formatBytes(Math.max(0, remaining - planned))} of storage remains.`,
+						});
+						continue;
+					}
+					planned += f.size;
+					accepted.push(f);
+				}
+			}
+			if (!accepted.length) return [];
+
 			const succeeded: { filename: string; outcome: UploadOutcome }[] = [];
-			const queued: UploadItem[] = files.map((f) => ({
+			const queued: UploadItem[] = accepted.map((f) => ({
 				id: `u${++seq}`,
 				filename: f.name,
 				size: f.size,
@@ -93,13 +131,13 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 			setBusy(true);
 
 			// Sequential uploads keep memory + bandwidth predictable.
-			for (let i = 0; i < files.length; i++) {
+			for (let i = 0; i < accepted.length; i++) {
 				const item = queued[i];
 				const controller = new AbortController();
 				controllers.current.set(item.id, controller);
 				try {
 					const outcome = await performUpload({
-						file: files[i],
+						file: accepted[i],
 						options,
 						presetKey,
 						signal: controller.signal,
@@ -132,7 +170,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 			qc.invalidateQueries({ queryKey: dirKeys.list });
 			return succeeded;
 		},
-		[qc, update],
+		[qc, update, usage.data],
 	);
 
 	const cancel = useCallback((id: string) => {
