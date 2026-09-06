@@ -32,13 +32,18 @@ describe("UI design contracts", () => {
 	// On a narrow viewport the two side panes drop away and the file list keeps
 	// the full width; `min-w-0` on every pane is what lets them shrink instead
 	// of forcing the page to scroll sideways.
-	test("explorer side panes collapse away on small viewports", () => {
+	test("explorer side panes become Sheets rather than disappearing on small viewports", () => {
 		const shell = read(
 			"src/features/drive/components/explorer/ExplorerShell.tsx",
 		);
 
-		expect(shell).toContain("hidden min-w-0 md:block");
-		expect(shell).toContain("hidden min-w-0 lg:block");
+		// Below their breakpoint a resizable Panel has no room left to
+		// negotiate, so JS swaps in a Sheet overlay instead of a CSS hide --
+		// the nav/details panes stay reachable rather than vanishing outright.
+		expect(shell).toContain('useMediaQuery("(min-width: 768px)")');
+		expect(shell).toContain('useMediaQuery("(min-width: 1024px)")');
+		expect(shell).toContain("<Sheet open={navOpen}");
+		expect(shell).toContain("<Sheet open={detailsOpen}");
 		expect(shell).toContain('id="main"');
 		expect(shell).toContain("min-w-0");
 	});

@@ -5,7 +5,14 @@ import {
 	Separator,
 	useDefaultLayout,
 } from "react-resizable-panels";
+import {
+	Sheet,
+	SheetContent,
+	SheetDescription,
+	SheetTitle,
+} from "@/components/ui/sheet";
 import { cn } from "@/lib/cn";
+import { useMediaQuery } from "@/lib/useMediaQuery";
 
 const PANEL_IDS = ["nav", "main", "details"];
 
@@ -16,6 +23,11 @@ const PANEL_IDS = ["nav", "main", "details"];
  * Fixed height with its own internal scrolling, unlike every other page in the
  * app — panes that scroll independently is the whole point of the layout, and
  * it can't be had from a document that scrolls as one.
+ *
+ * Below the breakpoint each side pane no longer fits alongside the content at
+ * any useful width, so it renders as a `Sheet` overlay instead of a resizable
+ * pane -- driven by the same `navOpen`/`detailsOpen` prefs and the same
+ * CommandBar toggle, just rendered differently depending on viewport.
  */
 export function ExplorerShell({
 	addressBar,
@@ -26,6 +38,8 @@ export function ExplorerShell({
 	statusBar,
 	navOpen,
 	detailsOpen,
+	onNavOpenChange,
+	onDetailsOpenChange,
 }: {
 	addressBar: ReactNode;
 	commandBar: ReactNode;
@@ -35,6 +49,8 @@ export function ExplorerShell({
 	statusBar: ReactNode;
 	navOpen: boolean;
 	detailsOpen: boolean;
+	onNavOpenChange: (open: boolean) => void;
+	onDetailsOpenChange: (open: boolean) => void;
 }) {
 	// Pane widths persist per browser, so the layout you set up stays put.
 	const layout = useDefaultLayout({
@@ -42,6 +58,12 @@ export function ExplorerShell({
 		panelIds: PANEL_IDS,
 		storage: localStorage,
 	});
+
+	// Matches the nav pane's `md` and the details pane's `lg` Tailwind
+	// breakpoints -- a resizable Panel has no width left to negotiate below
+	// these, so JS (not a CSS hide) decides which markup renders at all.
+	const navFitsAsPane = useMediaQuery("(min-width: 768px)");
+	const detailsFitsAsPane = useMediaQuery("(min-width: 1024px)");
 
 	return (
 		// The app header is h-14; the explorer takes everything under it.
@@ -53,14 +75,14 @@ export function ExplorerShell({
 				className="flex min-h-0 flex-1"
 				{...layout}
 			>
-				{navOpen && (
+				{navOpen && navFitsAsPane && (
 					<>
 						<Panel
 							id="nav"
 							defaultSize="20%"
 							minSize="10%"
 							maxSize="40%"
-							className="hidden min-w-0 md:block"
+							className="min-w-0"
 						>
 							{nav}
 						</Panel>
@@ -70,7 +92,7 @@ export function ExplorerShell({
 				<Panel id="main" minSize="30%" className="min-w-0">
 					{main}
 				</Panel>
-				{detailsOpen && (
+				{detailsOpen && detailsFitsAsPane && (
 					<>
 						<Handle />
 						<Panel
@@ -78,7 +100,7 @@ export function ExplorerShell({
 							defaultSize="24%"
 							minSize="15%"
 							maxSize="45%"
-							className="hidden min-w-0 lg:block"
+							className="min-w-0"
 						>
 							{details}
 						</Panel>
@@ -86,6 +108,27 @@ export function ExplorerShell({
 				)}
 			</Group>
 			{statusBar}
+
+			{!navFitsAsPane && (
+				<Sheet open={navOpen} onOpenChange={onNavOpenChange}>
+					<SheetContent side="left" className="p-0">
+						<SheetTitle className="sr-only">Navigation</SheetTitle>
+						<SheetDescription className="sr-only">Folder tree</SheetDescription>
+						{nav}
+					</SheetContent>
+				</Sheet>
+			)}
+			{!detailsFitsAsPane && (
+				<Sheet open={detailsOpen} onOpenChange={onDetailsOpenChange}>
+					<SheetContent side="right" className="p-0">
+						<SheetTitle className="sr-only">Details</SheetTitle>
+						<SheetDescription className="sr-only">
+							Selected item details
+						</SheetDescription>
+						{details}
+					</SheetContent>
+				</Sheet>
+			)}
 		</div>
 	);
 }

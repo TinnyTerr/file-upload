@@ -279,6 +279,8 @@ export function ExplorerPage() {
 					<ExplorerShell
 						navOpen={prefs.navOpen}
 						detailsOpen={prefs.detailsOpen}
+						onNavOpenChange={(navOpen) => update({ navOpen })}
+						onDetailsOpenChange={(detailsOpen) => update({ detailsOpen })}
 						addressBar={<AddressBar />}
 						commandBar={
 							<CommandBar
