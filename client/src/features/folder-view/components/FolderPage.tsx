@@ -18,6 +18,7 @@ import { useAuth } from "@/features/auth/hooks/auth";
 import { EncryptionBanner } from "@/features/download/components/EncryptionBanner";
 import { formatBytes } from "@/lib/bytes";
 import { readClientKeyFromHash, readServerKeyFromQuery } from "@/lib/download";
+import { usePageTitle } from "@/lib/usePageTitle";
 import { useFolderKeys } from "../hooks/useFolderKeys";
 import { useDirInfo, useFolderZip } from "../hooks/useFolderView";
 import { useSaveFolder } from "../hooks/useSaveFolder";
@@ -72,6 +73,7 @@ export function FolderPage() {
 
 	// A poster grid needs the room; the plain list stays where it was.
 	usePublicShellWidth(info?.gallery_view ? "wide" : "narrow");
+	usePageTitle(info?.title);
 
 	const goTo = (next: number | null) => setDir(next);
 	/** Up one level. Derived from the breadcrumb rather than a visit history,

@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
+import { usePageTitle } from "@/lib/usePageTitle";
 
 export interface PageHeaderProps {
 	title: string;
@@ -9,13 +10,16 @@ export interface PageHeaderProps {
 	actions?: ReactNode;
 }
 
-/** Standard page header: icon tile + title + subtitle, with an optional right-aligned actions slot. */
+/** Standard page header: icon tile + title + subtitle, with an optional right-aligned actions slot.
+ * Also sets `document.title` -- every page that renders one gets a real tab
+ * title for free instead of needing its own call. */
 export function PageHeader({
 	title,
 	subtitle,
 	icon: Icon,
 	actions,
 }: PageHeaderProps) {
+	usePageTitle(title);
 	return (
 		<div className="flex flex-wrap items-center justify-between gap-3">
 			<div className="flex items-center gap-3">

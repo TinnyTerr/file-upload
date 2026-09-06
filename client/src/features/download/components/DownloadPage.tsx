@@ -26,6 +26,7 @@ import {
 } from "@/features/files/lib/sealKey";
 import { formatBytes } from "@/lib/bytes";
 import { readClientKeyFromHash, readServerKeyFromQuery } from "@/lib/download";
+import { usePageTitle } from "@/lib/usePageTitle";
 import { useDownload } from "../hooks/useDownload";
 import { useFileInfo } from "../hooks/useFileInfo";
 import { rawPath } from "../services/publicService";
@@ -54,6 +55,8 @@ export function DownloadPage() {
 	const [sealKey, setSealKey] = useState<Uint8Array | null>(null);
 	const [sealError, setSealError] = useState<string | null>(null);
 	const [deriving, setDeriving] = useState(false);
+
+	usePageTitle(info?.filename);
 
 	if (isLoading) {
 		return (
