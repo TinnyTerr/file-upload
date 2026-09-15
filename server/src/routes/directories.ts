@@ -42,7 +42,11 @@ import { HttpError } from "../httpError.ts";
 import { newSlug } from "../links.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
-import { clientIp, requireSession } from "../middleware/auth.ts";
+import {
+	clientIp,
+	requestProtocol,
+	requireSession,
+} from "../middleware/auth.ts";
 import {
 	requireActiveUser,
 	requireMaster,
@@ -86,8 +90,8 @@ interface CollabIdRow {
 	id: number;
 }
 
-function dirUrl(req: Request, slug: string): string {
-	return `${req.protocol}://${req.get("host")}/d/${slug}`;
+function dirUrl(state: AppState, req: Request, slug: string): string {
+	return `${requestProtocol(state.settings, req)}://${req.get("host")}/d/${slug}`;
 }
 
 /** A nested folder usually holds no key of its own -- the break point above it
@@ -205,7 +209,7 @@ function serializeDirectories(
 			owner_id: d.owner_id,
 			slug: d.slug,
 			title: d.title,
-			url: dirUrl(req, d.slug),
+			url: dirUrl(state, req, d.slug),
 			parent_directory_id: d.parent_directory_id,
 			subdirectory_count: subdirectoryCount,
 			encryption_mode: eff.mode,
@@ -232,13 +236,14 @@ function serializeDirectories(
 }
 
 function serializeDirLink(
+	state: AppState,
 	lk: DirectoryLinkRow,
 	req: Request,
 ): Record<string, unknown> {
 	return {
 		id: lk.id,
 		slug: lk.slug,
-		url: dirUrl(req, lk.slug),
+		url: dirUrl(state, req, lk.slug),
 		max_uses: lk.max_uses,
 		use_count: lk.use_count,
 		expires_at: lk.expires_at,
@@ -477,13 +482,18 @@ async function archivePreview(
 	};
 }
 
-function directoryPageMeta(req: Request, db: Db, d: DirectoryRow): string {
+function directoryPageMeta(
+	state: AppState,
+	req: Request,
+	db: Db,
+	d: DirectoryRow,
+): string {
 	const pairs = publicFiles(db, d.id);
 	const totalBytes = pairs.reduce((sum, { file }) => sum + file.size_bytes, 0);
 	const title = escapeHtml(d.title || "Shared folder");
 	const desc = escapeHtml(`${pairs.length} files, ${totalBytes} bytes`);
 	const url = escapeHtml(
-		`${req.protocol}://${req.get("host")}${req.originalUrl}`,
+		`${requestProtocol(state.settings, req)}://${req.get("host")}${req.originalUrl}`,
 	);
 	return [
 		`<meta property="og:title" content="${title}">`,
@@ -696,7 +706,7 @@ export function directoriesRouter(state: AppState): Router {
 			res.json({
 				id: d.id,
 				slug,
-				url: dirUrl(req, slug),
+				url: dirUrl(state, req, slug),
 				parent_directory_id: d.parent_directory_id,
 				encryption_mode: eff.mode,
 				encryption_overridden: !!d.encryption_overridden,
@@ -2053,7 +2063,7 @@ export function directoriesRouter(state: AppState): Router {
 					$id: d.id,
 				},
 			);
-			res.json({ links: links.map((lk) => serializeDirLink(lk, req)) });
+			res.json({ links: links.map((lk) => serializeDirLink(state, lk, req)) });
 		},
 	);
 
@@ -2108,7 +2118,7 @@ export function directoriesRouter(state: AppState): Router {
 				target: `directory:${d.id}`,
 				ip: clientIp(state, req),
 			});
-			res.json(serializeDirLink(lk, req));
+			res.json(serializeDirLink(state, lk, req));
 		},
 	);
 
@@ -2186,7 +2196,7 @@ export function directoriesRouter(state: AppState): Router {
 				"SELECT * FROM directory_links WHERE id = $id",
 				{ $id: lk.id },
 			)!;
-			res.json(serializeDirLink(updated, req));
+			res.json(serializeDirLink(state, updated, req));
 		},
 	);
 
@@ -2705,7 +2715,7 @@ export function publicDirectoriesRouter(state: AppState): Router {
 			res.json({
 				id: newDir.id,
 				slug: newDir.slug,
-				url: dirUrl(req, newDir.slug),
+				url: dirUrl(state, req, newDir.slug),
 				saved_files: savedFiles,
 				source_type: "saved",
 				access_key: recoverDirAccessKey(state, newDir),
@@ -2851,7 +2861,9 @@ export function publicDirectoriesRouter(state: AppState): Router {
 
 	router.get("/d/:slug", (req, res) => {
 		const resolved = resolveDirectory(db, req.params.slug);
-		const meta = resolved ? directoryPageMeta(req, db, resolved.directory) : "";
+		const meta = resolved
+			? directoryPageMeta(state, req, db, resolved.directory)
+			: "";
 		sendSpa(res, meta);
 	});
 

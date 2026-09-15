@@ -50,7 +50,11 @@ import {
 	verifyPlayKey,
 } from "../media/playKeys.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
-import { clientIp, requireSession } from "../middleware/auth.ts";
+import {
+	clientIp,
+	requestProtocol,
+	requireSession,
+} from "../middleware/auth.ts";
 import { optionalOauthViewer, requireActiveUser } from "../middleware/deps.ts";
 import { BYTES_HEADERS } from "../middleware/securityHeaders.ts";
 import { ensurePermissions } from "../permissions.ts";
@@ -144,8 +148,8 @@ function playableFiles(db: Db, directoryId: number): FileRow[] {
 		.filter((f) => isPlayable(f.content_type));
 }
 
-function baseUrl(req: Request): string {
-	return `${req.protocol}://${req.get("host")}`;
+function baseUrl(state: AppState, req: Request): string {
+	return `${requestProtocol(state.settings, req)}://${req.get("host")}`;
 }
 
 function serializeEntry(db: Db, f: FileRow) {
@@ -458,7 +462,7 @@ export function mediaRouter(state: AppState): Router {
 					: undefined;
 				const secs = blob?.media_duration_seconds ?? -1;
 				lines.push(`#EXTINF:${secs},${f.original_filename}`);
-				lines.push(`${baseUrl(req)}/api/media/stream/${f.id}${suffix}`);
+				lines.push(`${baseUrl(state, req)}/api/media/stream/${f.id}${suffix}`);
 			}
 			res.writeHead(200, {
 				...BYTES_HEADERS,
@@ -827,8 +831,8 @@ export function mediaRouter(state: AppState): Router {
 
 			const encoded = encodeURIComponent(token);
 			const url = target
-				? `${baseUrl(req)}/api/media/stream/${target.id}?k=${encoded}`
-				: `${baseUrl(req)}/api/media/library/${dir.slug}/playlist.m3u?k=${encoded}`;
+				? `${baseUrl(state, req)}/api/media/stream/${target.id}?k=${encoded}`
+				: `${baseUrl(state, req)}/api/media/library/${dir.slug}/playlist.m3u?k=${encoded}`;
 			res.status(201).json({
 				id: row.id,
 				scope: target ? "file" : "collection",

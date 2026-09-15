@@ -13,6 +13,7 @@ import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
+import { requestProtocol } from "../middleware/auth.ts";
 import { requireReadUser } from "../middleware/deps.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
@@ -52,7 +53,7 @@ export function docsRouter(state: AppState): Router {
 			log.error(`api docs unavailable at ${DOC_PATH}: ${String(err)}`);
 			throw new HttpError(500, "api documentation unavailable");
 		}
-		const baseUrl = `${req.protocol}://${req.get("host")}`;
+		const baseUrl = `${requestProtocol(state.settings, req)}://${req.get("host")}`;
 		res.type("text/markdown; charset=utf-8");
 		res.set("Cache-Control", "no-cache");
 		res.send(render(doc, baseUrl));

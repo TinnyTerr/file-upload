@@ -1,6 +1,25 @@
 import type { NextFunction, Request, Response } from "express";
 import type { AppState } from "../appState.ts";
+import type { Settings } from "../config.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
+
+/** The scheme this request actually arrived on, honoring X-Forwarded-Proto
+ * only when TRUST_PROXY is on -- mirrors clientIp's proxy trust gate.
+ * `req.protocol` alone is never right behind a TLS-terminating proxy: Express
+ * has no `app.set("trust proxy", ...)` call in this codebase (clientIp/
+ * clientCountry read the headers by hand instead), so it always reports the
+ * scheme of the socket the proxy connected on -- http -- regardless of what
+ * the browser used. Every absolute URL this server mints (media stream/m3u
+ * links, share links, docs base URL, OAuth issuer) must resolve scheme
+ * through this, not `req.protocol` directly, or https deployments hand out
+ * http links. */
+export function requestProtocol(settings: Settings, req: Request): string {
+	if (settings.trustProxyMode !== "off") {
+		const proto = req.header("x-forwarded-proto");
+		if (proto) return proto.split(",")[0]!.trim();
+	}
+	return req.protocol;
+}
 
 /** Resolves the fu_session cookie into req.sessionRow, mirrors
  * app/deps.py::current_session. 401s if missing/invalid/expired. */

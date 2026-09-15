@@ -27,7 +27,11 @@ import {
 import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
-import { clientIp, requireSession } from "../middleware/auth.ts";
+import {
+	clientIp,
+	requestProtocol,
+	requireSession,
+} from "../middleware/auth.ts";
 import { requireActiveUser } from "../middleware/deps.ts";
 import { ensurePermissions } from "../permissions.ts";
 import { requireCsrf } from "../security/csrf.ts";
@@ -279,7 +283,7 @@ export function dropboxRouter(state: AppState): Router {
 				`dropbox link created id=${row.id} owner_id=${ownerId} directory_id=${targetDirectoryId} expires_at=${expiresAt}`,
 			);
 
-			const base = `${req.protocol}://${req.get("host")}`;
+			const base = `${requestProtocol(state.settings, req)}://${req.get("host")}`;
 			res.json({
 				id: row.id,
 				token,
@@ -513,7 +517,7 @@ export function dropboxRouter(state: AppState): Router {
 				// Read while the socket is still up — see FinalizeOpts.requestOrigin.
 				const requestOrigin = {
 					ip: clientIp(state, req),
-					baseUrl: `${req.protocol}://${req.get("host")}`,
+					baseUrl: `${requestProtocol(state.settings, req)}://${req.get("host")}`,
 				};
 				startFinalize(res, relPath, `dropbox id=${row.id}`, async () => {
 					const result = await finalizeStoredFile({

@@ -15,7 +15,7 @@ import { type FileRow, nowIso, type UserRow } from "../db/rows.ts";
 import { consumeUse, resolveActiveLink } from "../links.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
-import { clientIp } from "../middleware/auth.ts";
+import { clientIp, requestProtocol } from "../middleware/auth.ts";
 import { BYTES_HEADERS } from "../middleware/securityHeaders.ts";
 import { checkLinkAccess } from "../security/accessLock.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
@@ -162,7 +162,7 @@ function fileMetaTags(req: Request, state: AppState, slug: string): string {
 	const title = escapeHtml(f.original_filename || "Shared file");
 	const desc = escapeHtml(`${f.size_bytes} bytes`);
 	const url = escapeHtml(
-		`${req.protocol}://${req.get("host")}${req.originalUrl}`,
+		`${requestProtocol(state.settings, req)}://${req.get("host")}${req.originalUrl}`,
 	);
 	const tags = [
 		`<meta property="og:title" content="${title}">`,
@@ -178,7 +178,7 @@ function fileMetaTags(req: Request, state: AppState, slug: string): string {
 		!f.compressed &&
 		!f.archived;
 	const previewUrl = escapeHtml(
-		`${req.protocol}://${req.get("host")}/file/${slug}/preview`,
+		`${requestProtocol(state.settings, req)}://${req.get("host")}/file/${slug}/preview`,
 	);
 	if (eligible && f.content_type.startsWith("image/")) {
 		tags.push(`<meta property="og:image" content="${previewUrl}">`);

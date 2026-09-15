@@ -8,7 +8,11 @@ import {
 	type UserRow,
 } from "../db/rows.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
-import { clientIp, requireSession } from "../middleware/auth.ts";
+import {
+	clientIp,
+	requestProtocol,
+	requireSession,
+} from "../middleware/auth.ts";
 import {
 	requireActiveUser,
 	requireOauthScope,
@@ -662,7 +666,7 @@ export function oauthPublicRouter(state: AppState): Router {
 	/** Discovery document (RFC 8414 shape, served under /api/oauth rather than
 	 * a root .well-known path so it stays inside the /api namespace). */
 	router.get("/metadata", (req, res) => {
-		const base = `${req.protocol}://${req.get("host")}`;
+		const base = `${requestProtocol(state.settings, req)}://${req.get("host")}`;
 		res.json({
 			issuer: base,
 			authorization_endpoint: `${base}/oauth/authorize`,

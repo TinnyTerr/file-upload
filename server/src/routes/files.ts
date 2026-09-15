@@ -51,7 +51,11 @@ import { HttpError } from "../httpError.ts";
 import { consumeUse, newSlug, resolveActiveLink } from "../links.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
-import { clientIp, requireSession } from "../middleware/auth.ts";
+import {
+	clientIp,
+	requestProtocol,
+	requireSession,
+} from "../middleware/auth.ts";
 import {
 	getUploadUser,
 	requireActiveUser,
@@ -147,8 +151,8 @@ export function canEditDirectory(
 	return isEditor(state.db, dir, user);
 }
 
-function fileUrl(req: Request, slug: string): string {
-	const proto = req.protocol;
+function fileUrl(state: AppState, req: Request, slug: string): string {
+	const proto = requestProtocol(state.settings, req);
 	const host = req.get("host");
 	return `${proto}://${host}/file/${slug}`;
 }
@@ -611,7 +615,7 @@ export async function finalizeStoredFile(
 
 		const baseUrl = opts.requestOrigin
 			? `${opts.requestOrigin.baseUrl}/file/${slug}`
-			: fileUrl(req, slug);
+			: fileUrl(state, req, slug);
 		return {
 			file_id: fileObj.id,
 			slug,
@@ -1654,7 +1658,7 @@ export function filesRouter(state: AppState): Router {
 				// Read while the socket is still up — see FinalizeOpts.requestOrigin.
 				const requestOrigin = {
 					ip: clientIp(state, req),
-					baseUrl: `${req.protocol}://${req.get("host")}`,
+					baseUrl: `${requestProtocol(state.settings, req)}://${req.get("host")}`,
 				};
 				startFinalize(res, relPath, "chunked upload", async () => {
 					const result = await finalizeStoredFile({
@@ -1860,7 +1864,7 @@ export function filesRouter(state: AppState): Router {
 			log.info(
 				`shared file saved source_file_id=${source.id} saved_file_id=${saved.id} owner_id=${user.id} blob_id=${saved.blob_id}`,
 			);
-			const base = fileUrl(req, newLinkSlug);
+			const base = fileUrl(state, req, newLinkSlug);
 			res.json({
 				file_id: saved.id,
 				slug: newLinkSlug,
@@ -2912,7 +2916,7 @@ export function filesRouter(state: AppState): Router {
 				target: `link:${link.id}`,
 				ip: clientIp(state, req),
 			});
-			const base = fileUrl(req, slug);
+			const base = fileUrl(state, req, slug);
 			res.json({
 				slug,
 				url: base,
