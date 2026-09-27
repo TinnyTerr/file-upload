@@ -2074,6 +2074,7 @@ export function filesRouter(state: AppState): Router {
 			const ids = (
 				Array.isArray(rawIds) ? rawIds : rawIds !== undefined ? [rawIds] : []
 			)
+				.flatMap((v) => String(v).split(","))
 				.map((v) => Number(v))
 				.filter((n) => Number.isFinite(n));
 			if (!ids.length) {
