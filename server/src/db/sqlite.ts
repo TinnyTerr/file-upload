@@ -257,6 +257,14 @@ export function createSqliteDb(path: string): Db {
 	ensureColumn(sqlite, "torrent_jobs", "started_at", "started_at TEXT");
 	ensureColumn(sqlite, "torrent_jobs", "seed_ratio", "seed_ratio REAL");
 	ensureColumn(sqlite, "torrent_jobs", "seed_seconds", "seed_seconds INTEGER");
+	// Per-key override of the process-wide default rate limit. Existing keys
+	// predate the feature and get NULL, meaning "use the default".
+	ensureColumn(
+		sqlite,
+		"api_keys",
+		"rate_limit_per_min",
+		"rate_limit_per_min INTEGER",
+	);
 	// Cluster-wide row identity. Nullable because it has to be -- an existing
 	// row has no uid until the backfill below mints it, and there is no default
 	// expression that could produce a distinct one per row. The UNIQUE indexes

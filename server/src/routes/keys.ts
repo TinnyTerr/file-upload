@@ -31,8 +31,11 @@ function serializeKey(k: ApiKeyRow) {
 		active: !!k.active,
 		created_at: k.created_at,
 		last_used_at: k.last_used_at,
+		rate_limit_per_min: k.rate_limit_per_min,
 	};
 }
+
+const MAX_RATE_LIMIT_PER_MIN = 6000;
 
 /** Mirrors app/routes/keys.py -- mounted at /keys plus an admin sub-route at
  * /admin/keys registered separately in app.ts. */
@@ -123,6 +126,46 @@ export function keysRouter(state: AppState): Router {
 			// immediately instead of lingering as an inactive row (see CLAUDE.md).
 			db.run("DELETE FROM api_keys WHERE id = $id", { $id: key.id });
 			res.json({ status: "deleted" });
+		},
+	);
+
+	router.patch(
+		"/:keyId",
+		requireSession(state),
+		requireCsrf,
+		requireActiveUser(state),
+		(req, res) => {
+			const user = req.currentUser!;
+			const key = db.get<ApiKeyRow>("SELECT * FROM api_keys WHERE id = $id", {
+				$id: req.params.keyId,
+			});
+			if (!key) {
+				res.status(404).json({ detail: "not found" });
+				return;
+			}
+			if (user.role !== "master" && key.owner_id !== user.id) {
+				res.status(403).json({ detail: "not your key" });
+				return;
+			}
+			const raw = (req.body ?? {}).rate_limit_per_min;
+			let value: number | null;
+			if (raw === null) {
+				value = null;
+			} else {
+				const n = Number(raw);
+				if (!Number.isFinite(n) || n < 1 || n > MAX_RATE_LIMIT_PER_MIN) {
+					res.status(400).json({
+						detail: `rate_limit_per_min must be null or 1-${MAX_RATE_LIMIT_PER_MIN}`,
+					});
+					return;
+				}
+				value = Math.floor(n);
+			}
+			db.run("UPDATE api_keys SET rate_limit_per_min = $v WHERE id = $id", {
+				$v: value,
+				$id: key.id,
+			});
+			res.json({ id: key.id, rate_limit_per_min: value });
 		},
 	);
 

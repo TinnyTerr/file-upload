@@ -7,6 +7,7 @@ import { getLogger } from "../logging.ts";
 import { prunePlayKeys } from "../media/playKeys.ts";
 import { sweepStaleParts } from "../routes/files.ts";
 import { pruneOauth } from "../security/oauth.ts";
+import { pruneRateLimitBuckets } from "../security/rateLimit.ts";
 import { resetInterruptedImports, torrentPollJob } from "../torrents/poller.ts";
 import {
 	archiveIdleJob,
@@ -48,6 +49,11 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 		{ id: "archive_idle", intervalMs: HOUR_MS, run: () => archiveIdleJob(db) },
 		{ id: "delete_idle", intervalMs: HOUR_MS, run: () => deleteIdleJob(db) },
 		{ id: "temp_expiry", intervalMs: HOUR_MS, run: () => tempExpiryJob(db) },
+		{
+			id: "rate_limit_prune",
+			intervalMs: MINUTE_MS,
+			run: () => pruneRateLimitBuckets(),
+		},
 		{ id: "link_expiry", intervalMs: TEN_MIN_MS, run: () => linkExpiryJob(db) },
 		{
 			id: "sweep_stale_parts",

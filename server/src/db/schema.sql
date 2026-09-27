@@ -265,7 +265,9 @@ CREATE TABLE IF NOT EXISTS api_keys (
   bound_ip TEXT,
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
-  last_used_at TEXT
+  last_used_at TEXT,
+  -- NULL = the process-wide default in security/rateLimit.ts.
+  rate_limit_per_min INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_api_keys_key_hash ON api_keys(key_hash);
 CREATE INDEX IF NOT EXISTS ix_api_keys_owner_id ON api_keys(owner_id);
@@ -564,6 +566,23 @@ CREATE INDEX IF NOT EXISTS ix_oauth_tokens_token_hash ON oauth_tokens(token_hash
 CREATE INDEX IF NOT EXISTS ix_oauth_tokens_grant_id ON oauth_tokens(grant_id);
 CREATE INDEX IF NOT EXISTS ix_oauth_tokens_user_id ON oauth_tokens(user_id);
 CREATE INDEX IF NOT EXISTS ix_oauth_tokens_expires_at ON oauth_tokens(expires_at);
+
+-- Node-local, like api_keys/oauth_* -- a webhook registered on one node only
+-- fires for events that happen to be handled on that node.
+CREATE TABLE IF NOT EXISTS webhooks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_id INTEGER NOT NULL REFERENCES users(id),
+  url TEXT NOT NULL,
+  -- HMAC-SHA256 signing secret, shown once at creation like an API key.
+  secret TEXT NOT NULL,
+  -- Comma-separated event names (see webhooks.ts::WEBHOOK_EVENTS).
+  events TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  last_triggered_at TEXT,
+  last_status INTEGER
+);
+CREATE INDEX IF NOT EXISTS ix_webhooks_owner_id ON webhooks(owner_id);
 
 -- Cluster-wide row identity (cluster/identity.ts, redesign §5.6). UNIQUE and
 -- nullable together: SQLite permits any number of NULLs in a unique index, so

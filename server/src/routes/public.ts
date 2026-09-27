@@ -19,7 +19,7 @@ import { clientIp, requestProtocol } from "../middleware/auth.ts";
 import { BYTES_HEADERS } from "../middleware/securityHeaders.ts";
 import { checkLinkAccess } from "../security/accessLock.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
-import { escapeHtml, sendSpa } from "../spa.ts";
+import { escapeHtml, sendSpa, siteMetaTags } from "../spa.ts";
 import { fileHashes } from "../storage/blobs.ts";
 import { decompressStream } from "../storage/compress.ts";
 import { safeJoin, storageRoot } from "../storage/paths.ts";
@@ -29,6 +29,7 @@ import {
 	ensureBlobAvailable,
 } from "../storage/streaming.ts";
 import { getOrCreateThumbnail, serveCachedJpeg } from "../storage/thumbnail.ts";
+import { triggerWebhooks } from "../webhooks.ts";
 
 const log = getLogger("app.public");
 const CHUNK = 256 * 1024;
@@ -165,6 +166,7 @@ function fileMetaTags(req: Request, state: AppState, slug: string): string {
 		`${requestProtocol(state.settings, req)}://${req.get("host")}${req.originalUrl}`,
 	);
 	const tags = [
+		siteMetaTags(),
 		`<meta property="og:title" content="${title}">`,
 		`<meta property="og:description" content="${desc}">`,
 		`<meta property="og:url" content="${url}">`,
@@ -177,23 +179,35 @@ function fileMetaTags(req: Request, state: AppState, slug: string): string {
 		resolveFileEncryption(state.db, f).mode === "none" &&
 		!f.compressed &&
 		!f.archived;
-	const previewUrl = escapeHtml(
-		`${requestProtocol(state.settings, req)}://${req.get("host")}/file/${slug}/preview`,
-	);
+	const origin = `${requestProtocol(state.settings, req)}://${req.get("host")}`;
+	const previewUrl = escapeHtml(`${origin}/file/${slug}/preview`);
+	// /thumbnail (not /preview) for og:image: it's the size-capped JPEG built
+	// for exactly this -- a link-preview crawler that caps its own fetch size
+	// must still get something to render, whatever the source file's size is.
+	const thumbnailUrl = escapeHtml(`${origin}/file/${slug}/thumbnail`);
+	let hasImage = false;
 	if (eligible && f.content_type.startsWith("image/")) {
-		tags.push(`<meta property="og:image" content="${previewUrl}">`);
-		tags.push('<meta name="twitter:card" content="summary_large_image">');
+		tags.push(`<meta property="og:image" content="${thumbnailUrl}">`);
+		hasImage = true;
 	} else if (eligible && f.content_type.startsWith("video/")) {
 		tags.push(`<meta property="og:video" content="${previewUrl}">`);
 		tags.push(
 			`<meta property="og:video:type" content="${escapeHtml(f.content_type)}">`,
 		);
+		// Discord/Slack draw the poster from og:image even on a video card, and
+		// a video file is exactly what getOrCreateThumbnail can extract a frame
+		// from (storage/thumbnail.ts, ffmpeg).
+		tags.push(`<meta property="og:image" content="${thumbnailUrl}">`);
+		hasImage = true;
 	} else if (eligible && f.content_type.startsWith("audio/")) {
 		tags.push(`<meta property="og:audio" content="${previewUrl}">`);
 		tags.push(
 			`<meta property="og:audio:type" content="${escapeHtml(f.content_type)}">`,
 		);
 	}
+	tags.push(
+		`<meta name="twitter:card" content="${hasImage ? "summary_large_image" : "summary"}">`,
+	);
 	return tags.join("\n");
 }
 
@@ -335,6 +349,14 @@ export function publicRouter(state: AppState): Router {
 					action: "file.downloaded",
 					target: `file:${f.id}`,
 					ip: clientIp(state, req),
+				});
+				void triggerWebhooks(state, f.owner_id, "file.downloaded", {
+					file_id: f.id,
+					original_filename: f.original_filename,
+				}).catch((err) => {
+					log.warning(
+						`webhook dispatch failed file_id=${f.id}: ${err instanceof Error ? err.message : String(err)}`,
+					);
 				});
 			}
 

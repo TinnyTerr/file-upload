@@ -61,7 +61,9 @@ function isPublicIp(value: string): boolean {
 	return false;
 }
 
-async function resolvePublicAddress(hostname: string): Promise<string> {
+/** Exported for other outbound-to-attacker-supplied-URL surfaces (webhooks)
+ * that need the same "don't let this become an SSRF proxy" check. */
+export async function resolvePublicAddress(hostname: string): Promise<string> {
 	let addresses: { address: string }[];
 	try {
 		addresses = await dnsLookup(hostname, { all: true });
@@ -80,7 +82,7 @@ async function resolvePublicAddress(hostname: string): Promise<string> {
 	return addresses[0]!.address;
 }
 
-function validatePublicHttpUrl(url: string): URL {
+export function validatePublicHttpUrl(url: string): URL {
 	let parsed: URL;
 	try {
 		parsed = new URL(url);

@@ -98,6 +98,7 @@ import {
 } from "../storage/streaming.ts";
 import { deleteThumbnail } from "../storage/thumbnail.ts";
 import { memberSource, safeArcname } from "../storage/zip.ts";
+import { triggerWebhooks } from "../webhooks.ts";
 
 const log = getLogger("app.routes.files");
 
@@ -610,6 +611,16 @@ export async function finalizeStoredFile(
 		void replicateFile(state, fileObj.id).catch((err) => {
 			log.warning(
 				`cluster replication failed file_id=${fileObj.id}: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		});
+		void triggerWebhooks(state, user.id, "file.uploaded", {
+			file_id: fileObj.id,
+			original_filename: displayName,
+			size_bytes: sizeBytes,
+			slug,
+		}).catch((err) => {
+			log.warning(
+				`webhook dispatch failed file_id=${fileObj.id}: ${err instanceof Error ? err.message : String(err)}`,
 			);
 		});
 
@@ -2916,6 +2927,15 @@ export function filesRouter(state: AppState): Router {
 				action: "link.created",
 				target: `link:${link.id}`,
 				ip: clientIp(state, req),
+			});
+			void triggerWebhooks(state, user.id, "link.created", {
+				file_id: fileObj.id,
+				link_id: link.id,
+				slug,
+			}).catch((err) => {
+				log.warning(
+					`webhook dispatch failed link_id=${link.id}: ${err instanceof Error ? err.message : String(err)}`,
+				);
 			});
 			const base = fileUrl(state, req, slug);
 			res.json({

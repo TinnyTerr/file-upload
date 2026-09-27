@@ -32,6 +32,7 @@ import { publicRouter } from "./routes/public.ts";
 import { remoteUploadRouter } from "./routes/remoteUpload.ts";
 import { adminTorrentsRouter, torrentsRouter } from "./routes/torrents.ts";
 import { usersRouter } from "./routes/users.ts";
+import { webhooksRouter } from "./routes/webhooks.ts";
 import { mountSpa, SERVER_ERROR_PAGE, sendErrorPage } from "./spa.ts";
 
 /** Mirrors app/main.py::create_app -- same middleware order, health check,
@@ -66,6 +67,7 @@ export function createApp(state: AppState): Express {
 	app.use("/api/oauth", oauthRouter(state));
 	app.use("/api/oauth", oauthPublicRouter(state));
 	app.use("/api/keys", keysRouter(state));
+	app.use("/api/webhooks", webhooksRouter(state));
 	app.use("/api/admin/keys", adminKeysRouter(state));
 	app.use("/api/users", usersRouter(state));
 	app.use("/api/audit", auditRouter(state));

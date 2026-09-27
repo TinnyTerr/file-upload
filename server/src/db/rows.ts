@@ -206,6 +206,20 @@ export interface ApiKeyRow {
 	active: number;
 	created_at: string;
 	last_used_at: string | null;
+	rate_limit_per_min: number | null;
+}
+
+export interface WebhookRow {
+	id: number;
+	owner_id: number;
+	url: string;
+	secret: string;
+	/** Comma-separated event names. */
+	events: string;
+	active: number;
+	created_at: string;
+	last_triggered_at: string | null;
+	last_status: number | null;
 }
 
 export interface OauthClientRow {

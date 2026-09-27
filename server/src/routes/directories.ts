@@ -63,7 +63,7 @@ import {
 } from "../security/accessLock.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
-import { escapeHtml, sendSpa } from "../spa.ts";
+import { escapeHtml, sendSpa, siteMetaTags } from "../spa.ts";
 import { usedStorageBytesForUser } from "../storage/accounting.ts";
 import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
 import { safeJoin, storageRoot } from "../storage/paths.ts";
@@ -492,17 +492,40 @@ function directoryPageMeta(
 	const totalBytes = pairs.reduce((sum, { file }) => sum + file.size_bytes, 0);
 	const title = escapeHtml(d.title || "Shared folder");
 	const desc = escapeHtml(`${pairs.length} files, ${totalBytes} bytes`);
-	const url = escapeHtml(
-		`${requestProtocol(state.settings, req)}://${req.get("host")}${req.originalUrl}`,
-	);
-	return [
+	const origin = `${requestProtocol(state.settings, req)}://${req.get("host")}`;
+	const url = escapeHtml(`${origin}${req.originalUrl}`);
+	const tags = [
+		siteMetaTags(),
 		`<meta property="og:title" content="${title}">`,
 		`<meta property="og:description" content="${desc}">`,
 		`<meta property="og:url" content="${url}">`,
 		'<meta property="og:type" content="website">',
 		`<meta name="twitter:title" content="${title}">`,
 		`<meta name="twitter:description" content="${desc}">`,
-	].join("\n");
+	];
+	// A representative poster: the first child whose own link is eligible for
+	// /thumbnail, same rule fileMetaTags uses (unlimited link, plaintext,
+	// untransformed). A password-locked or per-file-keyed member never
+	// qualifies -- its bytes aren't decryptable from the folder's own key.
+	const poster = pairs.find(
+		({ file: f, link }) =>
+			link.max_uses === null &&
+			resolveFileEncryption(state.db, f).mode === "none" &&
+			!f.compressed &&
+			!f.archived &&
+			(f.content_type.startsWith("image/") ||
+				f.content_type.startsWith("video/")),
+	);
+	if (poster) {
+		const thumbnailUrl = escapeHtml(
+			`${origin}/file/${poster.link.slug}/thumbnail`,
+		);
+		tags.push(`<meta property="og:image" content="${thumbnailUrl}">`);
+	}
+	tags.push(
+		`<meta name="twitter:card" content="${poster ? "summary_large_image" : "summary"}">`,
+	);
+	return tags.join("\n");
 }
 
 function expiresAtFromSeconds(

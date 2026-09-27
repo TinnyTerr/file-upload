@@ -10,6 +10,7 @@ import {
 } from "../permissions.ts";
 import { bindOrReject, hashKey } from "../security/apiKeys.ts";
 import { csrfMatches } from "../security/csrf.ts";
+import { checkRateLimit } from "../security/rateLimit.ts";
 import {
 	ACCESS_TOKEN_PREFIX,
 	findLiveToken,
@@ -19,6 +20,31 @@ import {
 } from "../security/oauth.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
 import { clientIp } from "./auth.ts";
+
+/** Applies a rate-limit check and sets the usual `X-RateLimit-*` headers.
+ * Returns false (and has already written a 429) when the identifier is over
+ * its limit -- callers just need to `return` in that case. */
+function applyRateLimit(
+	res: Response,
+	identifier: string,
+	limitPerMin: number | null,
+): boolean {
+	const result = checkRateLimit(
+		identifier,
+		limitPerMin ?? undefined,
+	);
+	res.set({
+		"X-RateLimit-Limit": String(result.limit),
+		"X-RateLimit-Remaining": String(result.remaining),
+		"X-RateLimit-Reset": String(result.resetAt),
+	});
+	if (!result.allowed) {
+		res.set("Retry-After", "60");
+		res.status(429).json({ detail: "rate limit exceeded" });
+		return false;
+	}
+	return true;
+}
 
 declare module "express-serve-static-core" {
 	interface Request {
@@ -149,6 +175,9 @@ function resolveApiKey(
 		res.status(403).json({ detail: "api key ip mismatch" });
 		return null;
 	}
+	if (!applyRateLimit(res, `apikey:${apiKey.id}`, apiKey.rate_limit_per_min)) {
+		return null;
+	}
 	return apiKey;
 }
 
@@ -172,6 +201,12 @@ function resolveOauthBearer(
 	const token = findLiveToken(db, raw, "access");
 	if (!token) {
 		res.status(401).json({ detail: "invalid or expired access token" });
+		return null;
+	}
+	// Keyed per-token rather than per-client: a token is the credential that
+	// was actually presented, and it dies at expiry/refresh on its own, so the
+	// bucket never needs a separate cleanup tied to client lifecycle.
+	if (!applyRateLimit(res, `oauth:${token.id}`, null)) {
 		return null;
 	}
 	if (!parseScope(token.scope).includes(scope)) {

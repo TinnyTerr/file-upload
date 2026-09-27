@@ -47,6 +47,19 @@ export function spaAvailable(): boolean {
 	return shell() !== null;
 }
 
+/** Tags every public share page carries, independent of what it's sharing --
+ * `og:site_name` so a Discord/Slack/iMessage embed names the app rather than
+ * just showing a bare title, `theme-color` for the accent strip those clients
+ * draw down the side of the card. Approximates `--brand-from` from
+ * client/src/index.css; exact oklch->hex conversion isn't worth doing here for
+ * one meta tag. */
+export function siteMetaTags(): string {
+	return [
+		'<meta property="og:site_name" content="fileupload">',
+		'<meta name="theme-color" content="#4ea37a">',
+	].join("\n");
+}
+
 export function escapeHtml(s: string): string {
 	return s
 		.replace(/&/g, "&amp;")
