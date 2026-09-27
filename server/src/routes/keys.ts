@@ -11,6 +11,7 @@ import {
 } from "../middleware/deps.ts";
 import { generateKey, hashKey } from "../security/apiKeys.ts";
 import { requireCsrf } from "../security/csrf.ts";
+import { DEFAULT_RATE_LIMIT_PER_MIN } from "../security/rateLimit.ts";
 import { verifyPassword } from "../security/passwords.ts";
 
 interface CountRow {
@@ -160,6 +161,20 @@ export function keysRouter(state: AppState): Router {
 					return;
 				}
 				value = Math.floor(n);
+			}
+			// A key's owner may tighten their own limit freely, but raising it
+			// above the process-wide default needs master -- otherwise the limit
+			// is a ceiling in name only, since nothing stops the very account it's
+			// meant to bound from lifting it.
+			if (
+				user.role !== "master" &&
+				value !== null &&
+				value > DEFAULT_RATE_LIMIT_PER_MIN
+			) {
+				res.status(403).json({
+					detail: `raising the limit above ${DEFAULT_RATE_LIMIT_PER_MIN}/min requires master`,
+				});
+				return;
 			}
 			db.run("UPDATE api_keys SET rate_limit_per_min = $v WHERE id = $id", {
 				$v: value,
