@@ -265,7 +265,8 @@ Every data endpoint lives under `/api/*` so it can never collide with an SPA cli
 | `/api/torrents`, `/api/admin/torrents` | `torrents.ts` |
 | `/api/media` | `media.ts` — library browse, publish, stream, play keys |
 | `/api/cluster`, `/api/admin/cluster` | `cluster.ts` |
-| `/api` (self-prefixed paths) | `directories.ts`, `dropbox.ts`, `docs.ts` (`/docs.md`), `public.ts` (`/file/:slug*`), public folder routes (`/d/:slug*`) |
+| `/api` (self-prefixed paths) | `directories.ts`, `dropbox.ts`, `docs.ts` (`/docs.md`), `public.ts` (`/file/:slug*` data endpoints), public folder data routes (`/d/:slug*`) |
+| *(unprefixed, mounted before `mountSpa`)* | `public.ts::publicPageRouter` (`GET /file/:slug`), `directories.ts::publicDirectoryPageRouter` (`GET /d/:slug`) — the actual browser-facing share URLs, kept apart from their `/api`-mounted data siblings so the OG/twitter meta they inject is reachable at the address a link-preview crawler actually requests |
 
 ---
 

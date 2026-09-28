@@ -2882,6 +2882,16 @@ export function publicDirectoriesRouter(state: AppState): Router {
 		}),
 	);
 
+	return router;
+}
+
+/** The page route for a shared folder, kept out of `publicDirectoriesRouter`
+ * deliberately: that router is mounted at `/api` (its `/d/:slug*` data
+ * endpoints belong there), but this is the actual browser-facing URL a
+ * folder link points at, so it must be reachable unprefixed -- see app.ts. */
+export function publicDirectoryPageRouter(state: AppState): Router {
+	const { db } = state;
+	const router = Router();
 	router.get("/d/:slug", (req, res) => {
 		const resolved = resolveDirectory(db, req.params.slug);
 		const meta = resolved
@@ -2889,6 +2899,5 @@ export function publicDirectoriesRouter(state: AppState): Router {
 			: "";
 		sendSpa(res, meta);
 	});
-
 	return router;
 }

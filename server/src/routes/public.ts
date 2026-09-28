@@ -743,9 +743,17 @@ export function publicRouter(state: AppState): Router {
 		}),
 	);
 
+	return router;
+}
+
+/** The page route for a share link, kept out of `publicRouter` deliberately:
+ * that router is mounted at `/api` (its `/file/:slug*` data endpoints are
+ * meant to live there), but this is the actual browser-facing URL a share
+ * link points at, so it must be reachable unprefixed -- see app.ts. */
+export function publicPageRouter(state: AppState): Router {
+	const router = Router();
 	router.get("/file/:slug", (req, res) => {
 		sendSpa(res, fileMetaTags(req, state, req.params.slug));
 	});
-
 	return router;
 }

@@ -20,6 +20,7 @@ import {
 	adminDirectoriesRouter,
 	directoriesRouter,
 	publicDirectoriesRouter,
+	publicDirectoryPageRouter,
 } from "./routes/directories.ts";
 import { docsRouter } from "./routes/docs.ts";
 import { dropboxRouter } from "./routes/dropbox.ts";
@@ -28,7 +29,7 @@ import { adminKeysRouter, keysRouter } from "./routes/keys.ts";
 import { mediaRouter } from "./routes/media.ts";
 import { mfaRouter } from "./routes/mfa.ts";
 import { oauthPublicRouter, oauthRouter } from "./routes/oauth.ts";
-import { publicRouter } from "./routes/public.ts";
+import { publicPageRouter, publicRouter } from "./routes/public.ts";
 import { remoteUploadRouter } from "./routes/remoteUpload.ts";
 import { adminTorrentsRouter, torrentsRouter } from "./routes/torrents.ts";
 import { usersRouter } from "./routes/users.ts";
@@ -87,6 +88,12 @@ export function createApp(state: AppState): Express {
 	app.use("/api/admin/cluster", adminClusterRouter(state));
 	app.use("/api", publicRouter(state));
 	app.use("/api", publicDirectoriesRouter(state));
+	// Unprefixed: these are the actual browser-facing share URLs, and must be
+	// reachable at /file/:slug and /d/:slug directly (not /api/...) so a
+	// link-preview crawler's request gets the meta-tag-injected shell instead
+	// of falling through to mountSpa's plain one.
+	app.use(publicPageRouter(state));
+	app.use(publicDirectoryPageRouter(state));
 
 	// Static assets + the SPA fallback for every client-side route. Mounted last
 	// so it can never shadow an API router, and it hands unknown /api/* paths
