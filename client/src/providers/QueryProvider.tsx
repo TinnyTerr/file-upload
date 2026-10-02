@@ -7,6 +7,7 @@ import {
 import { type ReactNode, useState } from "react";
 import { ApiError } from "@/config/api";
 import { ME_QUERY_KEY } from "@/features/auth/hooks/auth";
+import { captureException } from "@/lib/sentry";
 
 /** A 401 with this exact detail means the session itself is gone (expired,
  * revoked, signed out elsewhere) -- as opposed to, say, a wrong folder
@@ -20,11 +21,19 @@ function isSessionExpired(err: unknown): boolean {
 	);
 }
 
+/** Server faults and network/runtime failures are worth reporting; a 4xx is
+ * the API answering correctly (wrong password, missing file, quota). */
+function report(err: unknown): void {
+	if (err instanceof ApiError && err.status < 500) return;
+	captureException(err);
+}
+
 export function QueryProvider({ children }: { children: ReactNode }) {
 	const [client] = useState(() => {
 		const qc: QueryClient = new QueryClient({
 			queryCache: new QueryCache({
 				onError: (err) => {
+					report(err);
 					// Only while a user was actually loaded -- otherwise every public
 					// page's queries would race the `me` fetch's own 401 on first load.
 					if (isSessionExpired(err) && qc.getQueryData(ME_QUERY_KEY)) {
@@ -34,6 +43,7 @@ export function QueryProvider({ children }: { children: ReactNode }) {
 			}),
 			mutationCache: new MutationCache({
 				onError: (err) => {
+					report(err);
 					if (isSessionExpired(err) && qc.getQueryData(ME_QUERY_KEY)) {
 						qc.setQueryData(ME_QUERY_KEY, null);
 					}

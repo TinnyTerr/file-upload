@@ -272,6 +272,17 @@ async fn download_file(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Held for the life of the app so queued events flush on drop. No DSN at
+    // build time = disabled client, every call a no-op.
+    let _sentry = sentry::init((
+        option_env!("SENTRY_DSN_DESKTOP").unwrap_or(""),
+        sentry::ClientOptions {
+            release: sentry::release_name!(),
+            send_default_pii: false,
+            ..Default::default()
+        },
+    ));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())

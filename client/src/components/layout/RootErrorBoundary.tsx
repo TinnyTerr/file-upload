@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
+import { captureException } from "@/lib/sentry";
 import { ErrorPage } from "./ErrorPage";
 
 /** A dynamic `import()` that failed. After a deploy the shell is revalidated
@@ -40,10 +41,11 @@ export class RootErrorBoundary extends Component<
 	}
 
 	componentDidCatch(error: Error, info: ErrorInfo) {
-		// The only place this is recoverable from: the browser console. There is
-		// no error-reporting backend, and shipping stack traces to the server
-		// would put user paths and file names in the admin-readable log buffer.
 		console.error("unhandled render error", error, info.componentStack);
+		// A stale tab after a deploy is not a bug; don't page anyone for it.
+		if (!isStaleChunk(error)) {
+			captureException(error, { componentStack: info.componentStack });
+		}
 	}
 
 	render() {

@@ -6,12 +6,15 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "@/features/auth/hooks/auth";
 import { RevealedKeyProvider } from "@/features/drive/hooks/useRevealedKeys";
 import { UploadProvider } from "@/features/files/hooks/useUpload";
+import { initSentry } from "@/lib/sentry";
 import { DialogProvider } from "@/providers/DialogProvider";
 import { QueryProvider } from "@/providers/QueryProvider";
 import { ThemeProvider } from "@/providers/ThemeProvider";
 import { ToastProvider } from "@/providers/ToastProvider";
 import App from "./App";
 import "./index.css";
+
+initSentry();
 
 // Apply saved theme before first paint (avoids FOUC). `ThemeProvider` is the
 // ongoing reactive owner once mounted; this only has to get the very first

@@ -1,11 +1,20 @@
 import { fileURLToPath, URL } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 
 const BACKEND = process.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8000";
 
+// DSNs live in the repo-root .env, one per surface. Only the web one is baked
+// into this bundle; the server and desktop keys never reach the browser.
+const rootEnv = loadEnv(process.env.NODE_ENV ?? "development", "..", "SENTRY_DSN_");
+
 export default defineConfig({
+	define: {
+		__SENTRY_DSN__: JSON.stringify(
+			process.env.SENTRY_DSN_WEB ?? rootEnv.SENTRY_DSN_WEB ?? "",
+		),
+	},
 	plugins: [react(), tailwindcss()],
 	resolve: {
 		alias: {
