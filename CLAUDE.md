@@ -131,6 +131,16 @@ Environment variables:
 | `FILEUPLOAD_THUMBNAILS` | Override the thumbnail cache root (default `./data/thumbnails`) |
 | `FILEUPLOAD_DEBRID` | Override the Real-Debrid staging root (default `./data/debrid`) |
 
+### Sentry
+
+One DSN per surface in the repo-root `.env` (see `.env.example`): `SENTRY_DSN_WEB`
+(baked into the client bundle via `define` in `client/vite.config.ts`),
+`SENTRY_DSN_DESKTOP` (desktop webview bundle + Rust, via `build.rs`),
+`SENTRY_DSN_SERVER` (`server/src/sentry.ts`, imported first in `index.ts`).
+Blank = that surface is off. Every server ERROR log record becomes a Sentry
+event (`logging.ts` sink). Share-link secrets (`?ek=`, `?k=`, `#ek=`) are scrubbed
+before send; don't add a code path that ships request bodies or cookies.
+
 ---
 
 ## Project structure

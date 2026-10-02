@@ -10,6 +10,7 @@
 		"typecheck": "tsc -p tsconfig.json --noEmit"
 	},
 	"dependencies": {
+		"@sentry/bun": "^11.4.0",
 		"@simplewebauthn/server": "^13.3.2",
 		"archiver": "^8.0.0",
 		"busboy": "^1.6.0",

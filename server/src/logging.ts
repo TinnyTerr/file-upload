@@ -1,5 +1,6 @@
 import pino from "pino";
 import { configValue } from "./config.ts";
+import { Sentry, sentryEnabled } from "./sentry.ts";
 
 /**
  * Logging built on pino, shaped to match the Python server:
@@ -91,6 +92,14 @@ const sink = {
 		const levelName = PINO_TO_PY[rec.level] ?? "INFO";
 		const logger = rec.name ?? "app";
 		const message = rec.msg ?? "";
+		// Every ERROR record is a Sentry event, which covers the route-level
+		// "unhandled route error" handlers and app.ts's catch-all in one place.
+		if (sentryEnabled && rec.level >= 50) {
+			Sentry.captureMessage(message, {
+				level: "error",
+				tags: { logger },
+			});
+		}
 		entries.push({
 			id: nextId++,
 			created_at: new Date(rec.time).toISOString(),

@@ -1,3 +1,4 @@
+import "./sentry.ts";
 import { createApp } from "./app.ts";
 import { createAppState } from "./appState.ts";
 import { ensureMaster } from "./bootstrap.ts";
