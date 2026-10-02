@@ -10,7 +10,6 @@ import {
 } from "../permissions.ts";
 import { bindOrReject, hashKey } from "../security/apiKeys.ts";
 import { csrfMatches } from "../security/csrf.ts";
-import { checkRateLimit } from "../security/rateLimit.ts";
 import {
 	ACCESS_TOKEN_PREFIX,
 	findLiveToken,
@@ -18,6 +17,7 @@ import {
 	SCOPES,
 	touchToken,
 } from "../security/oauth.ts";
+import { checkRateLimit } from "../security/rateLimit.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
 import { clientIp } from "./auth.ts";
 
@@ -29,10 +29,7 @@ function applyRateLimit(
 	identifier: string,
 	limitPerMin: number | null,
 ): boolean {
-	const result = checkRateLimit(
-		identifier,
-		limitPerMin ?? undefined,
-	);
+	const result = checkRateLimit(identifier, limitPerMin ?? undefined);
 	res.set({
 		"X-RateLimit-Limit": String(result.limit),
 		"X-RateLimit-Remaining": String(result.remaining),

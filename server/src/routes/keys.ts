@@ -11,8 +11,8 @@ import {
 } from "../middleware/deps.ts";
 import { generateKey, hashKey } from "../security/apiKeys.ts";
 import { requireCsrf } from "../security/csrf.ts";
-import { DEFAULT_RATE_LIMIT_PER_MIN } from "../security/rateLimit.ts";
 import { verifyPassword } from "../security/passwords.ts";
+import { DEFAULT_RATE_LIMIT_PER_MIN } from "../security/rateLimit.ts";
 
 interface CountRow {
 	n: number;

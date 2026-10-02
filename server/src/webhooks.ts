@@ -1,6 +1,6 @@
 import { createHmac, randomBytes } from "node:crypto";
 import type { AppState } from "./appState.ts";
-import { type WebhookRow, nowIso } from "./db/rows.ts";
+import { nowIso, type WebhookRow } from "./db/rows.ts";
 import { getLogger } from "./logging.ts";
 import { fetchLogged } from "./outbound.ts";
 
@@ -58,7 +58,9 @@ export async function triggerWebhooks(
 		{ $ownerId: ownerId },
 	);
 	const targets = hooks.filter((h) => h.events.split(",").includes(event));
-	await Promise.all(targets.map((h) => deliverToHook(state, h, event, payload)));
+	await Promise.all(
+		targets.map((h) => deliverToHook(state, h, event, payload)),
+	);
 }
 
 /** Same delivery as `triggerWebhooks`, for exactly one hook, bypassing its own

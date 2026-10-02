@@ -12,10 +12,7 @@ import {
 	sendTestWebhook,
 	WEBHOOK_EVENTS,
 } from "../webhooks.ts";
-import {
-	resolvePublicAddress,
-	validatePublicHttpUrl,
-} from "./remoteUpload.ts";
+import { resolvePublicAddress, validatePublicHttpUrl } from "./remoteUpload.ts";
 
 const MAX_WEBHOOKS_PER_USER = 20;
 
@@ -131,10 +128,9 @@ export function webhooksRouter(state: AppState): Router {
 		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
 			const user = req.currentUser!;
-			const hook = db.get<WebhookRow>(
-				"SELECT * FROM webhooks WHERE id = $id",
-				{ $id: req.params.webhookId },
-			);
+			const hook = db.get<WebhookRow>("SELECT * FROM webhooks WHERE id = $id", {
+				$id: req.params.webhookId,
+			});
 			if (!hook || (user.role !== "master" && hook.owner_id !== user.id)) {
 				res.status(404).json({ detail: "not found" });
 				return;
@@ -149,7 +145,9 @@ export function webhooksRouter(state: AppState): Router {
 				try {
 					url = await assertPublicUrl(body.url);
 				} catch {
-					res.status(400).json({ detail: "url must be a public http(s) address" });
+					res
+						.status(400)
+						.json({ detail: "url must be a public http(s) address" });
 					return;
 				}
 			}
@@ -186,10 +184,9 @@ export function webhooksRouter(state: AppState): Router {
 		requireActiveUser(state),
 		(req, res) => {
 			const user = req.currentUser!;
-			const hook = db.get<WebhookRow>(
-				"SELECT * FROM webhooks WHERE id = $id",
-				{ $id: req.params.webhookId },
-			);
+			const hook = db.get<WebhookRow>("SELECT * FROM webhooks WHERE id = $id", {
+				$id: req.params.webhookId,
+			});
 			if (!hook || (user.role !== "master" && hook.owner_id !== user.id)) {
 				res.status(404).json({ detail: "not found" });
 				return;
@@ -212,10 +209,9 @@ export function webhooksRouter(state: AppState): Router {
 		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
 			const user = req.currentUser!;
-			const hook = db.get<WebhookRow>(
-				"SELECT * FROM webhooks WHERE id = $id",
-				{ $id: req.params.webhookId },
-			);
+			const hook = db.get<WebhookRow>("SELECT * FROM webhooks WHERE id = $id", {
+				$id: req.params.webhookId,
+			});
 			if (!hook || (user.role !== "master" && hook.owner_id !== user.id)) {
 				res.status(404).json({ detail: "not found" });
 				return;
