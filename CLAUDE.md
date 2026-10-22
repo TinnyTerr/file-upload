@@ -20,6 +20,7 @@ Multi-node replication lives in `server/src/cluster/*.ts`:
 - `digest.ts` — cluster state digest, drift detection, and the split-brain cross-check (`syncCheckJob`)
 - `eventBus.ts` / `eventStore.ts` / `firehoseClient.ts` — in-memory live event bus, durable `cluster_events` mirror, peer-polling consumer
 - `http.ts` — node-to-node fetch helpers (cluster-token auth, timeouts)
+- `activity.ts` — live activity tracer behind the Cluster → Activity tab (`WS /api/ws/cluster-activity`, `can_manage_cluster`). **Pay-per-watch:** with no subscribed socket `begin()` returns a shared no-op and nothing is allocated or buffered; only the per-job stats (last run, next due) are kept always. Jobs, outbound peer calls (`http.ts`) and authenticated inbound peer calls (`requireClusterToken`) are spans. "Touches" (db/disk/…) are static per job/endpoint, not measured — don't present them as measured. A new scheduler job needs a `touches` list.
 
 `routes/cluster.ts` exports `clusterRouter` (mounted at `/api/cluster`: session-authenticated management endpoints **plus** cluster-token-authenticated node-to-node endpoints) and `adminClusterRouter` (mounted at `/api/admin/cluster`: node-logs + HTTP long-poll event fallback). `server/src/ws.ts` attaches the websocket firehose directly to the `http.Server` returned by `app.listen()` in `index.ts`, since Express has no native websocket support.
 

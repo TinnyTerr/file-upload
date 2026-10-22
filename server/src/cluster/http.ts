@@ -8,6 +8,20 @@
  * SSRF pinning that remoteUpload.ts needs does not apply here. */
 
 import { fetchLogged } from "../outbound.ts";
+import { activity } from "./activity.ts";
+
+/** `POST /api/cluster/reserve` and the peer's host, for the live activity view. */
+function traceOut(method: string, url: string) {
+	try {
+		const u = new URL(url);
+		return activity.begin("out", `${method} ${u.pathname}`, {
+			touches: ["peers"],
+			peer: u.host,
+		});
+	} catch {
+		return activity.begin("out", `${method} ${url}`, { touches: ["peers"] });
+	}
+}
 
 export class ClusterHTTPError extends Error {
 	status: number;
@@ -37,6 +51,7 @@ async function request(
 		body = JSON.stringify(opts.payload);
 		headers["Content-Type"] = "application/json";
 	}
+	const end = traceOut(method, url);
 	try {
 		const resp = await fetchLogged("cluster", url, {
 			method,
@@ -48,11 +63,16 @@ async function request(
 		if (!resp.ok) {
 			throw new ClusterHTTPError(resp.status, text);
 		}
+		end(true, String(resp.status));
 		if (!text) return null;
 		return JSON.parse(text);
 	} catch (err) {
-		if (err instanceof ClusterHTTPError) throw err;
+		if (err instanceof ClusterHTTPError) {
+			end(false, err.status ? String(err.status) : err.body.slice(0, 80));
+			throw err;
+		}
 		const reason = err instanceof Error ? err.message : String(err);
+		end(false, reason.slice(0, 80));
 		throw new ClusterHTTPError(0, reason);
 	} finally {
 		clearTimeout(timer);
@@ -86,6 +106,7 @@ export async function openStream(
 ): Promise<Response> {
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
+	const end = traceOut("GET", url);
 	try {
 		const resp = await fetchLogged(
 			"cluster",
@@ -100,10 +121,16 @@ export async function openStream(
 		if (!resp.ok) {
 			throw new ClusterHTTPError(resp.status);
 		}
+		// Covers time-to-headers, not the body transfer the caller streams.
+		end(true, String(resp.status));
 		return resp;
 	} catch (err) {
-		if (err instanceof ClusterHTTPError) throw err;
+		if (err instanceof ClusterHTTPError) {
+			end(false, String(err.status));
+			throw err;
+		}
 		const reason = err instanceof Error ? err.message : String(err);
+		end(false, reason.slice(0, 80));
 		throw new ClusterHTTPError(0, reason);
 	} finally {
 		clearTimeout(timer);

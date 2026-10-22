@@ -6,6 +6,9 @@ target design is in `cluster-redesign.md`; this is not it. Diagrams are Mermaid 
 All node-to-node HTTP is `Authorization: Bearer <cluster token>` via `cluster/http.ts`, except the
 websocket firehose, which is token-authed at upgrade in `ws.ts`.
 
+> Live version of all this: **Cluster → Activity** in the UI. It traces only while the tab is open and
+> Live is on (`cluster/activity.ts`).
+
 ## 1. One node, everything running
 
 ```mermaid

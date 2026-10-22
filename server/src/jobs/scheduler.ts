@@ -4,6 +4,7 @@ import { syncCheckJob } from "../cluster/digest.ts";
 import { checkMasterLivenessJob } from "../cluster/election.ts";
 import { heartbeatJob } from "../cluster/membership.ts";
 import { getLogger } from "../logging.ts";
+import { type Component, activity } from "../cluster/activity.ts";
 import { prunePlayKeys } from "../media/playKeys.ts";
 import { sweepStaleParts } from "../routes/files.ts";
 import { pruneOauth } from "../security/oauth.ts";
@@ -37,8 +38,10 @@ const FIVE_SEC_MS = 5 * 1000;
 
 interface JobSpec {
 	id: string;
+	/** What the job is known to use; shown on the live cluster activity view. */
+	touches: Component[];
 	intervalMs: number;
-	run: () => void | Promise<unknown>;
+	run: () => unknown;
 }
 
 const timers = new Map<string, ReturnType<typeof setInterval>>();
@@ -46,17 +49,39 @@ const timers = new Map<string, ReturnType<typeof setInterval>>();
 function buildJobSpecs(state: AppState): JobSpec[] {
 	const { db } = state;
 	return [
-		{ id: "archive_idle", intervalMs: HOUR_MS, run: () => archiveIdleJob(db) },
-		{ id: "delete_idle", intervalMs: HOUR_MS, run: () => deleteIdleJob(db) },
-		{ id: "temp_expiry", intervalMs: HOUR_MS, run: () => tempExpiryJob(db) },
+		{
+			id: "archive_idle",
+			touches: ["db", "disk"],
+			intervalMs: HOUR_MS,
+			run: () => archiveIdleJob(db),
+		},
+		{
+			id: "delete_idle",
+			touches: ["db", "disk"],
+			intervalMs: HOUR_MS,
+			run: () => deleteIdleJob(db),
+		},
+		{
+			id: "temp_expiry",
+			touches: ["db", "disk"],
+			intervalMs: HOUR_MS,
+			run: () => tempExpiryJob(db),
+		},
 		{
 			id: "rate_limit_prune",
+			touches: [],
 			intervalMs: MINUTE_MS,
 			run: () => pruneRateLimitBuckets(),
 		},
-		{ id: "link_expiry", intervalMs: TEN_MIN_MS, run: () => linkExpiryJob(db) },
+		{
+			id: "link_expiry",
+			touches: ["db"],
+			intervalMs: TEN_MIN_MS,
+			run: () => linkExpiryJob(db),
+		},
 		{
 			id: "sweep_stale_parts",
+			touches: ["disk"],
 			intervalMs: HOUR_MS,
 			run: () => sweepStaleParts(),
 		},
@@ -64,6 +89,7 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 		// while the token it kills could still be presented -- media/playKeys.ts.
 		{
 			id: "media_playkey_prune",
+			touches: ["db"],
 			intervalMs: HOUR_MS,
 			run: () => prunePlayKeys(db),
 		},
@@ -72,6 +98,7 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 		// security/oauth.ts::pruneOauth.
 		{
 			id: "oauth_prune",
+			touches: ["db"],
 			intervalMs: HOUR_MS,
 			run: () => pruneOauth(db),
 		},
@@ -80,6 +107,7 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 		// lockout counters, which are inert once their window has passed.
 		{
 			id: "session_prune",
+			touches: ["db"],
 			intervalMs: HOUR_MS,
 			run: () => {
 				const sessions = state.sessionManager.pruneExpired(db);
@@ -93,21 +121,25 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 		},
 		{
 			id: "cluster_heartbeat",
+			touches: ["db", "peers"],
 			intervalMs: MINUTE_MS,
 			run: () => heartbeatJob(state),
 		},
 		{
 			id: "cluster_sync_check",
+			touches: ["db", "peers"],
 			intervalMs: 5 * MINUTE_MS,
 			run: () => syncCheckJob(state),
 		},
 		{
 			id: "cluster_election_liveness",
+			touches: ["db", "peers", "events"],
 			intervalMs: FIFTEEN_SEC_MS,
 			run: () => checkMasterLivenessJob(state),
 		},
 		{
 			id: "cluster_cache_eviction",
+			touches: ["db", "disk", "peers"],
 			intervalMs: TEN_MIN_MS,
 			run: () => cacheEvictionJob(state),
 		},
@@ -115,6 +147,7 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 		// all when no job is in flight -- see torrents/poller.ts.
 		{
 			id: "torrent_poll",
+			touches: ["db", "disk", "qbittorrent", "realdebrid"],
 			intervalMs: FIVE_SEC_MS,
 			run: () => torrentPollJob(state),
 		},
@@ -127,17 +160,15 @@ function buildJobSpecs(state: AppState): JobSpec[] {
  * passes rewriting the same file at once. The tick is skipped, not queued. */
 const running = new Set<string>();
 
-async function runJob(
-	id: string,
-	run: () => void | Promise<unknown>,
-): Promise<void> {
+async function runJob(id: string, run: () => unknown): Promise<void> {
 	if (running.has(id)) {
+		activity.jobSkipped(id);
 		log.warning(`scheduled job skipped, previous run still active job=${id}`);
 		return;
 	}
 	running.add(id);
 	try {
-		await run();
+		await activity.runJob(id, run);
 	} catch (err) {
 		log.error(
 			`scheduled job failed job=${id}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
@@ -155,10 +186,11 @@ export function startBackendWorkers(state: AppState): string[] {
 	resetInterruptedImports(state.db);
 	const specs = buildJobSpecs(state);
 	for (const spec of specs) {
-		const timer = setInterval(
-			() => void runJob(spec.id, spec.run),
-			spec.intervalMs,
-		);
+		activity.registerJob(spec.id, spec.intervalMs, spec.touches);
+		const timer = setInterval(() => {
+			activity.jobTicked(spec.id);
+			void runJob(spec.id, spec.run);
+		}, spec.intervalMs);
 		// Don't hold the process open just for background sweeps.
 		timer.unref?.();
 		timers.set(spec.id, timer);
@@ -174,6 +206,7 @@ export function stopBackendWorkers(): void {
 	if (timers.size === 0) return;
 	for (const timer of timers.values()) clearInterval(timer);
 	timers.clear();
+	activity.clearJobs();
 	log.info("backend worker scheduler stopped");
 }
 

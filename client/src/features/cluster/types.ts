@@ -55,3 +55,58 @@ export interface ClusterSelf {
 	used_bytes: number;
 	halts: ClusterHalt[];
 }
+
+// ── live activity (mirrors server/src/cluster/activity.ts) ──────────────
+
+export type ActivityComponent =
+	| "db"
+	| "disk"
+	| "events"
+	| "peers"
+	| "qbittorrent"
+	| "realdebrid";
+
+export type SpanKind = "job" | "out" | "in";
+
+export interface ActivitySpan {
+	id: number;
+	kind: SpanKind;
+	name: string;
+	touches: ActivityComponent[];
+	peer?: string;
+	cause?: string;
+	startedAt: number;
+}
+
+export interface ActivityJob {
+	id: string;
+	intervalMs: number;
+	touches: ActivityComponent[];
+	running: boolean;
+	lastStartAt: number | null;
+	lastMs: number | null;
+	lastOk: boolean | null;
+	lastError: string | null;
+	nextDueAt: number;
+	skipped: number;
+}
+
+export type ActivityMessage =
+	| { type: "snapshot"; now: number; jobs: ActivityJob[]; open: ActivitySpan[] }
+	| { type: "start"; span: ActivitySpan }
+	| {
+			type: "end";
+			id: number;
+			ok: boolean;
+			ms: number;
+			detail?: string;
+			at: number;
+	  }
+	| { type: "skipped"; job: string; at: number };
+
+export interface FinishedSpan extends ActivitySpan {
+	endedAt: number;
+	ms: number;
+	ok: boolean;
+	detail?: string;
+}

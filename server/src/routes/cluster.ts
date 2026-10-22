@@ -4,6 +4,7 @@ import type { NextFunction, Request, Response } from "express";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
+import { activity, inboundTouches } from "../cluster/activity.ts";
 import { computeDigest } from "../cluster/digest.ts";
 import {
 	adoptEpochIfHigher,
@@ -117,6 +118,14 @@ export function requireClusterToken(state: AppState) {
 			res.status(401).json({ detail: "invalid cluster token" });
 			return;
 		}
+		// Only authenticated peer traffic is traced; a refused request has
+		// nothing to show. A no-op unless someone is watching.
+		const path = req.originalUrl.split("?")[0] ?? req.path;
+		const end = activity.begin("in", `${req.method} ${path}`, {
+			touches: inboundTouches(path),
+			peer: clientIp(state, req),
+		});
+		res.on("close", () => end(res.statusCode < 400, String(res.statusCode)));
 		next();
 	};
 }

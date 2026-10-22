@@ -3,10 +3,12 @@ import type { Server as HttpServer, IncomingMessage } from "node:http";
 import type { Request } from "express";
 import { type WebSocket, WebSocketServer } from "ws";
 import type { AppState } from "./appState.ts";
+import { activity } from "./cluster/activity.ts";
 import type { ClusterEvent, EventPredicate } from "./cluster/eventBus.ts";
 import type { UserRow } from "./db/rows.ts";
 import { getLogger } from "./logging.ts";
 import { clientIp } from "./middleware/auth.ts";
+import { ensurePermissions, hasPermission } from "./permissions.ts";
 import { COOKIE_NAME } from "./security/sessions.ts";
 
 /** Realtime event firehose. Mirrors app/routes/ws.py, adapted from FastAPI's
@@ -137,6 +139,7 @@ export function setupWebSockets(server: HttpServer, state: AppState): void {
 	const userWss = new WebSocketServer({ noServer: true });
 	const firehoseWss = new WebSocketServer({ noServer: true });
 	const authWss = new WebSocketServer({ noServer: true });
+	const activityWss = new WebSocketServer({ noServer: true });
 
 	server.on("upgrade", (req: IncomingMessage, socket, head) => {
 		const url = new URL(req.url ?? "/", "http://internal");
@@ -194,6 +197,54 @@ export function setupWebSockets(server: HttpServer, state: AppState): void {
 			return;
 		}
 
+		if (path === "/api/ws/cluster-activity") {
+			const origin = req.headers.origin;
+			if (origin && !sameHost(origin, req.headers.host)) {
+				rejectUpgrade(
+					socket,
+					path,
+					ip,
+					`cross-origin handshake from ${origin}`,
+				);
+				return;
+			}
+			const cookies = parseCookies(req.headers.cookie);
+			const sessionRow = state.sessionManager.resolve(
+				state.db,
+				cookies[COOKIE_NAME],
+			);
+			const user = sessionRow
+				? state.db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
+						$id: sessionRow.user_id,
+					})
+				: undefined;
+			if (!user || user.must_change_credentials) {
+				rejectUpgrade(socket, path, ip, "no valid session");
+				return;
+			}
+			const perm = ensurePermissions(state.db, user.id, {
+				master: user.role === "master",
+			});
+			if (!hasPermission(perm, "can_manage_cluster")) {
+				rejectUpgrade(socket, path, ip, "can_manage_cluster not held");
+				return;
+			}
+			activityWss.handleUpgrade(req, socket, head, (ws) => {
+				logConnection(ws, path, `user=${user.username} ip=${ip}`);
+				// Tracing costs nothing until the first of these subscribes, and
+				// stops again when the last leaves -- see cluster/activity.ts.
+				const unsubscribe = activity.subscribe((msg) => {
+					// A stalled browser must not make this process buffer for it.
+					if (ws.readyState === ws.OPEN && ws.bufferedAmount < 1_000_000) {
+						ws.send(JSON.stringify(msg));
+					}
+				});
+				ws.on("close", unsubscribe);
+				ws.on("error", unsubscribe);
+			});
+			return;
+		}
+
 		if (path === "/api/admin/cluster/firehose") {
 			let presented = url.searchParams.get("token") ?? "";
 			if (!presented) {
@@ -246,6 +297,6 @@ export function setupWebSockets(server: HttpServer, state: AppState): void {
 	});
 
 	log.info(
-		"websocket routes attached: /api/ws/events, /api/admin/cluster/firehose, /api/auth",
+		"websocket routes attached: /api/ws/events, /api/ws/cluster-activity, /api/admin/cluster/firehose, /api/auth",
 	);
 }
