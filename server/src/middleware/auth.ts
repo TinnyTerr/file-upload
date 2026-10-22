@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import type { AppState } from "../appState.ts";
 import type { Settings } from "../config.ts";
+import { deny } from "./deny.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
 
 /** The scheme this request actually arrived on, honoring X-Forwarded-Proto
@@ -28,7 +29,16 @@ export function requireSession(state: AppState) {
 		const cookieValue = req.cookies?.[COOKIE_NAME] as string | undefined;
 		const sessionRow = state.sessionManager.resolve(state.db, cookieValue);
 		if (!sessionRow) {
-			res.status(401).json({ detail: "not authenticated" });
+			deny(
+				state,
+				req,
+				res,
+				401,
+				"not authenticated",
+				cookieValue
+					? "session cookie present but invalid, expired or revoked"
+					: "no session cookie",
+			);
 			return;
 		}
 		req.sessionRow = sessionRow;

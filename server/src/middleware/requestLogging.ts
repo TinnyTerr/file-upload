@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from "express";
 import type { AppState } from "../appState.ts";
 import { getLogger } from "../logging.ts";
 import { clientIp } from "./auth.ts";
+import { actorOf } from "./deny.ts";
 
 const log = getLogger("app.request");
 
@@ -28,7 +29,9 @@ export function requestLogging(state: AppState) {
 				QUIET_PATHS.has(path);
 			const line = `http request method=${req.method} path=${path} status=${status} duration_ms=${(
 				performance.now() - start
-			).toFixed(1)} client=${clientIp(state, req)}`;
+			).toFixed(
+				1,
+			)} client=${clientIp(state, req)} actor=${actorOf(req)} ua="${(req.header("user-agent") ?? "-").slice(0, 120)}"`;
 			if (status >= 500) log.error(line);
 			else if (status >= 400) (isNoise ? log.debug : log.warning)(line);
 			else if (isNoise) log.debug(line);

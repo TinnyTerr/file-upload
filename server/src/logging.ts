@@ -11,7 +11,7 @@ import { Sentry, sentryEnabled } from "./sentry.ts";
  * - LOG_LEVEL env override (Python level names accepted), default INFO
  */
 
-const MAX_ENTRIES = 2000;
+const MAX_ENTRIES = 10000;
 
 export interface LogEntry {
 	id: number;

@@ -3,6 +3,7 @@ import { Router } from "express";
 import { authenticator } from "otplib";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
+import { getLogger } from "../logging.ts";
 import { getMasterKey } from "../config.ts";
 import { openSecret } from "../crypto/secretEncrypt.ts";
 import type { UserRow } from "../db/rows.ts";
@@ -27,6 +28,8 @@ import {
  * matching status codes, cookie attrs, and CSRF header behavior exactly.
  * Extended with a second-factor step (TOTP/WebAuthn) and usernameless
  * WebAuthn login -- see CLAUDE.md's "Login + second factor" section. */
+const log = getLogger("app.auth");
+
 export function authRouter(state: AppState): Router {
 	const router = Router();
 	const { db, sessionManager, lockout } = state;
@@ -88,6 +91,9 @@ export function authRouter(state: AppState): Router {
 			const ip = clientIp(state, req);
 
 			if (!lockout.checkLoginAllowed(db, username, ip)) {
+				log.warning(
+					`login refused username=${username} ip=${ip} why="username or ip is locked out"`,
+				);
 				recordAudit(db, { actor: username, action: "login.locked_out", ip });
 				res.status(429).json({ detail: "too many attempts, try later" });
 				return;
@@ -106,6 +112,10 @@ export function authRouter(state: AppState): Router {
 				lockout.recordFailure(db, username, "username");
 				lockout.recordFailure(db, ip, "ip");
 				recordAudit(db, { actor: username, action: "login.failure", ip });
+				// The client gets one answer for both; the admin log gets the truth.
+				log.warning(
+					`login refused username=${username} ip=${ip} why="${user ? "wrong password" : "no such user"}"`,
+				);
 				res.status(401).json({ detail: "invalid credentials" });
 				return;
 			}

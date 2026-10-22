@@ -20,11 +20,14 @@ import {
 import { checkRateLimit } from "../security/rateLimit.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
 import { clientIp } from "./auth.ts";
+import { deny, logDeny } from "./deny.ts";
 
 /** Applies a rate-limit check and sets the usual `X-RateLimit-*` headers.
  * Returns false (and has already written a 429) when the identifier is over
  * its limit -- callers just need to `return` in that case. */
 function applyRateLimit(
+	state: AppState,
+	req: Request,
 	res: Response,
 	identifier: string,
 	limitPerMin: number | null,
@@ -37,6 +40,12 @@ function applyRateLimit(
 	});
 	if (!result.allowed) {
 		res.set("Retry-After", "60");
+		logDeny(
+			state,
+			req,
+			429,
+			`rate limit ${result.limit}/min exceeded for ${identifier}`,
+		);
 		res.status(429).json({ detail: "rate limit exceeded" });
 		return false;
 	}
@@ -58,9 +67,17 @@ declare module "express-serve-static-core" {
  * /api/account/mfa, which authenticate with `requireSession` rather than
  * `requireActiveUser` and so never reach this gate. */
 export function enrollmentBlock(
+	state: AppState,
+	req: Request,
 	res: Response,
 	missing: "passkey" | "mfa",
 ): void {
+	logDeny(
+		state,
+		req,
+		403,
+		`${missing} enrollment required before any other route`,
+	);
 	res.status(403).json({
 		detail:
 			missing === "passkey"
@@ -79,7 +96,14 @@ export function requireActiveUser(state: AppState): RequestHandler {
 			const cookieValue = req.cookies?.[COOKIE_NAME] as string | undefined;
 			const row = state.sessionManager.resolve(state.db, cookieValue);
 			if (!row) {
-				res.status(401).json({ detail: "not authenticated" });
+				deny(
+					state,
+					req,
+					res,
+					401,
+					"not authenticated",
+					"no valid session cookie",
+				);
 				return;
 			}
 			req.sessionRow = row;
@@ -88,16 +112,30 @@ export function requireActiveUser(state: AppState): RequestHandler {
 			$id: req.sessionRow.user_id,
 		});
 		if (!user) {
-			res.status(401).json({ detail: "not authenticated" });
+			deny(
+				state,
+				req,
+				res,
+				401,
+				"not authenticated",
+				"session user no longer exists",
+			);
 			return;
 		}
 		if (user.must_change_credentials) {
-			res.status(403).json({ detail: "must change credentials" });
+			deny(
+				state,
+				req,
+				res,
+				403,
+				"must change credentials",
+				"account must change bootstrap credentials",
+			);
 			return;
 		}
 		const missing = missingRequiredCredential(state.db, user);
 		if (missing) {
-			enrollmentBlock(res, missing);
+			enrollmentBlock(state, req, res, missing);
 			return;
 		}
 		req.currentUser = user;
@@ -111,7 +149,7 @@ export function requireMaster(state: AppState): RequestHandler {
 	return (req, res, next) => {
 		active(req, res, () => {
 			if (req.currentUser!.role !== "master") {
-				res.status(403).json({ detail: "master only" });
+				deny(state, req, res, 403, "master only", "master role required");
 				return;
 			}
 			next();
@@ -132,7 +170,14 @@ export function requirePermission(
 				master: user.role === "master",
 			});
 			if (!hasPermission(perm, name)) {
-				res.status(403).json({ detail: "permission denied" });
+				deny(
+					state,
+					req,
+					res,
+					403,
+					"permission denied",
+					"permission flag not held",
+				);
 				return;
 			}
 			next();
@@ -148,7 +193,7 @@ function resolveApiKey(
 	const header = req.header("authorization") ?? "";
 	const raw = header.slice("Bearer ".length).trim();
 	if (!raw) {
-		res.status(401).json({ detail: "missing api key" });
+		deny(state, req, res, 401, "missing api key", "empty bearer value");
 		return null;
 	}
 	const apiKey = state.db.get<ApiKeyRow>(
@@ -158,7 +203,14 @@ function resolveApiKey(
 		},
 	);
 	if (!apiKey) {
-		res.status(401).json({ detail: "invalid api key" });
+		deny(
+			state,
+			req,
+			res,
+			401,
+			"invalid api key",
+			"api key unknown or inactive",
+		);
 		return null;
 	}
 	const ip = clientIp(state, req);
@@ -169,10 +221,24 @@ function resolveApiKey(
 			target: `apikey:${apiKey.id}`,
 			ip,
 		});
+		logDeny(
+			state,
+			req,
+			403,
+			`api key ${apiKey.id} bound to ${apiKey.bound_ip}, presented from ${ip}`,
+		);
 		res.status(403).json({ detail: "api key ip mismatch" });
 		return null;
 	}
-	if (!applyRateLimit(res, `apikey:${apiKey.id}`, apiKey.rate_limit_per_min)) {
+	if (
+		!applyRateLimit(
+			state,
+			req,
+			res,
+			`apikey:${apiKey.id}`,
+			apiKey.rate_limit_per_min,
+		)
+	) {
 		return null;
 	}
 	return apiKey;
@@ -197,16 +263,29 @@ function resolveOauthBearer(
 		.trim();
 	const token = findLiveToken(db, raw, "access");
 	if (!token) {
-		res.status(401).json({ detail: "invalid or expired access token" });
+		deny(
+			state,
+			req,
+			res,
+			401,
+			"invalid or expired access token",
+			"oauth token unknown, expired or revoked",
+		);
 		return null;
 	}
 	// Keyed per-token rather than per-client: a token is the credential that
 	// was actually presented, and it dies at expiry/refresh on its own, so the
 	// bucket never needs a separate cleanup tied to client lifecycle.
-	if (!applyRateLimit(res, `oauth:${token.id}`, null)) {
+	if (!applyRateLimit(state, req, res, `oauth:${token.id}`, null)) {
 		return null;
 	}
 	if (!parseScope(token.scope).includes(scope)) {
+		logDeny(
+			state,
+			req,
+			403,
+			`oauth token ${token.id} (scope "${token.scope}") lacks ${scope}`,
+		);
 		res
 			.status(403)
 			.json({ detail: `token is missing required scope: ${scope}` });
@@ -216,7 +295,14 @@ function resolveOauthBearer(
 		$id: token.user_id,
 	});
 	if (!user || user.must_change_credentials) {
-		res.status(401).json({ detail: "invalid access token subject" });
+		deny(
+			state,
+			req,
+			res,
+			401,
+			"invalid access token subject",
+			"oauth token subject missing or must change credentials",
+		);
 		return null;
 	}
 	const flag = SCOPES[scope] ?? null;
@@ -225,7 +311,14 @@ function resolveOauthBearer(
 			master: user.role === "master",
 		});
 		if (!hasPermission(perm, flag)) {
-			res.status(403).json({ detail: "permission denied" });
+			deny(
+				state,
+				req,
+				res,
+				403,
+				"permission denied",
+				"oauth scope's permission flag not held by user",
+			);
 			return null;
 		}
 	}
@@ -251,7 +344,14 @@ export function requireOauthScope(
 ): RequestHandler {
 	return (req: Request, res: Response, next: NextFunction): void => {
 		if (!isOauthBearer(req)) {
-			res.status(401).json({ detail: "missing oauth access token" });
+			deny(
+				state,
+				req,
+				res,
+				401,
+				"missing oauth access token",
+				"bearer is not an oauth access token",
+			);
 			return;
 		}
 		if (!resolveOauthBearer(state, req, res, scope)) return;
@@ -322,19 +422,33 @@ export function getUploadUser(state: AppState): RequestHandler {
 				$id: apiKey.owner_id,
 			});
 			if (!user || user.must_change_credentials) {
-				res.status(401).json({ detail: "invalid api key owner" });
+				deny(
+					state,
+					req,
+					res,
+					401,
+					"invalid api key owner",
+					"api key owner missing or must change credentials",
+				);
 				return;
 			}
 			const missing = missingRequiredCredential(db, user);
 			if (missing) {
-				enrollmentBlock(res, missing);
+				enrollmentBlock(state, req, res, missing);
 				return;
 			}
 			const perm = ensurePermissions(db, user.id, {
 				master: user.role === "master",
 			});
 			if (!hasPermission(perm, "can_upload")) {
-				res.status(403).json({ detail: "permission denied" });
+				deny(
+					state,
+					req,
+					res,
+					403,
+					"permission denied",
+					"can_upload not held (api key owner)",
+				);
 				return;
 			}
 			req.apiKey = apiKey;
@@ -346,30 +460,58 @@ export function getUploadUser(state: AppState): RequestHandler {
 		const cookieValue = req.cookies?.[COOKIE_NAME] as string | undefined;
 		const row = state.sessionManager.resolve(db, cookieValue);
 		if (!row) {
-			res.status(401).json({ detail: "not authenticated" });
+			deny(
+				state,
+				req,
+				res,
+				401,
+				"not authenticated",
+				"no valid session cookie",
+			);
 			return;
 		}
 		if (!csrfMatches(req.header("x-csrf-token"), row)) {
-			res.status(403).json({ detail: "invalid or missing CSRF token" });
+			deny(
+				state,
+				req,
+				res,
+				403,
+				"invalid or missing CSRF token",
+				"CSRF token missing or mismatched",
+			);
 			return;
 		}
 		const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 			$id: row.user_id,
 		});
 		if (!user || user.must_change_credentials) {
-			res.status(401).json({ detail: "not authenticated" });
+			deny(
+				state,
+				req,
+				res,
+				401,
+				"not authenticated",
+				"session user missing or must change credentials",
+			);
 			return;
 		}
 		const missing = missingRequiredCredential(db, user);
 		if (missing) {
-			enrollmentBlock(res, missing);
+			enrollmentBlock(state, req, res, missing);
 			return;
 		}
 		const perm = ensurePermissions(db, user.id, {
 			master: user.role === "master",
 		});
 		if (!hasPermission(perm, "can_upload")) {
-			res.status(403).json({ detail: "permission denied" });
+			deny(
+				state,
+				req,
+				res,
+				403,
+				"permission denied",
+				"can_upload not held (session user)",
+			);
 			return;
 		}
 		req.sessionRow = row;
@@ -398,12 +540,19 @@ export function requireReadUser(state: AppState): RequestHandler {
 				$id: apiKey.owner_id,
 			});
 			if (!user || user.must_change_credentials) {
-				res.status(401).json({ detail: "invalid api key owner" });
+				deny(
+					state,
+					req,
+					res,
+					401,
+					"invalid api key owner",
+					"api key owner missing or must change credentials",
+				);
 				return;
 			}
 			const keyOwnerMissing = missingRequiredCredential(db, user);
 			if (keyOwnerMissing) {
-				enrollmentBlock(res, keyOwnerMissing);
+				enrollmentBlock(state, req, res, keyOwnerMissing);
 				return;
 			}
 			req.apiKey = apiKey;
@@ -415,19 +564,33 @@ export function requireReadUser(state: AppState): RequestHandler {
 		const cookieValue = req.cookies?.[COOKIE_NAME] as string | undefined;
 		const row = state.sessionManager.resolve(db, cookieValue);
 		if (!row) {
-			res.status(401).json({ detail: "not authenticated" });
+			deny(
+				state,
+				req,
+				res,
+				401,
+				"not authenticated",
+				"no valid session cookie",
+			);
 			return;
 		}
 		const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 			$id: row.user_id,
 		});
 		if (!user || user.must_change_credentials) {
-			res.status(401).json({ detail: "not authenticated" });
+			deny(
+				state,
+				req,
+				res,
+				401,
+				"not authenticated",
+				"session user missing or must change credentials",
+			);
 			return;
 		}
 		const missing = missingRequiredCredential(db, user);
 		if (missing) {
-			enrollmentBlock(res, missing);
+			enrollmentBlock(state, req, res, missing);
 			return;
 		}
 		req.sessionRow = row;
@@ -441,7 +604,7 @@ export function requireApiKey(state: AppState): RequestHandler {
 	return (req: Request, res: Response, next: NextFunction): void => {
 		const header = req.header("authorization") ?? "";
 		if (!header.startsWith("Bearer ")) {
-			res.status(401).json({ detail: "missing api key" });
+			deny(state, req, res, 401, "missing api key", "no bearer header");
 			return;
 		}
 		const apiKey = resolveApiKey(state, req, res);

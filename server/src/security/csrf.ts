@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
+import { getLogger } from "../logging.ts";
 import type { SessionRow } from "./sessions.ts";
 
 /** Constant-time check of a presented CSRF header against the session's
@@ -34,6 +35,9 @@ export function requireCsrf(
 		return;
 	}
 	if (!csrfMatches(req.header("x-csrf-token"), sessionRow)) {
+		getLogger("app.access").warning(
+			`denied status=403 why="CSRF token ${req.header("x-csrf-token") ? "mismatched" : "missing"}" method=${req.method} path=${req.originalUrl.split("?")[0]} actor=session-user:${sessionRow.user_id}`,
+		);
 		res.status(403).json({ detail: "invalid or missing CSRF token" });
 		return;
 	}

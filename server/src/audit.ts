@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
 import type { Db } from "./db/types.ts";
+import { getLogger } from "./logging.ts";
+
+const log = getLogger("app.audit");
 
 interface AuditRow {
 	entry_hash: string;
@@ -65,6 +68,13 @@ export function recordAudit(
 			},
 		);
 	});
+	// Mirror into the admin log buffer: the audit table is the tamper-evident
+	// record, this is the same fact where the Logs tab can see it next to the
+	// request lines and the denials around it.
+	const failed = /(failure|locked|rejected|denied|mismatch)/.test(entry.action);
+	(failed ? log.warning : log.info)(
+		`audit action=${entry.action} actor=${entry.actor}${entry.target ? ` target=${entry.target}` : ""}${entry.ip ? ` ip=${entry.ip}` : ""}`,
+	);
 }
 
 /** Recomputes the hash chain over every row and checks it matches the stored

@@ -1,5 +1,8 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Db } from "../db/types.ts";
+import { getLogger } from "../logging.ts";
+
+const log = getLogger("app.session");
 
 export const COOKIE_NAME = "fu_session";
 export const CSRF_HEADER = "x-csrf-token";
@@ -92,12 +95,25 @@ export class SessionManager {
 	resolve(db: Db, cookieValue: string | undefined): SessionRow | null {
 		if (!cookieValue) return null;
 		const sid = unsign(this.secretKey, cookieValue);
-		if (!sid) return null;
+		if (!sid) {
+			log.warning("session cookie refused: signature does not verify");
+			return null;
+		}
 		const row = db.get<SessionRow>("SELECT * FROM sessions WHERE id = $id", {
 			$id: sid,
 		});
-		if (!row) return null;
-		if (new Date(row.expires_at).getTime() < Date.now()) return null;
+		if (!row) {
+			log.info(
+				"session cookie refused: validly signed but no such session (revoked or pruned)",
+			);
+			return null;
+		}
+		if (new Date(row.expires_at).getTime() < Date.now()) {
+			log.info(
+				`session cookie refused: session for user ${row.user_id} expired at ${row.expires_at}`,
+			);
+			return null;
+		}
 
 		// Throttled so an active session doesn't issue a write per request.
 		const lastSeenMs = new Date(row.last_seen_at).getTime();

@@ -1,4 +1,7 @@
 import type { Db } from "../db/types.ts";
+import { getLogger } from "../logging.ts";
+
+const log = getLogger("app.lockout");
 
 const MAX_ATTEMPTS = 5;
 const LOCKOUT_SECONDS = 900;
@@ -86,6 +89,9 @@ export class LockoutPolicy {
 				: staleRow
 					? null
 					: (row?.locked_until ?? null);
+		log.warning(
+			`failure recorded type=${type} identifier=${identifier} count=${failedCount}/${this.maxAttempts}${lockedUntil && failedCount >= this.maxAttempts ? ` -> locked until ${lockedUntil}` : ""}${staleRow ? " (window had expired, count restarted)" : ""}`,
+		);
 		if (row) {
 			db.run(
 				"UPDATE login_attempts SET failed_count = $failedCount, locked_until = $lockedUntil, updated_at = $now WHERE id = $id",
