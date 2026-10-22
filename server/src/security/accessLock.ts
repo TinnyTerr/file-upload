@@ -28,6 +28,9 @@ import {
 	recoverAccessSecret,
 } from "../crypto/effectiveEncryption.ts";
 import { HttpError } from "../httpError.ts";
+import { getLogger } from "../logging.ts";
+
+const log = getLogger("app.accesslock");
 
 export const LINK_ACCESS_IDENTIFIER = "link_access";
 const IDENTIFIER_TYPE = LINK_ACCESS_IDENTIFIER;
@@ -59,6 +62,9 @@ export function checkLinkAccess(
 	if (eff.mode !== "server") return { ok: true, status: 401, detail: "" };
 	const expected = recoverAccessSecret(getMasterKey(state.settings), eff);
 	if (expected === null) {
+		log.info(
+			`link access scope=${scope} no recoverable secret: ${!eff.accessBlob && opts.allowMissingSecret ? "legacy file, slug alone is the credential (allowed)" : "refusing (fail closed)"}`,
+		);
 		return !eff.accessBlob && opts.allowMissingSecret
 			? { ok: true, status: 401, detail: "" }
 			: {
@@ -68,6 +74,10 @@ export function checkLinkAccess(
 				};
 	}
 	if (!eff.passwordLocked) {
+		if (!accessSecretMatches(expected, presented))
+			log.warning(
+				`link access refused scope=${scope} why="${presented ? "?ek= does not match" : "?ek= missing"}"`,
+			);
 		return accessSecretMatches(expected, presented)
 			? { ok: true, status: 401, detail: "" }
 			: {
@@ -79,6 +89,7 @@ export function checkLinkAccess(
 
 	const { db, lockout } = state;
 	if (lockout.isIdentifierLocked(db, scope, IDENTIFIER_TYPE)) {
+		log.warning(`link access refused scope=${scope} why="scope is locked out"`);
 		return {
 			ok: false,
 			status: 429,
@@ -87,10 +98,16 @@ export function checkLinkAccess(
 	}
 	if (accessSecretMatches(expected, presented)) {
 		lockout.resetIdentifier(db, scope, IDENTIFIER_TYPE);
+		log.info(
+			`link access granted scope=${scope} (password correct, counter reset)`,
+		);
 		return { ok: true, status: 401, detail: "" };
 	}
 	// A missing password is a failed attempt like any other -- otherwise the
 	// counter could be avoided entirely by omitting the parameter.
+	log.warning(
+		`link access refused scope=${scope} why="${presented ? "incorrect password" : "no password presented"}"`,
+	);
 	lockout.recordFailure(db, scope, IDENTIFIER_TYPE);
 	return lockout.isIdentifierLocked(db, scope, IDENTIFIER_TYPE)
 		? {
