@@ -1,4 +1,12 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import {
+	type ReactNode,
+	lazy,
+	Suspense,
+	useCallback,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ContextMenu } from "@/components/ui/context-menu";
 import {
@@ -9,11 +17,7 @@ import {
 	DialogTitle,
 } from "@/components/ui/dialog";
 import { useAuth } from "@/features/auth/hooks/auth";
-import { CreateFolderDialog } from "@/features/directories/components/CreateFolderDialog";
 import type { Directory } from "@/features/directories/types";
-import { ReceiveMode } from "@/features/files/components/modes/ReceiveMode";
-import { RemoteMode } from "@/features/files/components/modes/RemoteMode";
-import { ShareModal } from "@/features/files/components/ShareModal";
 import { useClipboard } from "../../hooks/useClipboard";
 import { useDriveChildren, useInvalidateDrive } from "../../hooks/useDrive";
 import { useDriveActions } from "../../hooks/useDriveActions";
@@ -40,9 +44,6 @@ import {
 import { sortItems } from "../../lib/sorting";
 import { drivePath, parseLocation } from "../../types";
 import { DriveItemMenu } from "../DriveItemMenu";
-import { EncryptionPanel } from "../EncryptionPanel";
-import { MoveToDialog } from "../MoveToDialog";
-import { UnlockFolderDialog } from "../UnlockFolderDialog";
 import { AddressBar } from "./AddressBar";
 import { BackgroundMenuItems } from "./BackgroundMenu";
 import { CommandBar } from "./CommandBar";
@@ -53,6 +54,49 @@ import { FileList } from "./FileList";
 import { NavTree } from "./NavTree";
 import { StatusBar } from "./StatusBar";
 import { NewMenu, UploadMenu } from "./UploadMenu";
+
+// Dialogs nothing needs until a user opens one. Kept out of the explorer chunk
+// (the folder picker, share modal and QR renderer are a large share of it);
+// `Deferred` only mounts them once their `open` has been true.
+const CreateFolderDialog = lazy(() =>
+	import("@/features/directories/components/CreateFolderDialog").then((x) => ({
+		default: x.CreateFolderDialog,
+	})),
+);
+const ReceiveMode = lazy(() =>
+	import("@/features/files/components/modes/ReceiveMode").then((x) => ({
+		default: x.ReceiveMode,
+	})),
+);
+const RemoteMode = lazy(() =>
+	import("@/features/files/components/modes/RemoteMode").then((x) => ({
+		default: x.RemoteMode,
+	})),
+);
+const ShareModal = lazy(() =>
+	import("@/features/files/components/ShareModal").then((x) => ({
+		default: x.ShareModal,
+	})),
+);
+const EncryptionPanel = lazy(() =>
+	import("../EncryptionPanel").then((x) => ({ default: x.EncryptionPanel })),
+);
+const MoveToDialog = lazy(() =>
+	import("../MoveToDialog").then((x) => ({ default: x.MoveToDialog })),
+);
+const UnlockFolderDialog = lazy(() =>
+	import("../UnlockFolderDialog").then((x) => ({
+		default: x.UnlockFolderDialog,
+	})),
+);
+
+/** Renders `children` (and so fetches their chunk) only after `open` has been
+ * true once, then keeps them mounted so close animations still run. */
+function Deferred({ open, children }: { open: boolean; children: ReactNode }) {
+	const [seen, setSeen] = useState(open);
+	if (open && !seen) setSeen(true);
+	return seen ? <Suspense fallback={null}>{children}</Suspense> : null;
+}
 
 /**
  * The Drive, as a file explorer.
@@ -339,43 +383,57 @@ export function ExplorerPage() {
 			</DropContext.Provider>
 
 			{/* ── dialogs ────────────────────────────────────────────── */}
-			<MoveToDialog
-				items={moveTargets ?? []}
-				open={moveTargets !== null}
-				onOpenChange={(o) => !o && setMoveTargets(null)}
-				currentDirectoryId={loc === "root" ? null : loc}
-				busy={mutations.busy}
-				onMove={(destination) => mutations.move(moveTargets ?? [], destination)}
-			/>
-			<EncryptionPanel
-				item={encryptionTarget}
-				open={encryptionKey !== null && encryptionTarget !== null}
-				onOpenChange={(o) => !o && setEncryptionKey(null)}
-			/>
-			<ShareModal
-				entries={shareEntries}
-				open={shareEntries.length > 0}
-				onOpenChange={(o) => !o && setShareEntries([])}
-			/>
-			<ShareModal
-				entries={upload.shareEntries}
-				open={upload.shareEntries.length > 0}
-				onOpenChange={(o) => !o && upload.setShareEntries([])}
-			/>
-			{upload.pending && (
-				<UnlockFolderDialog
-					dir={upload.pending.dir}
-					open
-					onOpenChange={(o) => !o && upload.setPending(null)}
-					onUnlocked={() => void upload.resumePending()}
+			<Deferred open={moveTargets !== null}>
+				<MoveToDialog
+					items={moveTargets ?? []}
+					open={moveTargets !== null}
+					onOpenChange={(o) => !o && setMoveTargets(null)}
+					currentDirectoryId={loc === "root" ? null : loc}
+					busy={mutations.busy}
+					onMove={(destination) =>
+						mutations.move(moveTargets ?? [], destination)
+					}
 				/>
+			</Deferred>
+			<Deferred open={encryptionKey !== null && encryptionTarget !== null}>
+				<EncryptionPanel
+					item={encryptionTarget}
+					open={encryptionKey !== null && encryptionTarget !== null}
+					onOpenChange={(o) => !o && setEncryptionKey(null)}
+				/>
+			</Deferred>
+			<Deferred open={shareEntries.length > 0}>
+				<ShareModal
+					entries={shareEntries}
+					open={shareEntries.length > 0}
+					onOpenChange={(o) => !o && setShareEntries([])}
+				/>
+			</Deferred>
+			<Deferred open={upload.shareEntries.length > 0}>
+				<ShareModal
+					entries={upload.shareEntries}
+					open={upload.shareEntries.length > 0}
+					onOpenChange={(o) => !o && upload.setShareEntries([])}
+				/>
+			</Deferred>
+			{upload.pending && (
+				<Deferred open>
+					<UnlockFolderDialog
+						dir={upload.pending.dir}
+						open
+						onOpenChange={(o) => !o && upload.setPending(null)}
+						onUnlocked={() => void upload.resumePending()}
+					/>
+				</Deferred>
 			)}
-			<CreateFolderDialog
-				parent={currentDir}
-				open={newFolderOpen}
-				onOpenChange={setNewFolderOpen}
-				onCreated={(d) => navigate(drivePath(d.id))}
-			/>
+			<Deferred open={newFolderOpen}>
+				<CreateFolderDialog
+					parent={currentDir}
+					open={newFolderOpen}
+					onOpenChange={setNewFolderOpen}
+					onCreated={(d) => navigate(drivePath(d.id))}
+				/>
+			</Deferred>
 			<Dialog open={remoteOpen} onOpenChange={setRemoteOpen}>
 				<DialogContent className="max-w-lg">
 					<DialogHeader>
@@ -385,7 +443,9 @@ export function ExplorerPage() {
 							local addresses are refused.
 						</DialogDescription>
 					</DialogHeader>
-					<RemoteMode />
+					<Deferred open={remoteOpen}>
+						<RemoteMode />
+					</Deferred>
 				</DialogContent>
 			</Dialog>
 			<Dialog open={receiveOpen} onOpenChange={setReceiveOpen}>
@@ -396,7 +456,9 @@ export function ExplorerPage() {
 							Hand someone a link they can upload through without an account.
 						</DialogDescription>
 					</DialogHeader>
-					<ReceiveMode />
+					<Deferred open={receiveOpen}>
+						<ReceiveMode />
+					</Deferred>
 				</DialogContent>
 			</Dialog>
 		</ExplorerContext.Provider>

@@ -1,4 +1,3 @@
-import QRCodeLib from "qrcode";
 import * as React from "react";
 import { cn } from "@/lib/cn";
 
@@ -21,14 +20,20 @@ export function QRCode({
 		let cancelled = false;
 		const handle = window.requestAnimationFrame(() => {
 			if (cancelled) return;
-			QRCodeLib.toCanvas(canvas, value, {
-				width: size,
-				margin: 1,
-				color: { dark: "#0a0a0f", light: "#ffffff" },
-				errorCorrectionLevel: "M",
-			}).catch(() => {
-				/* ignore render errors (e.g. value too long) */
-			});
+			// Loaded on first render of a code, not with whatever imports this.
+			import("qrcode")
+				.then(({ default: QRCodeLib }) => {
+					if (cancelled) return;
+					return QRCodeLib.toCanvas(canvas, value, {
+						width: size,
+						margin: 1,
+						color: { dark: "#0a0a0f", light: "#ffffff" },
+						errorCorrectionLevel: "M",
+					});
+				})
+				.catch(() => {
+					/* ignore render errors (e.g. value too long) */
+				});
 		});
 		return () => {
 			cancelled = true;
