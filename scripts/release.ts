@@ -14,8 +14,17 @@ const sh = (cmd: string[]) => {
 };
 
 const FILES = ["package.json", "client/package.json", "server/package.json"];
-const last = sh(["git", "describe", "--tags", "--match", "v[0-9]*", "--abbrev=0"]);
-const current = last ? last.slice(1) : JSON.parse(readFileSync("package.json", "utf8")).version;
+const last = sh([
+	"git",
+	"describe",
+	"--tags",
+	"--match",
+	"v[0-9]*",
+	"--abbrev=0",
+]);
+const current = last
+	? last.slice(1)
+	: JSON.parse(readFileSync("package.json", "utf8")).version;
 
 const range = last ? [`${last}..HEAD`] : ["HEAD"];
 const raw = sh(["git", "log", ...range, "--format=%H%x1f%s%x1f%b%x1e"]);
@@ -43,7 +52,11 @@ for (const { subject, body } of commits) {
 
 const [maj, min, pat] = current.split(".").map(Number);
 const next =
-	level === "major" ? `${maj + 1}.0.0` : level === "minor" ? `${maj}.${min + 1}.0` : `${maj}.${min}.${pat + 1}`;
+	level === "major"
+		? `${maj + 1}.0.0`
+		: level === "minor"
+			? `${maj}.${min + 1}.0`
+			: `${maj}.${min}.${pat + 1}`;
 
 if (process.argv.includes("--write")) {
 	for (const f of FILES) {
