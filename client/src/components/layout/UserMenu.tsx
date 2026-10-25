@@ -1,4 +1,9 @@
-import { LogOut, Settings, User as UserIcon } from "lucide-react";
+import {
+	LogOut,
+	MessageSquareWarning,
+	Settings,
+	User as UserIcon,
+} from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
@@ -14,6 +19,7 @@ import {
 import { accountService } from "@/features/account/services/accountService";
 import { useAuth } from "@/features/auth/hooks/auth";
 import { cn } from "@/lib/cn";
+import { feedbackAvailable, openFeedback } from "@/lib/sentry";
 
 // SettingsModal pulls in the security tab's passkey/TOTP QR code renderer
 // (the `qrcode` package), which has no reason to sit in every page's initial
@@ -120,6 +126,11 @@ export function UserMenu({ collapsed = false }: { collapsed?: boolean }) {
 					>
 						<Settings /> Settings
 					</DropdownMenuItem>
+					{feedbackAvailable && (
+						<DropdownMenuItem onClick={() => void openFeedback()}>
+							<MessageSquareWarning /> Send feedback
+						</DropdownMenuItem>
+					)}
 					<DropdownMenuSeparator />
 					<DropdownMenuItem destructive onClick={onLogout}>
 						<LogOut /> Sign out

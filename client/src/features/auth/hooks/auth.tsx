@@ -4,6 +4,7 @@ import { ApiError } from "@/config/api";
 import type { PermissionFlag } from "@/config/permissions";
 import { accountService } from "@/features/account/services/accountService";
 import type { CurrentUser } from "@/features/account/types";
+import { setSentryUser } from "@/lib/sentry";
 import { authService } from "../services/authService";
 
 interface AuthContextValue {
@@ -48,6 +49,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 		qc.clear();
 		await refetch();
 	}, [qc, refetch]);
+
+	const userId = data?.id ?? null;
+	React.useEffect(() => {
+		setSentryUser(userId);
+	}, [userId]);
 
 	const value = React.useMemo<AuthContextValue>(() => {
 		const user = data ?? null;

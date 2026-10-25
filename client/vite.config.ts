@@ -1,7 +1,9 @@
+import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, URL } from "node:url";
 import { brotliCompressSync, constants, gzipSync } from "node:zlib";
+import { sentryVitePlugin } from "@sentry/vite-plugin";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv, type Plugin } from "vite";
@@ -10,7 +12,46 @@ const BACKEND = process.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8000";
 
 // DSNs live in the repo-root .env, one per surface. Only the web one is baked
 // into this bundle; the server and desktop keys never reach the browser.
-const rootEnv = loadEnv(process.env.NODE_ENV ?? "development", "..", "SENTRY_DSN_");
+const rootEnv = loadEnv(process.env.NODE_ENV ?? "development", "..", "SENTRY_");
+const sentryEnv = (key: string): string | undefined =>
+	process.env[key] ?? rootEnv[key] ?? undefined;
+
+/** `fileupload@<version>+<short sha>` -- must equal server/src/version.ts's
+ * SENTRY_RELEASE so server events and this bundle land in one release. */
+function sentryRelease(): string {
+	const version = JSON.parse(
+		readFileSync(
+			fileURLToPath(new URL("../package.json", import.meta.url)),
+			"utf-8",
+		),
+	).version as string;
+	let sha = process.env.BUILD_SHA?.trim().slice(0, 12) ?? "";
+	if (!sha) {
+		try {
+			sha = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+				stdio: ["ignore", "pipe", "ignore"],
+			})
+				.toString()
+				.trim();
+		} catch {
+			/* no checkout: release is the bare version */
+		}
+	}
+	return `fileupload@${sha ? `${version}+${sha}` : version}`;
+}
+const release = sentryRelease();
+const rate = (key: string, fallback: number): number => {
+	const n = Number(sentryEnv(key));
+	return sentryEnv(key) !== undefined && Number.isFinite(n) ? n : fallback;
+};
+
+/** Source maps + release + commits are only uploaded when an auth token is
+ * present (CI / a deploy build); a plain `bun run build` stays offline. */
+const uploadSourcemaps = Boolean(
+	sentryEnv("SENTRY_AUTH_TOKEN") &&
+		sentryEnv("SENTRY_ORG") &&
+		sentryEnv("SENTRY_PROJECT_WEB"),
+);
 
 /** Writes `.br` and `.gz` siblings of every compressible file in assets/, so
  * the server (`spa.ts`) can hand out the smallest variant without compressing
@@ -44,11 +85,37 @@ function precompress(): Plugin {
 
 export default defineConfig({
 	define: {
-		__SENTRY_DSN__: JSON.stringify(
-			process.env.SENTRY_DSN_WEB ?? rootEnv.SENTRY_DSN_WEB ?? "",
-		),
+		__SENTRY_DSN__: JSON.stringify(sentryEnv("SENTRY_DSN_WEB") ?? ""),
+		__SENTRY_RELEASE__: JSON.stringify(release),
+		__SENTRY_TRACES_RATE__: rate("SENTRY_TRACES_SAMPLE_RATE", 0.1),
+		__SENTRY_REPLAY_RATE__: rate("SENTRY_REPLAY_SAMPLE_RATE", 0.05),
 	},
-	plugins: [react(), tailwindcss(), precompress()],
+	plugins: [
+		react(),
+		tailwindcss(),
+		// Last of the Sentry steps: upload, then delete the maps so they are never
+		// served. Must run before precompress() copies anything.
+		...(uploadSourcemaps
+			? [
+					sentryVitePlugin({
+						org: sentryEnv("SENTRY_ORG"),
+						project: sentryEnv("SENTRY_PROJECT_WEB"),
+						authToken: sentryEnv("SENTRY_AUTH_TOKEN"),
+						url: sentryEnv("SENTRY_URL"),
+						release: {
+							name: release,
+							// Links the release to the repo's commits (needs the repo
+							// connected under Sentry -> Settings -> Integrations).
+							setCommits: { auto: true, ignoreMissing: true },
+							deploy: { env: process.env.NODE_ENV ?? "production" },
+						},
+						sourcemaps: { filesToDeleteAfterUpload: ["../public/**/*.map"] },
+						telemetry: false,
+					}),
+				]
+			: []),
+		precompress(),
+	],
 	resolve: {
 		alias: {
 			"@": fileURLToPath(new URL("./src", import.meta.url)),
@@ -73,7 +140,9 @@ export default defineConfig({
 		outDir: "../public",
 		emptyOutDir: true,
 		assetsDir: "assets",
-		sourcemap: false,
+		// "hidden": maps are written for the upload above but not referenced from
+		// the bundles. Off entirely when nothing will upload them.
+		sourcemap: uploadSourcemaps ? "hidden" : false,
 		rollupOptions: {
 			output: {
 				manualChunks: {

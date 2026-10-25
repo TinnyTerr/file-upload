@@ -142,6 +142,18 @@ Blank = that surface is off. Every server ERROR log record becomes a Sentry
 event (`logging.ts` sink). Share-link secrets (`?ek=`, `?k=`, `#ek=`) are scrubbed
 before send; don't add a code path that ships request bodies or cookies.
 
+
+What is on, per surface (all off with a blank DSN):
+
+- **Release = commit.** `fileupload@<root package.json version>+<short sha>` (`server/src/version.ts::SENTRY_RELEASE`; `client/vite.config.ts` computes the identical string; `BUILD_SHA` overrides when there is no checkout). With `SENTRY_AUTH_TOKEN` + `SENTRY_ORG` + `SENTRY_PROJECT_WEB` set at build time the Vite plugin uploads source maps (build emits `hidden` maps, deleted after upload), creates the release and runs `setCommits`. Without them the build is fully offline.
+- **Traces.** Server: the SDK opens the root `http.server` span and continues the browser's `sentry-trace`; `middleware/sentryTracing.ts` renames it to the route *pattern* once Express has matched. `sqlite.ts` wraps `run/get/all` in `db.query` spans via `dbSpan` (statement text only, never params, and only while a trace is active). `tracesSampler` drops the firehose/health/ws/asset paths. Client: `browserTracingIntegration`, propagating to this origin only.
+- **Replay** (client): everything masked/blocked, and `beforeAddRecordingEvent` records **nothing** on `/file/*`, `/d/*` or `?receive=` pages, whose URLs are credentials.
+- **Feedback**: `autoInject: false`; opened from the user menu ("Send feedback").
+- **Logs / crons** (server): WARNING records are forwarded as Sentry logs; scheduler jobs with an interval of at least a minute are wrapped in `Sentry.withMonitor` check-ins.
+- **User** is the numeric id only.
+- **Every URL-shaped string is scrubbed** before send (`scrubPath` server, `lib/scrubUrl.ts` client): `/file/<slug>`, `/d/<slug>`, dropbox tokens, `?ek= ?k= ?receive=`, `#fragment`. Spans, logs, breadcrumbs, transaction names. A new Sentry feature that records URLs must get the same treatment.
+- **CSP**: `connect-src` admits the `SENTRY_DSN_WEB` origin (`securityHeaders.ts::pageCsp`). Without it the browser blocks every event; adding a new Sentry transport (e.g. a tunnel) means revisiting that.
+
 ---
 
 ## Project structure
