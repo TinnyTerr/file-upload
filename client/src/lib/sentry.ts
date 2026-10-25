@@ -45,8 +45,10 @@ export function initSentry(): void {
 						beforeAddRecordingEvent: (event) =>
 							isSecretRoute(location.pathname, location.search) ? null : event,
 					}),
-					// No floating button: opened from the user menu (openFeedback).
-					Sentry.feedbackIntegration({
+					// No floating button: opened from the user menu (openFeedback). The sync
+					// variant bundles the modal and screenshot code; the lazy one fetches it
+					// from browser.sentry-cdn.com, which the page CSP blocks.
+					Sentry.feedbackSyncIntegration({
 						autoInject: false,
 						colorScheme: "system",
 						isNameRequired: false,
