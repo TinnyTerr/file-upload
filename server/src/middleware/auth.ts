@@ -1,8 +1,8 @@
 import type { NextFunction, Request, Response } from "express";
 import type { AppState } from "../appState.ts";
 import type { Settings } from "../config.ts";
-import { deny } from "./deny.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
+import { deny } from "./deny.ts";
 
 /** The scheme this request actually arrived on, honoring X-Forwarded-Proto
  * only when TRUST_PROXY is on -- mirrors clientIp's proxy trust gate.

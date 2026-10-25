@@ -10,9 +10,8 @@ import { HttpError } from "./httpError.ts";
 import { getLogger } from "./logging.ts";
 import { httpsRedirect } from "./middleware/httpsRedirect.ts";
 import { requestLogging } from "./middleware/requestLogging.ts";
-import { BUILD_VERSION } from "./version.ts";
-import { sentryTracing } from "./middleware/sentryTracing.ts";
 import { securityHeaders } from "./middleware/securityHeaders.ts";
+import { sentryTracing } from "./middleware/sentryTracing.ts";
 import { accountRouter } from "./routes/account.ts";
 import { adminRouter } from "./routes/admin.ts";
 import { auditRouter } from "./routes/audit.ts";
@@ -28,6 +27,7 @@ import { docsRouter } from "./routes/docs.ts";
 import { dropboxRouter } from "./routes/dropbox.ts";
 import { adminFilesRouter, filesRouter, linksRouter } from "./routes/files.ts";
 import { adminKeysRouter, keysRouter } from "./routes/keys.ts";
+import { linkStatsRouter } from "./routes/linkStats.ts";
 import { mediaRouter } from "./routes/media.ts";
 import { mfaRouter } from "./routes/mfa.ts";
 import { oauthPublicRouter, oauthRouter } from "./routes/oauth.ts";
@@ -35,9 +35,9 @@ import { publicPageRouter, publicRouter } from "./routes/public.ts";
 import { remoteUploadRouter } from "./routes/remoteUpload.ts";
 import { adminTorrentsRouter, torrentsRouter } from "./routes/torrents.ts";
 import { usersRouter } from "./routes/users.ts";
-import { linkStatsRouter } from "./routes/linkStats.ts";
 import { webhooksRouter } from "./routes/webhooks.ts";
 import { mountSpa, SERVER_ERROR_PAGE, sendErrorPage } from "./spa.ts";
+import { BUILD_VERSION } from "./version.ts";
 
 /** Mirrors app/main.py::create_app -- same middleware order, health check,
  * and same-origin static+SPA serving (no CORS, matching the FastAPI app). */

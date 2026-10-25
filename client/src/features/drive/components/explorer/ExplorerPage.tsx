@@ -1,6 +1,6 @@
 import {
-	type ReactNode,
 	lazy,
+	type ReactNode,
 	Suspense,
 	useCallback,
 	useMemo,

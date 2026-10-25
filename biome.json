@@ -6,7 +6,8 @@
 		"useIgnoreFile": true
 	},
 	"files": {
-		"ignoreUnknown": false
+		"ignoreUnknown": false,
+		"includes": ["**", "!desktop/src/assets/typescript.svg"]
 	},
 	"formatter": {
 		"enabled": true,

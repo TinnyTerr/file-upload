@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
-import { gzipSync } from "node:zlib";
 import { extname, join, relative, sep } from "node:path";
+import { gzipSync } from "node:zlib";
 import express, {
 	type Express,
 	type NextFunction,

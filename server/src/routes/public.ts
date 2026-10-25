@@ -12,8 +12,8 @@ import {
 import { sealKdfId } from "../crypto/passwordKey.ts";
 import { openBox } from "../crypto/secretbox.ts";
 import { type FileRow, nowIso, type UserRow } from "../db/rows.ts";
-import { consumeUse, resolveActiveLink } from "../links.ts";
 import { recordLinkHit } from "../linkStats.ts";
+import { consumeUse, resolveActiveLink } from "../links.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requestProtocol } from "../middleware/auth.ts";

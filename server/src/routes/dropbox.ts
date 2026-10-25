@@ -26,7 +26,6 @@ import {
 } from "../db/rows.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
-import { triggerWebhooks } from "../webhooks.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import {
 	clientIp,
@@ -38,6 +37,7 @@ import { ensurePermissions } from "../permissions.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import type { FileHashes } from "../storage/blobs.ts";
 import { storageRoot } from "../storage/paths.ts";
+import { triggerWebhooks } from "../webhooks.ts";
 import {
 	assembleChunks,
 	assemblyPath,

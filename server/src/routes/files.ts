@@ -48,8 +48,8 @@ import {
 } from "../db/rows.ts";
 import { buildPathIndex, getDirectory, isEditor } from "../directoryTree.ts";
 import { HttpError } from "../httpError.ts";
-import { consumeUse, newSlug, resolveActiveLink } from "../links.ts";
 import { deleteLinkHits, recordLinkHit } from "../linkStats.ts";
+import { consumeUse, newSlug, resolveActiveLink } from "../links.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import {

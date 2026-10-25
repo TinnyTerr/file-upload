@@ -1,16 +1,16 @@
 import type { AppState } from "../appState.ts";
-import { Sentry, sentryEnabled } from "../sentry.ts";
-import { pruneLinkHits } from "../linkStats.ts";
+import { activity, type Component } from "../cluster/activity.ts";
 import { cacheEvictionJob } from "../cluster/cacheEviction.ts";
 import { syncCheckJob } from "../cluster/digest.ts";
 import { checkMasterLivenessJob } from "../cluster/election.ts";
 import { heartbeatJob } from "../cluster/membership.ts";
+import { pruneLinkHits } from "../linkStats.ts";
 import { getLogger } from "../logging.ts";
-import { type Component, activity } from "../cluster/activity.ts";
 import { prunePlayKeys } from "../media/playKeys.ts";
 import { sweepStaleParts } from "../routes/files.ts";
 import { pruneOauth } from "../security/oauth.ts";
 import { pruneRateLimitBuckets } from "../security/rateLimit.ts";
+import { Sentry, sentryEnabled } from "../sentry.ts";
 import { resetInterruptedImports, torrentPollJob } from "../torrents/poller.ts";
 import {
 	archiveIdleJob,

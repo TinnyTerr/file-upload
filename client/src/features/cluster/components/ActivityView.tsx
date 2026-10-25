@@ -10,8 +10,8 @@ import {
 } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/cn";
-import { useClusterActivity } from "../hooks/useClusterActivity";
 import { useClusterNodes } from "../hooks/useCluster";
+import { useClusterActivity } from "../hooks/useClusterActivity";
 import type { ActivityStore } from "../lib/activityStore";
 import type {
 	ActivityComponent,

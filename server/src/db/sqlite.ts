@@ -2,8 +2,8 @@ import { Database } from "bun:sqlite";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { dbSpan } from "../sentry.ts";
 import { backfillUids, UID_TABLES } from "../cluster/identity.ts";
+import { dbSpan } from "../sentry.ts";
 import { ensureColumn } from "./backfill.ts";
 import type { Db, Row, SqlParams } from "./types.ts";
 

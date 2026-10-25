@@ -39,8 +39,8 @@ import {
 	subtreeHeight,
 } from "../directoryTree.ts";
 import { HttpError } from "../httpError.ts";
-import { newSlug } from "../links.ts";
 import { deleteLinkHits, recordLinkHit } from "../linkStats.ts";
+import { newSlug } from "../links.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import {
