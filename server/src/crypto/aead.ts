@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { type FileHandle, open } from "node:fs/promises";
+import { present } from "../present.ts";
 
 /**
  * Streaming AES-256-GCM file container, byte-compatible with
@@ -26,7 +27,7 @@ function delta(idx: number, isLast: boolean): Buffer {
 function nonce(base: Buffer, idx: number, isLast: boolean): Buffer {
 	const d = delta(idx, isLast);
 	const out = Buffer.alloc(12);
-	for (let i = 0; i < 12; i++) out[i] = base[i]! ^ d[i]!;
+	for (let i = 0; i < 12; i++) out[i] = present(base[i]) ^ present(d[i]);
 	return out;
 }
 
@@ -155,7 +156,7 @@ class ByteReader {
 		if (this.buffered === 0) return Buffer.alloc(0);
 		const joined =
 			this.pending.length === 1
-				? this.pending[0]!
+				? present(this.pending[0])
 				: Buffer.concat(this.pending, this.buffered);
 		const take = Math.min(size, joined.length);
 		const rest = joined.subarray(take);

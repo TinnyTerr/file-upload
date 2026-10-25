@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { errorMessage } from "@/config/api";
+import { present } from "@/lib/present";
 import { mediaService } from "../services/mediaService";
 import type { MintPlayKeyInput, PublishInput } from "../types";
 
@@ -24,7 +25,7 @@ export function useMediaLibrary() {
 export function useMediaCollection(slug: string | undefined) {
 	return useQuery({
 		queryKey: collectionQueryKey(slug ?? ""),
-		queryFn: () => mediaService.collection(slug!),
+		queryFn: () => mediaService.collection(present(slug)),
 		enabled: !!slug,
 	});
 }

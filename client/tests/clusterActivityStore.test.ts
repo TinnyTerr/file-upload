@@ -4,6 +4,7 @@ import {
 	emptyStore,
 } from "../src/features/cluster/lib/activityStore";
 import type { ActivityJob } from "../src/features/cluster/types";
+import { present } from "../src/lib/present";
 
 const job = (over: Partial<ActivityJob> = {}): ActivityJob => ({
 	id: "cluster_heartbeat",
@@ -52,7 +53,7 @@ describe("activity store", () => {
 			detail: "x",
 			at: 140,
 		});
-		const j = s.jobs.get("cluster_heartbeat")!;
+		const j = present(s.jobs.get("cluster_heartbeat"));
 		expect(j.running).toBe(false);
 		expect(j.lastOk).toBe(false);
 		expect(s.recent[0]?.ms).toBe(40);

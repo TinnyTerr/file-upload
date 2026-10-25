@@ -3,7 +3,6 @@ import {
 	createWriteStream,
 	existsSync,
 	mkdirSync,
-	renameSync,
 	rmSync,
 	statSync,
 	unlinkSync,
@@ -11,7 +10,7 @@ import {
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import busboy from "busboy";
-import type { Request, Response } from "express";
+import type { Response } from "express";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
@@ -34,6 +33,7 @@ import {
 } from "../middleware/auth.ts";
 import { requireActiveUser } from "../middleware/deps.ts";
 import { ensurePermissions } from "../permissions.ts";
+import { present } from "../present.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import type { FileHashes } from "../storage/blobs.ts";
 import { storageRoot } from "../storage/paths.ts";
@@ -213,7 +213,7 @@ export function dropboxRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const body = req.body ?? {};
 			const targetDirectoryId: number | null = body.target_directory_id ?? null;
 			let ownerId = user.id;
@@ -271,9 +271,11 @@ export function dropboxRouter(state: AppState): Router {
 					$now: nowIso(),
 				},
 			);
-			const row = db.get<DropboxLinkRow>(
-				"SELECT * FROM dropbox_upload_links WHERE id = last_insert_rowid()",
-			)!;
+			const row = present(
+				db.get<DropboxLinkRow>(
+					"SELECT * FROM dropbox_upload_links WHERE id = last_insert_rowid()",
+				),
+			);
 			recordAudit(db, {
 				actor: user.username,
 				action: "dropbox_link.created",
@@ -302,7 +304,7 @@ export function dropboxRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const row = db.get<DropboxLinkRow>(
 				"SELECT * FROM dropbox_upload_links WHERE token_hash = $hash",
 				{

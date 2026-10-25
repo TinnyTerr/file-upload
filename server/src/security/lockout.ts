@@ -57,7 +57,7 @@ export class LockoutPolicy {
 			"SELECT * FROM login_attempts WHERE identifier = $identifier AND identifier_type = $type",
 			{ $identifier: identifier, $type: type },
 		);
-		if (!row || !row.locked_until) return false;
+		if (!row?.locked_until) return false;
 		return new Date(row.locked_until).getTime() > Date.now();
 	}
 

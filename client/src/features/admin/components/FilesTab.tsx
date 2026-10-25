@@ -25,6 +25,7 @@ import { EncryptionBadge, iconForType } from "@/features/files/lib/fileMeta";
 import type { FileObject } from "@/features/files/types";
 import { formatBytes } from "@/lib/bytes";
 import { cn } from "@/lib/cn";
+import { present } from "@/lib/present";
 import { formatDate } from "@/lib/time";
 import { useDialogs } from "@/providers/DialogProvider";
 import { useAdminFiles } from "../hooks/useAdminData";
@@ -280,7 +281,7 @@ export function FilesTab() {
 		for (const f of filtered) {
 			const name = f.owner_username ?? `user:${f.owner_id}`;
 			if (!map.has(name)) map.set(name, []);
-			map.get(name)!.push(f);
+			present(map.get(name)).push(f);
 		}
 		return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
 	}, [filtered]);

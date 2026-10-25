@@ -11,6 +11,7 @@ import { getMasterKey } from "../src/config.ts";
 import { seal } from "../src/crypto/secretbox.ts";
 import { nowIso, type UserRow } from "../src/db/rows.ts";
 import type { Db } from "../src/db/types.ts";
+import { present } from "../src/present.ts";
 import { type Harness, makeHarness, makeUser } from "./harness.ts";
 
 /** A server-encrypted, password-locked root folder. */
@@ -34,7 +35,8 @@ function makeLockedFolder(
 			$now: nowIso(),
 		},
 	);
-	return h.db.get<{ id: number }>("SELECT last_insert_rowid() AS id")!.id;
+	return present(h.db.get<{ id: number }>("SELECT last_insert_rowid() AS id"))
+		.id;
 }
 
 /** A previewable member file inheriting the folder's key, plus its own link. */
@@ -51,7 +53,9 @@ function makeMember(db: Db, owner: UserRow, directoryId: number): string {
 			$now: nowIso(),
 		},
 	);
-	const fileId = db.get<{ id: number }>("SELECT last_insert_rowid() AS id")!.id;
+	const fileId = present(
+		db.get<{ id: number }>("SELECT last_insert_rowid() AS id"),
+	).id;
 	const slug = randomBytes(8).toString("base64url");
 	db.run(
 		`INSERT INTO links (file_id, slug, max_uses, use_count, active, created_at)

@@ -17,6 +17,7 @@ import {
 	ensurePermissions,
 	type PermissionFlag,
 } from "../permissions.ts";
+import { present } from "../present.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { hashPassword } from "../security/passwords.ts";
 import {
@@ -72,9 +73,9 @@ function serializePermissions(perm: PermissionRow) {
 }
 
 function masterCount(db: AppState["db"]): number {
-	return db.get<CountRow>(
-		"SELECT COUNT(*) as n FROM users WHERE role = 'master'",
-	)!.n;
+	return present(
+		db.get<CountRow>("SELECT COUNT(*) as n FROM users WHERE role = 'master'"),
+	).n;
 }
 
 /** Mirrors app/routes/users.py -- admin CRUD for user accounts + permissions. */
@@ -92,10 +93,12 @@ export function usersRouter(state: AppState): Router {
 					"SELECT * FROM permissions WHERE user_id = $id",
 					{ $id: u.id },
 				);
-				const mfaCount = db.get<CountRow>(
-					"SELECT COUNT(*) as n FROM credentials WHERE user_id = $id",
-					{ $id: u.id },
-				)!.n;
+				const mfaCount = present(
+					db.get<CountRow>(
+						"SELECT COUNT(*) as n FROM credentials WHERE user_id = $id",
+						{ $id: u.id },
+					),
+				).n;
 				return {
 					id: u.id,
 					username: u.username,
@@ -117,7 +120,7 @@ export function usersRouter(state: AppState): Router {
 		requireCsrf,
 		requireMaster(state),
 		asyncHandler(async (req, res) => {
-			const master = req.currentUser!;
+			const master = present(req.currentUser);
 			const body = req.body ?? {};
 			const username = String(body.username ?? "");
 			const password = String(body.password ?? "");
@@ -154,12 +157,13 @@ export function usersRouter(state: AppState): Router {
 						{ $u: username, $hash: passwordHash, $role: role, $now: nowIso() },
 					);
 				});
-				const user = db.get<UserRow>(
-					"SELECT * FROM users WHERE username = $u",
-					{ $u: username },
-				)!;
+				const user = present(
+					db.get<UserRow>("SELECT * FROM users WHERE username = $u", {
+						$u: username,
+					}),
+				);
 
-				const perm = ensurePermissions(db, user.id, {
+				const _perm = ensurePermissions(db, user.id, {
 					master: role === "master",
 				});
 				const updates: Partial<Record<PermissionFlag, boolean>> = {
@@ -247,7 +251,7 @@ export function usersRouter(state: AppState): Router {
 		requireCsrf,
 		requireMaster(state),
 		asyncHandler(async (req, res) => {
-			const master = req.currentUser!;
+			const master = present(req.currentUser);
 			const userId = Number(req.params.userId);
 			const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 				$id: userId,
@@ -354,9 +358,11 @@ export function usersRouter(state: AppState): Router {
 					target: `user:${userId}`,
 					ip: clientIp(state, req),
 				});
-				const updated = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
-					$id: userId,
-				})!;
+				const updated = present(
+					db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
+						$id: userId,
+					}),
+				);
 				res.json({
 					id: updated.id,
 					username: updated.username,
@@ -380,7 +386,7 @@ export function usersRouter(state: AppState): Router {
 		requireCsrf,
 		requireMaster(state),
 		(req, res) => {
-			const master = req.currentUser!;
+			const master = present(req.currentUser);
 			const userId = Number(req.params.userId);
 			if (userId === master.id) {
 				res.status(400).json({ detail: "cannot delete yourself" });
@@ -516,7 +522,7 @@ export function usersRouter(state: AppState): Router {
 		requireCsrf,
 		requireMaster(state),
 		(req, res) => {
-			const master = req.currentUser!;
+			const master = present(req.currentUser);
 			const userId = Number(req.params.userId);
 			const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 				$id: userId,

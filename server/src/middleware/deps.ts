@@ -8,6 +8,7 @@ import {
 	missingRequiredCredential,
 	type PermissionFlag,
 } from "../permissions.ts";
+import { present } from "../present.ts";
 import { bindOrReject, hashKey } from "../security/apiKeys.ts";
 import { csrfMatches } from "../security/csrf.ts";
 import {
@@ -148,7 +149,7 @@ export function requireMaster(state: AppState): RequestHandler {
 	const active = requireActiveUser(state);
 	return (req, res, next) => {
 		active(req, res, () => {
-			if (req.currentUser!.role !== "master") {
+			if (present(req.currentUser).role !== "master") {
 				deny(state, req, res, 403, "master only", "master role required");
 				return;
 			}
@@ -165,7 +166,7 @@ export function requirePermission(
 	const active = requireActiveUser(state);
 	return (req, res, next) => {
 		active(req, res, () => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const perm = ensurePermissions(state.db, user.id, {
 				master: user.role === "master",
 			});

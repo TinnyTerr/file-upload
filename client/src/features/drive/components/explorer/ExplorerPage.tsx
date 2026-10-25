@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { useAuth } from "@/features/auth/hooks/auth";
 import type { Directory } from "@/features/directories/types";
+import { present } from "@/lib/present";
 import { useClipboard } from "../../hooks/useClipboard";
 import { useDriveChildren, useInvalidateDrive } from "../../hooks/useDrive";
 import { useDriveActions } from "../../hooks/useDriveActions";
@@ -165,7 +166,7 @@ export function ExplorerPage() {
 	const currentDir = data?.directory ?? null;
 	const parentId =
 		data && data.breadcrumbs.length >= 2
-			? data.breadcrumbs[data.breadcrumbs.length - 2]!.id
+			? present(data.breadcrumbs[data.breadcrumbs.length - 2]).id
 			: null;
 
 	const commitRename = useCallback(
@@ -274,7 +275,7 @@ export function ExplorerPage() {
 			const nodes =
 				listRef.current?.querySelectorAll<HTMLElement>("[data-item-key]");
 			if (!nodes || nodes.length < 2) return 1;
-			const top = nodes[0]!.getBoundingClientRect().top;
+			const top = present(nodes[0]).getBoundingClientRect().top;
 			let n = 0;
 			for (const el of nodes) {
 				if (Math.abs(el.getBoundingClientRect().top - top) > 2) break;

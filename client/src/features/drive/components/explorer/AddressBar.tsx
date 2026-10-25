@@ -22,6 +22,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
+import { present } from "@/lib/present";
 import { useDropTarget } from "../../hooks/useDropTarget";
 import { useExplorer } from "../../hooks/useExplorer";
 import { useNavHistory } from "../../hooks/useNavHistory";
@@ -76,7 +77,8 @@ export function AddressBar() {
 	const searchRef = useRef<HTMLInputElement>(null);
 
 	const trail = data?.breadcrumbs ?? [];
-	const parentId = trail.length >= 2 ? trail[trail.length - 2]!.id : null;
+	const parentId =
+		trail.length >= 2 ? present(trail[trail.length - 2]).id : null;
 	const atRoot = trail.length === 0;
 	const upZone = useDropTarget({
 		kind: "parent",

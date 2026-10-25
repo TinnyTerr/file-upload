@@ -1,3 +1,4 @@
+import { present } from "../src/present.ts";
 /**
  * Outbound request logging (src/outbound.ts).
  *
@@ -105,7 +106,7 @@ describe("fetchLogged", () => {
 			limit: 100,
 		}).entries.filter((e) => e.message.includes("-> 403"));
 		expect(entries.length).toBeGreaterThan(0);
-		expect(entries[0]!.level).toBe("WARNING");
+		expect(present(entries[0]).level).toBe("WARNING");
 	});
 });
 

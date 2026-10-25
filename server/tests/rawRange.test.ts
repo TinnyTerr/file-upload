@@ -1,3 +1,4 @@
+import { present } from "../src/present.ts";
 /**
  * `GET /api/file/:slug/raw` under Range.
  *
@@ -54,7 +55,9 @@ function makeSharedFile(
        'application/octet-stream', 'none', 1, $now)`,
 		{ $owner: owner.id, $path: rel, $size: body.length, $now: nowIso() },
 	);
-	const fileId = db.get<{ id: number }>("SELECT last_insert_rowid() AS id")!.id;
+	const fileId = present(
+		db.get<{ id: number }>("SELECT last_insert_rowid() AS id"),
+	).id;
 	const slug = randomBytes(8).toString("base64url");
 	db.run(
 		`INSERT INTO links (file_id, slug, max_uses, use_count, active, created_at)
@@ -70,10 +73,12 @@ function makeSharedFile(
 }
 
 function useCount(db: Db, slug: string): number {
-	return db.get<{ use_count: number }>(
-		"SELECT use_count FROM links WHERE slug = $slug",
-		{ $slug: slug },
-	)!.use_count;
+	return present(
+		db.get<{ use_count: number }>(
+			"SELECT use_count FROM links WHERE slug = $slug",
+			{ $slug: slug },
+		),
+	).use_count;
 }
 
 describe("ranged raw download", () => {
@@ -184,6 +189,6 @@ describe("ranged raw download", () => {
        WHERE action = 'file.downloaded' AND target = $target`,
 			{ $target: `file:${fileId}` },
 		);
-		expect(rows[0]!.n).toBe(1);
+		expect(present(rows[0]).n).toBe(1);
 	});
 });

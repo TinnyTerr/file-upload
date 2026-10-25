@@ -14,6 +14,7 @@ import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip } from "@/components/ui/tooltip";
 import { formatBytes } from "@/lib/bytes";
+import { present } from "@/lib/present";
 import { formatEta, relativeTime } from "@/lib/time";
 import type { TorrentJob, TorrentStatus } from "../types";
 
@@ -85,7 +86,7 @@ function subtitle(t: TorrentJob): string {
 		t.debrid_status &&
 		DEBRID_PHASE[t.debrid_status]
 	) {
-		return DEBRID_PHASE[t.debrid_status]!;
+		return present(DEBRID_PHASE[t.debrid_status]);
 	}
 	if (!t.size_bytes) return "fetching metadata…";
 	return transferLine(t);

@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import type { AppState } from "../appState.ts";
 import type { Settings } from "../config.ts";
+import { present } from "../present.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
 import { deny } from "./deny.ts";
 
@@ -17,7 +18,7 @@ import { deny } from "./deny.ts";
 export function requestProtocol(settings: Settings, req: Request): string {
 	if (settings.trustProxyMode !== "off") {
 		const proto = req.header("x-forwarded-proto");
-		if (proto) return proto.split(",")[0]!.trim();
+		if (proto) return present(proto.split(",")[0]).trim();
 	}
 	return req.protocol;
 }
@@ -58,7 +59,7 @@ export function clientIp(state: AppState, req: Request): string {
 			return cfIp.trim();
 		if (mode !== "cloudflare") {
 			const forwarded = req.header("x-forwarded-for");
-			if (forwarded) return forwarded.split(",")[0]!.trim();
+			if (forwarded) return present(forwarded.split(",")[0]).trim();
 		}
 	}
 	return req.socket.remoteAddress || "";

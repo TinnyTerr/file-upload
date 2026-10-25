@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { nowIso, type UserRow } from "../src/db/rows.ts";
+import { present } from "../src/present.ts";
 import { type Harness, makeHarness, makeUser } from "./harness.ts";
 
 const storageDir = mkdtempSync(join(tmpdir(), "fu-headers-"));
@@ -39,9 +40,9 @@ function makeSharedText(name: string): string {
      VALUES ($owner, $path, $name, 'upload', 5, 5, 'text/plain', 'none', 1, $now)`,
 		{ $owner: owner.id, $path: rel, $name: name, $now: nowIso() },
 	);
-	const fileId = h.db.get<{ id: number }>(
-		"SELECT last_insert_rowid() AS id",
-	)!.id;
+	const fileId = present(
+		h.db.get<{ id: number }>("SELECT last_insert_rowid() AS id"),
+	).id;
 	const slug = randomBytes(8).toString("base64url");
 	h.db.run(
 		`INSERT INTO links (file_id, slug, max_uses, use_count, active, created_at)

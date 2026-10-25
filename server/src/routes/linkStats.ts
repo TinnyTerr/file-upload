@@ -3,6 +3,7 @@ import type { AppState } from "../appState.ts";
 import type { DirectoryRow, FileRow, LinkRow } from "../db/rows.ts";
 import { type LinkKind, linkStats } from "../linkStats.ts";
 import { requireActiveUser } from "../middleware/deps.ts";
+import { present } from "../present.ts";
 
 const MAX_DAYS = 90;
 
@@ -14,7 +15,7 @@ export function linkStatsRouter(state: AppState): Router {
 	const { db } = state;
 
 	router.get("/:kind/:linkId", requireActiveUser(state), (req, res) => {
-		const user = req.currentUser!;
+		const user = present(req.currentUser);
 		const kind = req.params.kind as LinkKind;
 		if (kind !== "file" && kind !== "dir") {
 			res.status(404).json({ detail: "not found" });

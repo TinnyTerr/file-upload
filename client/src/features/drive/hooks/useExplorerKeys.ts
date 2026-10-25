@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { present } from "@/lib/present";
 import { type DriveItem, itemKey, itemName } from "../lib/items";
 import type { DriveActions } from "./useDriveActions";
 import type { DriveSelection } from "./useDriveSelection";
@@ -95,7 +96,7 @@ export function useExplorerKeys(h: KeyHandlers) {
 			const moveTo = (next: number, extend: boolean, focusOnly: boolean) => {
 				if (!items.length) return;
 				const clamped = Math.max(0, Math.min(items.length - 1, next));
-				const item = items[clamped]!;
+				const item = present(items[clamped]);
 				setFocusKey(itemKey(item));
 				if (focusOnly) return;
 				if (extend) selection.extendTo(item);

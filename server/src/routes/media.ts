@@ -1,3 +1,4 @@
+import { present } from "../present.ts";
 /**
  * Media library ("watch") -- a Netflix-shaped view over folders that have been
  * published with `directories.is_library`.
@@ -446,7 +447,7 @@ export function mediaRouter(state: AppState): Router {
 
 			// Authorize against the first entry: every file here shares one
 			// collection, so entitlement is uniform across them.
-			const auth = authorizeStream(state, req, entries[0]!, dir);
+			const auth = authorizeStream(state, req, present(entries[0]), dir);
 			if (!auth.ok) throw auth.error;
 			if (auth.keyRow) touchPlayKey(db, auth.keyRow);
 
@@ -618,7 +619,7 @@ export function mediaRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const dir = db.get<DirectoryRow>(
 				"SELECT * FROM directories WHERE id = $id",
 				{ $id: Number(req.params.directoryId) },
@@ -696,10 +697,11 @@ export function mediaRouter(state: AppState): Router {
 				target: `directory:${dir.id}`,
 				ip: clientIp(state, req),
 			});
-			const updated = db.get<DirectoryRow>(
-				"SELECT * FROM directories WHERE id = $id",
-				{ $id: dir.id },
-			)!;
+			const updated = present(
+				db.get<DirectoryRow>("SELECT * FROM directories WHERE id = $id", {
+					$id: dir.id,
+				}),
+			);
 			res.json(serializeCollection(db, updated, user, { withEntries: true }));
 		}),
 	);
@@ -712,7 +714,7 @@ export function mediaRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const dir = db.get<DirectoryRow>(
 				"SELECT * FROM directories WHERE id = $id",
 				{ $id: Number(req.params.directoryId) },
@@ -742,7 +744,7 @@ export function mediaRouter(state: AppState): Router {
 		requireSession(state),
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const rows = listPlayKeys(db, user.id);
 			res.json({
 				keys: rows.map((k) => ({
@@ -768,7 +770,7 @@ export function mediaRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const body = (req.body ?? {}) as Record<string, unknown>;
 			const fileId =
 				typeof body.file_id === "number" ? body.file_id : undefined;
@@ -854,7 +856,7 @@ export function mediaRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			// Masters can revoke anyone's key; everyone else only their own.
 			const scopedUser = user.role === "master" ? undefined : user.id;
 			if (!revokePlayKey(db, Number(req.params.id), scopedUser)) {

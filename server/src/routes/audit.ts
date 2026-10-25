@@ -3,6 +3,7 @@ import type { AppState } from "../appState.ts";
 import { verifyAuditChain } from "../audit.ts";
 import type { AuditLogRow } from "../db/rows.ts";
 import { requireMaster } from "../middleware/deps.ts";
+import { present } from "../present.ts";
 
 interface CountRow {
 	n: number;
@@ -23,9 +24,9 @@ export function auditRouter(state: AppState): Router {
 		const q = typeof req.query.q === "string" ? req.query.q : "";
 		const action = typeof req.query.action === "string" ? req.query.action : "";
 
-		const totalCount = db.get<CountRow>(
-			"SELECT COUNT(*) as n FROM audit_log",
-		)!.n;
+		const totalCount = present(
+			db.get<CountRow>("SELECT COUNT(*) as n FROM audit_log"),
+		).n;
 		const actions = db
 			.all<ActionRow>(
 				"SELECT DISTINCT action FROM audit_log ORDER BY action ASC",
@@ -51,10 +52,9 @@ export function auditRouter(state: AppState): Router {
 		});
 		const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
-		const filteredCount = db.get<CountRow>(
-			`SELECT COUNT(*) as n FROM audit_log ${where}`,
-			params,
-		)!.n;
+		const filteredCount = present(
+			db.get<CountRow>(`SELECT COUNT(*) as n FROM audit_log ${where}`, params),
+		).n;
 		const entries = db.all<AuditLogRow>(
 			`SELECT * FROM audit_log ${where} ORDER BY id DESC LIMIT $limit OFFSET $offset`,
 			{ ...params, $limit: limit, $offset: offset },

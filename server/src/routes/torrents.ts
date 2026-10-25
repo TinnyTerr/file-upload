@@ -20,6 +20,7 @@ import {
 	requireMaster,
 	requirePermission,
 } from "../middleware/deps.ts";
+import { present } from "../present.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import {
 	clearStashedSource,
@@ -204,7 +205,7 @@ export function torrentsRouter(state: AppState): Router {
 						"torrenting is not configured on this server",
 					);
 				}
-				const user = req.currentUser!;
+				const user = present(req.currentUser);
 				const body = req.body ?? {};
 				const magnet =
 					typeof body.magnet === "string" ? body.magnet.trim() : "";
@@ -305,13 +306,15 @@ export function torrentsRouter(state: AppState): Router {
 				// Over the concurrency limit the submission is *queued*, not refused:
 				// the poller starts it as soon as one of this owner's slots frees.
 				// The queue itself is bounded, and that bound is a real refusal.
-				const counts = db.get<{ active: number; pending: number }>(
-					`SELECT
+				const counts = present(
+					db.get<{ active: number; pending: number }>(
+						`SELECT
              COUNT(*) FILTER (WHERE status IN (${IN_FLIGHT_SQL})) AS active,
              COUNT(*) FILTER (WHERE status = 'pending')            AS pending
            FROM torrent_jobs WHERE owner_id = $id`,
-					{ $id: user.id },
-				)!;
+						{ $id: user.id },
+					),
+				);
 				if (counts.pending >= MAX_QUEUED_PER_USER) {
 					res.status(429).json({
 						detail: `you already have ${MAX_QUEUED_PER_USER} torrents waiting in the queue`,
@@ -329,7 +332,7 @@ export function torrentsRouter(state: AppState): Router {
 					(typeof body.name === "string" && body.name.trim().slice(0, 512)) ||
 					(magnet
 						? nameFromMagnet(magnet)
-						: torrentFile!.filename.replace(/\.torrent$/i, "")) ||
+						: present(torrentFile).filename.replace(/\.torrent$/i, "")) ||
 					"torrent";
 
 				// The request body is the only copy of an uploaded .torrent, and a
@@ -354,7 +357,7 @@ export function torrentsRouter(state: AppState): Router {
 						// Stored whole, not truncated: this is the only record of the
 						// magnet, and both the queue and the Real-Debrid→qBittorrent
 						// fallback re-dispatch from it. A clipped magnet is a dead one.
-						$source: magnet || `file:${torrentFile!.filename}`,
+						$source: magnet || `file:${present(torrentFile).filename}`,
 						$hash: magnet ? infoHashFromMagnet(magnet) : null,
 						$tag: tag,
 						// A pending job has no backend yet, so it has no save path and
@@ -368,9 +371,11 @@ export function torrentsRouter(state: AppState): Router {
 						$now: now,
 					},
 				);
-				const job = db.get<TorrentJobRow>(
-					"SELECT * FROM torrent_jobs WHERE id = last_insert_rowid()",
-				)!;
+				const job = present(
+					db.get<TorrentJobRow>(
+						"SELECT * FROM torrent_jobs WHERE id = last_insert_rowid()",
+					),
+				);
 				recordAudit(db, {
 					actor: user.username,
 					action: "torrent.added",
@@ -399,7 +404,7 @@ export function torrentsRouter(state: AppState): Router {
 	);
 
 	router.get("/", perm(), (req, res) => {
-		const user = req.currentUser!;
+		const user = present(req.currentUser);
 		const jobs = db.all<TorrentJobRow>(
 			"SELECT * FROM torrent_jobs WHERE owner_id = $id ORDER BY id DESC LIMIT 200",
 			{
@@ -417,7 +422,11 @@ export function torrentsRouter(state: AppState): Router {
 
 	router.get("/:jobId(\\d+)", perm(), (req, res) => {
 		try {
-			const job = loadOwnJob(state, req.currentUser!, req.params.jobId!);
+			const job = loadOwnJob(
+				state,
+				present(req.currentUser),
+				present(req.params.jobId),
+			);
 			res.json(serializeJob(job));
 		} catch (err) {
 			respondError(res, err);
@@ -435,8 +444,8 @@ export function torrentsRouter(state: AppState): Router {
 		perm(),
 		asyncHandler(async (req, res) => {
 			try {
-				const user = req.currentUser!;
-				const job = loadOwnJob(state, user, req.params.jobId!);
+				const user = present(req.currentUser);
+				const job = loadOwnJob(state, user, present(req.params.jobId));
 				if (job.status !== "failed") {
 					res
 						.status(409)
@@ -452,9 +461,14 @@ export function torrentsRouter(state: AppState): Router {
 				});
 				res.json(
 					serializeJob(
-						db.get<TorrentJobRow>("SELECT * FROM torrent_jobs WHERE id = $id", {
-							$id: job.id,
-						})!,
+						present(
+							db.get<TorrentJobRow>(
+								"SELECT * FROM torrent_jobs WHERE id = $id",
+								{
+									$id: job.id,
+								},
+							),
+						),
 					),
 				);
 			} catch (err) {
@@ -474,8 +488,8 @@ export function torrentsRouter(state: AppState): Router {
 		perm(),
 		asyncHandler(async (req, res) => {
 			try {
-				const user = req.currentUser!;
-				const job = loadOwnJob(state, user, req.params.jobId!);
+				const user = present(req.currentUser);
+				const job = loadOwnJob(state, user, present(req.params.jobId));
 				// A pending job was never dispatched: there is nothing at either
 				// backend and nothing on disk. Its info_hash is parsed from the
 				// magnet rather than owned by us, so handing it to qBittorrent's
@@ -528,9 +542,11 @@ function seedingStatus(state: AppState): Record<string, unknown> {
 		active: settings.qbittorrentSeeding && isConfigured(settings),
 		ratio: settings.qbittorrentSeedRatio,
 		minutes: settings.qbittorrentSeedMinutes,
-		seeding_count: db.get<{ n: number }>(
-			"SELECT COUNT(*) AS n FROM torrent_jobs WHERE status = 'seeding'",
-		)!.n,
+		seeding_count: present(
+			db.get<{ n: number }>(
+				"SELECT COUNT(*) AS n FROM torrent_jobs WHERE status = 'seeding'",
+			),
+		).n,
 	};
 }
 
@@ -644,7 +660,7 @@ export function adminTorrentsRouter(state: AppState): Router {
 		asyncHandler(async (req, res) => {
 			try {
 				const body = req.body ?? {};
-				const actor = req.currentUser!.username;
+				const actor = present(req.currentUser).username;
 				const ip = clientIp(state, req);
 
 				// Persist first, apply second: setEnvValue refuses a key fixed by
@@ -724,7 +740,7 @@ export function adminTorrentsRouter(state: AppState): Router {
 		asyncHandler(async (req, res) => {
 			try {
 				const body = req.body ?? {};
-				const actor = req.currentUser!.username;
+				const actor = present(req.currentUser).username;
 
 				// Persist first, apply second -- see the note on /debrid above.
 				if (typeof body.enabled === "boolean") {

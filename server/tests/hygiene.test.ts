@@ -5,6 +5,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { UserRow } from "../src/db/rows.ts";
+import { present } from "../src/present.ts";
 import { safeArcname } from "../src/storage/zip.ts";
 import { type Harness, makeHarness, makeUser } from "./harness.ts";
 
@@ -21,7 +22,9 @@ describe("session prune", () => {
 	test("removes only expired rows and leaves live sessions untouched", async () => {
 		const live = h.signIn(user);
 		const dead = h.signIn(user);
-		const deadSid = dead.cookie.slice("fu_session=".length).split(".")[0]!;
+		const deadSid = present(
+			dead.cookie.slice("fu_session=".length).split(".")[0],
+		);
 		h.db.run(
 			"UPDATE sessions SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = $id",
 			{

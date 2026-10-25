@@ -1,3 +1,4 @@
+import { present } from "../present.ts";
 /**
  * Playback keys for account-restricted media.
  *
@@ -127,10 +128,12 @@ export function mintPlayKey(
 			$createdAt: nowIso(),
 		},
 	);
-	const row = state.db.get<MediaPlayKeyRow>(
-		"SELECT * FROM media_play_keys WHERE jti = $jti",
-		{ $jti: jti },
-	)!;
+	const row = present(
+		state.db.get<MediaPlayKeyRow>(
+			"SELECT * FROM media_play_keys WHERE jti = $jti",
+			{ $jti: jti },
+		),
+	);
 
 	const payload: PlayKeyPayload = {
 		v: 1,

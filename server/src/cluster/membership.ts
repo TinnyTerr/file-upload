@@ -3,6 +3,7 @@ import { recordAudit } from "../audit.ts";
 import type { ClusterNodeRow } from "../db/rows.ts";
 import { nowIso } from "../db/rows.ts";
 import { getLogger } from "../logging.ts";
+import { present } from "../present.ts";
 import { diskUsageBytes, usedStorageBytes } from "../storage/accounting.ts";
 import {
 	adoptEpochIfHigher,
@@ -456,8 +457,10 @@ export function upsertPeer(
 	if (Number.isFinite(epoch)) {
 		adoptEpochIfHigher(state, epoch, {});
 	}
-	return db.get<ClusterNodeRow>(
-		"SELECT * FROM cluster_nodes WHERE node_id = $nodeId",
-		{ $nodeId: opts.nodeId },
-	)!;
+	return present(
+		db.get<ClusterNodeRow>(
+			"SELECT * FROM cluster_nodes WHERE node_id = $nodeId",
+			{ $nodeId: opts.nodeId },
+		),
+	);
 }

@@ -7,6 +7,7 @@ import {
 	rawUrl,
 	shareUrl,
 } from "@/features/files/lib/shareUrl";
+import { present } from "@/lib/present";
 import { useDialogs } from "@/providers/DialogProvider";
 import { type DriveItem, itemKey, itemName } from "../lib/items";
 import { drivePath } from "../types";
@@ -54,7 +55,7 @@ export function useDriveActions() {
 						: `Delete ${targets.length} items?`,
 				description:
 					targets.length === 1
-						? `“${itemName(targets[0]!)}”${folders ? ", everything inside it," : ""} and all its links will be removed.`
+						? `“${itemName(present(targets[0]))}”${folders ? ", everything inside it," : ""} and all its links will be removed.`
 						: `The selected items${folders ? ", everything inside the folders," : ""} and all their links will be removed.`,
 				confirmText: "Delete",
 				destructive: true,
@@ -69,7 +70,7 @@ export function useDriveActions() {
 			const files = items.filter((i) => i.kind === "file");
 			if (!files.length) return;
 			if (files.length === 1) {
-				const only = files[0]!;
+				const only = present(files[0]);
 				if (only.kind !== "file") return;
 				const link = only.file.links[0];
 				if (!link) return;

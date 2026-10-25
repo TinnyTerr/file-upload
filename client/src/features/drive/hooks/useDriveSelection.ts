@@ -41,7 +41,6 @@ export function useDriveSelection(items: DriveItem[]): DriveSelection {
 
 	// Navigating to another folder -- or deleting what was selected -- must not
 	// leave phantom ids behind for the bulk bar to act on.
-	// biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the contents of `keys`, not its identity
 	useEffect(() => {
 		const live = new Set(keySignature ? keySignature.split("|") : []);
 		setSelected((prev) => {

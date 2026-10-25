@@ -1,3 +1,4 @@
+import { present } from "../src/present.ts";
 /**
  * In-process test harness: a real Express app over an in-memory database.
  *
@@ -121,9 +122,11 @@ export async function makeUser(
 			$now: nowIso(),
 		},
 	);
-	const user = db.get<UserRow>("SELECT * FROM users WHERE username = $u", {
-		$u: username,
-	})!;
+	const user = present(
+		db.get<UserRow>("SELECT * FROM users WHERE username = $u", {
+			$u: username,
+		}),
+	);
 	ensurePermissions(db, user.id, { master: role === "master" });
 	return user;
 }
@@ -151,7 +154,7 @@ export function makeDirectory(
 			$now: nowIso(),
 		},
 	);
-	return db.get<{ id: number }>("SELECT last_insert_rowid() AS id")!.id;
+	return present(db.get<{ id: number }>("SELECT last_insert_rowid() AS id")).id;
 }
 
 /** Inserts a file row directly. No bytes are written — these tests are about
@@ -173,5 +176,5 @@ export function makeFile(
 			$now: nowIso(),
 		},
 	);
-	return db.get<{ id: number }>("SELECT last_insert_rowid() AS id")!.id;
+	return present(db.get<{ id: number }>("SELECT last_insert_rowid() AS id")).id;
 }

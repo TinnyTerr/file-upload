@@ -2,6 +2,7 @@ import { existsSync, statSync, unlinkSync } from "node:fs";
 import { loadSettings } from "../src/config.ts";
 import { createDb } from "../src/db/index.ts";
 import type { ContentBlobRow, FileRow } from "../src/db/rows.ts";
+import { present } from "../src/present.ts";
 import { safeJoin, storageRoot } from "../src/storage/paths.ts";
 
 /**
@@ -81,14 +82,15 @@ let blobsMerged = 0;
 for (const group of groups) {
 	const ids = group.ids.split(",").map(Number);
 	const blobs = ids
-		.map(
-			(id) =>
+		.map((id) =>
+			present(
 				db.get<ContentBlobRow>("SELECT * FROM content_blobs WHERE id = $id", {
 					$id: id,
-				})!,
+				}),
+			),
 		)
 		.sort((a, b) => a.id - b.id);
-	const survivor = blobs[0]!;
+	const survivor = present(blobs[0]);
 	const losers = blobs.slice(1);
 
 	log(
@@ -111,7 +113,7 @@ for (const group of groups) {
 			loserPath = null;
 		}
 		const loserExists = loserPath ? existsSync(loserPath) : false;
-		const loserSize = loserExists ? statSync(loserPath!).size : 0;
+		const loserSize = loserExists ? statSync(present(loserPath)).size : 0;
 
 		if (APPLY) {
 			db.run(

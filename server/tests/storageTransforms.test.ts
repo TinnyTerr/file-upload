@@ -1,3 +1,4 @@
+import { present } from "../src/present.ts";
 /**
  * The stored-bytes pipeline: the AEAD container, zstd, and the two composed
  * orders a read path has to undo (`ENC(ZSTD(x))` from upload, `ZSTD(ENC(x))`
@@ -46,7 +47,7 @@ async function collect(source: AsyncIterable<Buffer>): Promise<Buffer> {
 /** Text-shaped bytes, so zstd actually has something to remove. */
 function compressible(size: number): Buffer {
 	const unit = Buffer.from("the quick brown fox jumps over the lazy dog\n");
-	return Buffer.alloc(size).map((_, i) => unit[i % unit.length]!);
+	return Buffer.alloc(size).map((_, i) => present(unit[i % unit.length]));
 }
 
 describe("aead container round trip", () => {
@@ -171,7 +172,7 @@ describe("compressIfWorthwhile", () => {
 
 		const size = await compressIfWorthwhile(src, dst, data.length);
 		expect(size).not.toBeNull();
-		expect(size!).toBeLessThan(data.length);
+		expect(present(size)).toBeLessThan(data.length);
 		expect(existsSync(dst)).toBe(true);
 		expect(await collect(decompressStream(dst, data.length))).toEqual(data);
 	});

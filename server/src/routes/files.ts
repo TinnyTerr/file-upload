@@ -65,6 +65,7 @@ import {
 	requireScopeOrSession,
 } from "../middleware/deps.ts";
 import { ensurePermissions } from "../permissions.ts";
+import { present } from "../present.ts";
 import {
 	type AccessCheck,
 	checkLinkAccess,
@@ -103,7 +104,7 @@ import { triggerWebhooks } from "../webhooks.ts";
 
 const log = getLogger("app.routes.files");
 
-const CHUNK = 256 * 1024;
+const _CHUNK = 256 * 1024;
 const REQUEST_OVERHEAD_ALLOWANCE = 1024 * 1024;
 const CHUNK_UPLOAD_SIZE = 16 * 1024 * 1024;
 const CHUNK_SESSION_TTL = 12 * 3600;
@@ -444,8 +445,8 @@ export async function finalizeStoredFile(
 	try {
 		let ct = (opts.contentType || "application/octet-stream")
 			.toLowerCase()
-			.split(";")[0]!
-			.trim();
+			.split(";")[0] as string;
+		ct = ct.trim();
 		if (UNSAFE_CT.has(ct)) ct = "application/octet-stream";
 
 		if (opts.compress && encryptionMode !== "client" && shouldCompress(ct)) {
@@ -507,9 +508,9 @@ export async function finalizeStoredFile(
 				$now: nowIso(),
 			},
 		);
-		const fileObj = db.get<FileRow>(
-			"SELECT * FROM files WHERE id = last_insert_rowid()",
-		)!;
+		const fileObj = present(
+			db.get<FileRow>("SELECT * FROM files WHERE id = last_insert_rowid()"),
+		);
 
 		let encKeyBlobVal: Buffer | null = null;
 		let encAccessBlobVal: Buffer | null = null;
@@ -1172,7 +1173,7 @@ export function sweepStaleParts(): void {
  * other.) */
 export function serializeFiles(
 	state: AppState,
-	req: Request,
+	_req: Request,
 	files: FileRow[],
 	/** A caller listing the whole system passes a preloaded resolver so the
 	 * folder tree is read once rather than lazily per distinct folder. */
@@ -1305,7 +1306,7 @@ export function filesRouter(state: AppState): Router {
 	const ABSOLUTE_UPLOAD_CEILING = 20 * 1024 * 1024 * 1024; // 20 GiB
 
 	router.post("/upload", getUploadUser(state), (req, res, next) => {
-		const user = req.currentUser!;
+		const user = present(req.currentUser);
 		if (state.haltRegistry.activeUntil(user.id) !== null) {
 			res.status(503).json({
 				detail:
@@ -1464,7 +1465,7 @@ export function filesRouter(state: AppState): Router {
 	// ── chunked uploads ──────────────────────────────────────────────────
 	router.post("/upload/init", getUploadUser(state), (req, res) => {
 		try {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			checkUploadHalt(state, user.id);
 			const body = req.body ?? {};
 			const prepared = prepareUpload(state, user, {
@@ -1540,7 +1541,7 @@ export function filesRouter(state: AppState): Router {
 
 	router.get("/upload/status", getUploadUser(state), (req, res) => {
 		try {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const meta = openChunkToken(
 				state,
 				String(req.query.upload_id ?? ""),
@@ -1566,7 +1567,7 @@ export function filesRouter(state: AppState): Router {
 	router.post("/upload/chunk", getUploadUser(state), (req, res, next) => {
 		let meta: ChunkMeta;
 		try {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			meta = openChunkToken(state, String(req.query.upload_id ?? ""), user);
 		} catch (err) {
 			respondError(res, err);
@@ -1597,7 +1598,7 @@ export function filesRouter(state: AppState): Router {
 		getUploadUser(state),
 		asyncHandler(async (req, res) => {
 			try {
-				const user = req.currentUser!;
+				const user = present(req.currentUser);
 				const uploadId = String(req.body?.upload_id ?? "");
 				const meta = openChunkToken(state, uploadId, user);
 				const relPath = meta.rel;
@@ -1713,7 +1714,7 @@ export function filesRouter(state: AppState): Router {
 	router.delete("/upload", getUploadUser(state), (req, res) => {
 		let relPath: string | null = null;
 		try {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const meta = openChunkToken(
 				state,
 				String(req.query.upload_id ?? ""),
@@ -1757,7 +1758,7 @@ export function filesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const link = resolveActiveLink(db, req.params.slug);
 			if (!link) {
 				res.status(404).json({ detail: "not found" });
@@ -1856,9 +1857,9 @@ export function filesRouter(state: AppState): Router {
 					$now: nowIso(),
 				},
 			);
-			const saved = db.get<FileRow>(
-				"SELECT * FROM files WHERE id = last_insert_rowid()",
-			)!;
+			const saved = present(
+				db.get<FileRow>("SELECT * FROM files WHERE id = last_insert_rowid()"),
+			);
 			const newLinkSlug = newSlug();
 			db.run(
 				"INSERT INTO links (file_id, slug, use_count, active, created_at) VALUES ($fid, $slug, 0, 1, $now)",
@@ -1909,7 +1910,7 @@ export function filesRouter(state: AppState): Router {
 		requireActiveUser(state),
 		requirePermission(state, "can_upload"),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const source = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
 				$id: req.params.fileId,
 			});
@@ -2030,9 +2031,9 @@ export function filesRouter(state: AppState): Router {
 						$now: nowIso(),
 					},
 				);
-				copyId = db.get<FileRow>(
-					"SELECT * FROM files WHERE id = last_insert_rowid()",
-				)!.id;
+				copyId = present(
+					db.get<FileRow>("SELECT * FROM files WHERE id = last_insert_rowid()"),
+				).id;
 				if (target) {
 					db.run(
 						"UPDATE directories SET total_bytes = COALESCE(total_bytes, 0) + $inc WHERE id = $id",
@@ -2044,9 +2045,11 @@ export function filesRouter(state: AppState): Router {
 					{ $fid: copyId, $slug: newLinkSlug, $now: nowIso() },
 				);
 			});
-			const copy = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
-				$id: copyId,
-			})!;
+			const copy = present(
+				db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+					$id: copyId,
+				}),
+			);
 
 			recordAudit(db, {
 				actor: user.username,
@@ -2064,13 +2067,13 @@ export function filesRouter(state: AppState): Router {
 					`cluster replication failed file_id=${copy.id}: ${err instanceof Error ? err.message : String(err)}`,
 				);
 			});
-			res.json(serializeFiles(state, req, [copy])[0]!);
+			res.json(present(serializeFiles(state, req, [copy])[0]));
 		},
 	);
 
 	// Session cookie, or an OAuth token carrying files:read.
 	router.get("/", requireScopeOrSession(state, "files:read"), (req, res) => {
-		const user = req.currentUser!;
+		const user = present(req.currentUser);
 		const files = db.all<FileRow>(
 			"SELECT * FROM files WHERE directory_id IS NULL AND owner_id = $id ORDER BY created_at DESC",
 			{ $id: user.id },
@@ -2082,7 +2085,7 @@ export function filesRouter(state: AppState): Router {
 		"/batch-zip",
 		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const rawIds = req.query.ids;
 			const ids = (
 				Array.isArray(rawIds) ? rawIds : rawIds !== undefined ? [rawIds] : []
@@ -2167,15 +2170,15 @@ export function filesRouter(state: AppState): Router {
 
 	router.get("/disk-stats", requireMaster(state), (_req, res) => {
 		const totalBytes = usedStorageBytes(db);
-		const totalFiles = db.get<{ n: number }>(
-			"SELECT COUNT(*) as n FROM files",
-		)!.n;
-		const totalLinks = db.get<{ n: number }>(
-			"SELECT COUNT(*) as n FROM links WHERE active = 1",
-		)!.n;
-		const totalUsers = db.get<{ n: number }>(
-			"SELECT COUNT(*) as n FROM users",
-		)!.n;
+		const totalFiles = present(
+			db.get<{ n: number }>("SELECT COUNT(*) as n FROM files"),
+		).n;
+		const totalLinks = present(
+			db.get<{ n: number }>("SELECT COUNT(*) as n FROM links WHERE active = 1"),
+		).n;
+		const totalUsers = present(
+			db.get<{ n: number }>("SELECT COUNT(*) as n FROM users"),
+		).n;
 		res.json({
 			total_bytes: totalBytes,
 			total_files: totalFiles,
@@ -2185,7 +2188,7 @@ export function filesRouter(state: AppState): Router {
 	});
 
 	router.get("/usage", requireActiveUser(state), (req, res) => {
-		const user = req.currentUser!;
+		const user = present(req.currentUser);
 		const perm = ensurePermissions(db, user.id, {
 			master: user.role === "master",
 		});
@@ -2213,7 +2216,7 @@ export function filesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
 				$id: req.params.fileId,
 			});
@@ -2247,10 +2250,12 @@ export function filesRouter(state: AppState): Router {
 				target: `file:${fileObj.id}`,
 				ip: clientIp(state, req),
 			});
-			const updated = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
-				$id: fileObj.id,
-			})!;
-			res.json(serializeFiles(state, req, [updated])[0]!);
+			const updated = present(
+				db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+					$id: fileObj.id,
+				}),
+			);
+			res.json(present(serializeFiles(state, req, [updated])[0]));
 		},
 	);
 
@@ -2261,7 +2266,7 @@ export function filesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
 				$id: req.params.fileId,
 			});
@@ -2302,7 +2307,7 @@ export function filesRouter(state: AppState): Router {
 				return;
 			}
 			if (targetId === fileObj.directory_id) {
-				res.json(serializeFiles(state, req, [fileObj])[0]!);
+				res.json(present(serializeFiles(state, req, [fileObj])[0]));
 				return;
 			}
 
@@ -2346,10 +2351,12 @@ export function filesRouter(state: AppState): Router {
 				target: `file:${fileObj.id}->${targetId === null ? "root" : `directory:${targetId}`}`,
 				ip: clientIp(state, req),
 			});
-			const updated = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
-				$id: fileObj.id,
-			})!;
-			res.json(serializeFiles(state, req, [updated])[0]!);
+			const updated = present(
+				db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+					$id: fileObj.id,
+				}),
+			);
+			res.json(present(serializeFiles(state, req, [updated])[0]));
 		},
 	);
 
@@ -2362,7 +2369,7 @@ export function filesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
 				$id: req.params.fileId,
 			});
@@ -2499,11 +2506,13 @@ export function filesRouter(state: AppState): Router {
 				target: `file:${fileObj.id}`,
 				ip: clientIp(state, req),
 			});
-			const updated = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
-				$id: fileObj.id,
-			})!;
+			const updated = present(
+				db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+					$id: fileObj.id,
+				}),
+			);
 			res.json({
-				...serializeFiles(state, req, [updated])[0]!,
+				...present(serializeFiles(state, req, [updated])[0]),
 				access_key: accessKey ?? recoverAccessKey(state, updated),
 			});
 		}),
@@ -2531,7 +2540,7 @@ export function filesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
 				$id: req.params.fileId,
 			});
@@ -2602,11 +2611,13 @@ export function filesRouter(state: AppState): Router {
 			log.info(
 				`file sealed file_id=${fileObj.id} owner_id=${fileObj.owner_id} password_derived=${usePassword}`,
 			);
-			const updated = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
-				$id: fileObj.id,
-			})!;
+			const updated = present(
+				db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+					$id: fileObj.id,
+				}),
+			);
 			res.json({
-				...serializeFiles(state, req, [updated])[0]!,
+				...present(serializeFiles(state, req, [updated])[0]),
 				// Shown once. There is no second copy anywhere on this server.
 				key: revealed,
 				key_is_password: usePassword,
@@ -2634,7 +2645,7 @@ export function filesRouter(state: AppState): Router {
 		requireSession(state),
 		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
 				$id: req.params.fileId,
 			});
@@ -2710,7 +2721,7 @@ export function filesRouter(state: AppState): Router {
 		requireCsrf,
 		requirePermission(state, "can_delete"),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const replacement = db.get<FileRow>(
 				"SELECT * FROM files WHERE id = $id",
 				{ $id: req.params.fileId },
@@ -2767,11 +2778,13 @@ export function filesRouter(state: AppState): Router {
 				target: `file:${replacement.id} replaces file:${replaced.id} (${before}->${after})`,
 				ip: clientIp(state, req),
 			});
-			const updated = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
-				$id: replacement.id,
-			})!;
+			const updated = present(
+				db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+					$id: replacement.id,
+				}),
+			);
 			res.json({
-				...serializeFiles(state, req, [updated])[0]!,
+				...present(serializeFiles(state, req, [updated])[0]),
 				replaced_file_id: replaced.id,
 				previous_encryption_mode: before,
 			});
@@ -2786,7 +2799,7 @@ export function filesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
 				$id: req.params.fileId,
 			});
@@ -2857,7 +2870,7 @@ export function filesRouter(state: AppState): Router {
 		requireCsrf,
 		requirePermission(state, "can_delete"),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
 				$id: req.params.fileId,
 			});
@@ -2886,7 +2899,7 @@ export function filesRouter(state: AppState): Router {
 		requireCsrf,
 		requirePermission(state, "can_regenerate_links"),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const fileObj = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
 				$id: req.params.fileId,
 			});
@@ -2921,9 +2934,9 @@ export function filesRouter(state: AppState): Router {
 					$now: nowIso(),
 				},
 			);
-			const link = db.get<LinkRow>(
-				"SELECT * FROM links WHERE id = last_insert_rowid()",
-			)!;
+			const link = present(
+				db.get<LinkRow>("SELECT * FROM links WHERE id = last_insert_rowid()"),
+			);
 			recordAudit(db, {
 				actor: user.username,
 				action: "link.created",
@@ -2978,7 +2991,7 @@ export function adminFilesRouter(state: AppState): Router {
 		res.json({
 			files: rows.map((row, i) => ({
 				...row,
-				directory_path: pathOf(files[i]!.directory_id),
+				directory_path: pathOf(present(files[i]).directory_id),
 			})),
 		});
 	});
@@ -2997,7 +3010,7 @@ export function linksRouter(state: AppState): Router {
 		requireCsrf,
 		requirePermission(state, "can_delete_links"),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const link = db.get<LinkRow>("SELECT * FROM links WHERE id = $id", {
 				$id: req.params.linkId,
 			});
@@ -3033,7 +3046,7 @@ export function linksRouter(state: AppState): Router {
 		requireCsrf,
 		requirePermission(state, "can_regenerate_links"),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const link = db.get<LinkRow>("SELECT * FROM links WHERE id = $id", {
 				$id: req.params.linkId,
 			});

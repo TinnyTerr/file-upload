@@ -3,6 +3,7 @@ import { existsSync, statSync, unlinkSync } from "node:fs";
 import { touchBlobAccess } from "../cluster/cacheEviction.ts";
 import { type ContentBlobRow, type FileRow, nowIso } from "../db/rows.ts";
 import type { Db } from "../db/types.ts";
+import { present } from "../present.ts";
 import { hashInWorker } from "./hashPool.ts";
 import { safeJoin, storageRoot } from "./paths.ts";
 
@@ -130,9 +131,11 @@ export function attachBlob(
 			$createdAt: nowIso(),
 		},
 	);
-	const created = db.get<ContentBlobRow>(
-		"SELECT * FROM content_blobs WHERE id = last_insert_rowid()",
-	)!;
+	const created = present(
+		db.get<ContentBlobRow>(
+			"SELECT * FROM content_blobs WHERE id = last_insert_rowid()",
+		),
+	);
 	touchBlobAccess(db, created.id);
 	return created;
 }

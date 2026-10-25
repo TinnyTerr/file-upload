@@ -4,6 +4,7 @@ import type { ClusterNodeRow, ClusterSelfStateRow } from "../db/rows.ts";
 import { nowIso } from "../db/rows.ts";
 import type { Db } from "../db/types.ts";
 import { getLogger } from "../logging.ts";
+import { present } from "../present.ts";
 import { ClusterHTTPError, postJson } from "./http.ts";
 
 /** Elected, epoch-versioned leadership layered UNDER the existing full-mesh
@@ -43,9 +44,11 @@ function selfRow(db: Db): ClusterSelfStateRow {
      ON CONFLICT(id) DO NOTHING`,
 		{ $now: now },
 	);
-	return db.get<ClusterSelfStateRow>(
-		"SELECT * FROM cluster_self_state WHERE id = 1",
-	)!;
+	return present(
+		db.get<ClusterSelfStateRow>(
+			"SELECT * FROM cluster_self_state WHERE id = 1",
+		),
+	);
 }
 
 /** Seed this node's election row from its bootstrap NODE_ROLE on first ever
@@ -221,9 +224,9 @@ export function resolveMaster(
 		"SELECT * FROM cluster_nodes WHERE node_id = $id",
 		{ $id: self.current_master_id },
 	);
-	if (!node || !node.base_url || !node.token) return null;
+	if (!node?.base_url || !node.token) return null;
 	return {
-		nodeId: node.node_id!,
+		nodeId: present(node.node_id),
 		baseUrl: node.base_url.replace(/\/$/, ""),
 		token: node.token,
 	};
@@ -275,7 +278,7 @@ function knownClusterPeers(
 		.all<ClusterNodeRow>("SELECT * FROM cluster_nodes")
 		.filter((n) => n.node_id && n.base_url && n.token)
 		.map((n) => ({
-			nodeId: n.node_id!,
+			nodeId: present(n.node_id),
 			baseUrl: n.base_url.replace(/\/$/, ""),
 			token: n.token,
 		}));

@@ -1,6 +1,7 @@
 import { randomFillSync } from "node:crypto";
 import type { Db } from "../db/types.ts";
 import { getLogger } from "../logging.ts";
+import { present } from "../present.ts";
 
 /**
  * Cluster-wide row identity (redesign §5.6).
@@ -99,8 +100,9 @@ function encodeRandom(bytes: Uint8Array): string {
  * duplicate so it is handled rather than assumed away. */
 function incrementRandom(): boolean {
 	for (let i = RANDOM_BYTES - 1; i >= 0; i--) {
-		if (lastRandom[i]! < 0xff) {
-			lastRandom[i]!++;
+		const byte = present(lastRandom[i]);
+		if (byte < 0xff) {
+			lastRandom[i] = byte + 1;
 			return true;
 		}
 		lastRandom[i] = 0;
@@ -212,7 +214,7 @@ export function backfillUids(db: Db): Record<string, number> {
 				}
 			});
 			count += rows.length;
-			after = rows[rows.length - 1]!.id;
+			after = present(rows[rows.length - 1]).id;
 		}
 		if (count > 0) minted[table] = count;
 	}

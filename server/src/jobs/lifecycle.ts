@@ -11,6 +11,7 @@ import type { Db } from "../db/types.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
 import { getPermissions } from "../permissions.ts";
+import { present } from "../present.ts";
 import {
 	diskUsageBytes,
 	ensureStorageSettings,
@@ -322,7 +323,7 @@ export async function archiveFileCore(
 		log.info(
 			`archive marked file archived without recompressing file_id=${f.id}`,
 		);
-		return serializeFileLifecycle(fileRow(db, f.id)!);
+		return serializeFileLifecycle(present(fileRow(db, f.id)));
 	}
 
 	const blob = blobRow(db, f.blob_id);
@@ -343,7 +344,7 @@ export async function archiveFileCore(
 			log.info(
 				`archive marked file archived without recompressing file_id=${f.id} reason=compression_not_worthwhile`,
 			);
-			return serializeFileLifecycle(fileRow(db, f.id)!);
+			return serializeFileLifecycle(present(fileRow(db, f.id)));
 		}
 		renameSync(tmp, src);
 		const stored = statSync(src).size;
@@ -369,7 +370,7 @@ export async function archiveFileCore(
 			target: `file:${f.id}`,
 			ip,
 		});
-		f = fileRow(db, f.id)!;
+		f = present(fileRow(db, f.id));
 		log.info(
 			`archive completed file_id=${f.id} original_bytes=${original} stored_bytes=${stored} saved_bytes=${saved}`,
 		);
@@ -484,7 +485,7 @@ export async function unarchiveFileCore(
 			target: `file:${f.id}`,
 			ip,
 		});
-		f = fileRow(db, f.id)!;
+		f = present(fileRow(db, f.id));
 		log.info(`unarchive completed file_id=${f.id} restored_bytes=${restored}`);
 		return serializeFileLifecycle(f);
 	} catch (err) {

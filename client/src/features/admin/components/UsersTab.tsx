@@ -12,6 +12,7 @@ import { UserAvatar } from "@/components/ui/user-avatar";
 import { PERMISSION_FLAGS } from "@/config/permissions";
 import { useAuth } from "@/features/auth/hooks/auth";
 import { formatBytes, percent } from "@/lib/bytes";
+import { present } from "@/lib/present";
 import { formatDate } from "@/lib/time";
 import { useDialogs } from "@/providers/DialogProvider";
 import { useStorageDetails } from "../hooks/useAdminDashboard";
@@ -61,7 +62,7 @@ export function UsersTab() {
 
 	const grantedCount = (u: AdminUser) =>
 		u.permissions
-			? PERMISSION_FLAGS.filter((f) => u.permissions![f]).length
+			? PERMISSION_FLAGS.filter((f) => present(u.permissions)[f]).length
 			: 0;
 
 	return (

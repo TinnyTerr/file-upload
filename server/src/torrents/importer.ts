@@ -18,6 +18,7 @@ import { HttpError } from "../httpError.ts";
 import { newSlug } from "../links.ts";
 import { getLogger } from "../logging.ts";
 import { ensurePermissions } from "../permissions.ts";
+import { present } from "../present.ts";
 import { finalizeStoredFile } from "../routes/files.ts";
 import {
 	debridRoot,
@@ -57,8 +58,8 @@ export function localJobDir(state: AppState, job: TorrentJobRow): string {
  * "<torrent name>/" prefix while preserving deeper subdirectory paths. */
 function torrentRoot(jobDir: string): string {
 	const entries = readdirSync(jobDir, { withFileTypes: true });
-	if (entries.length === 1 && entries[0]!.isDirectory())
-		return join(jobDir, entries[0]!.name);
+	if (entries.length === 1 && present(entries[0]).isDirectory())
+		return join(jobDir, present(entries[0]).name);
 	return jobDir;
 }
 
@@ -121,7 +122,7 @@ function createDirectory(
 	state: AppState,
 	user: UserRow,
 	title: string,
-	req: Request,
+	_req: Request,
 	parent: DirectoryRow | null,
 ): DirectoryRow {
 	const { db } = state;
@@ -147,9 +148,11 @@ function createDirectory(
 			$now: nowIso(),
 		},
 	);
-	const dir = db.get<DirectoryRow>(
-		"SELECT * FROM directories WHERE id = last_insert_rowid()",
-	)!;
+	const dir = present(
+		db.get<DirectoryRow>(
+			"SELECT * FROM directories WHERE id = last_insert_rowid()",
+		),
+	);
 	db.run(
 		"INSERT INTO directory_links (directory_id, slug, use_count, active, created_at) VALUES ($dirId, $slug, 0, 1, $now)",
 		{ $dirId: dir.id, $slug: slug, $now: nowIso() },

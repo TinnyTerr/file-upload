@@ -3,6 +3,7 @@ import type { AppState } from "./appState.ts";
 import { nowIso } from "./db/rows.ts";
 import type { Db } from "./db/types.ts";
 import { clientCountry } from "./middleware/auth.ts";
+import { present } from "./present.ts";
 
 export type LinkKind = "file" | "dir";
 export type LinkEvent = "view" | "download" | "save";
@@ -40,10 +41,12 @@ export function pruneLinkHits(db: Db): number {
 	const cutoff = new Date(
 		Date.now() - LINK_HIT_RETENTION_DAYS * 86_400_000,
 	).toISOString();
-	const n = db.get<{ n: number }>(
-		"SELECT COUNT(*) AS n FROM link_hits WHERE created_at < $c",
-		{ $c: cutoff },
-	)!.n;
+	const n = present(
+		db.get<{ n: number }>(
+			"SELECT COUNT(*) AS n FROM link_hits WHERE created_at < $c",
+			{ $c: cutoff },
+		),
+	).n;
 	if (n) db.run("DELETE FROM link_hits WHERE created_at < $c", { $c: cutoff });
 	return n;
 }

@@ -1,6 +1,7 @@
 import type { CredentialRow } from "../db/rows.ts";
 import { nowIso } from "../db/rows.ts";
 import type { Db } from "../db/types.ts";
+import { present } from "../present.ts";
 
 export function listForUser(db: Db, userId: number): CredentialRow[] {
 	return db.all<CredentialRow>(
@@ -42,7 +43,7 @@ export function createTotp(
 			$createdAt: createdAt,
 		},
 	);
-	return db.get<{ id: number }>("SELECT last_insert_rowid() as id")!.id;
+	return present(db.get<{ id: number }>("SELECT last_insert_rowid() as id")).id;
 }
 
 export function createWebauthn(
@@ -66,7 +67,7 @@ export function createWebauthn(
 			$createdAt: createdAt,
 		},
 	);
-	return db.get<{ id: number }>("SELECT last_insert_rowid() as id")!.id;
+	return present(db.get<{ id: number }>("SELECT last_insert_rowid() as id")).id;
 }
 
 export function deleteCredential(

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { recordAudit } from "./audit.ts";
 import type { Db } from "./db/types.ts";
+import { present } from "./present.ts";
 import { hashPassword } from "./security/passwords.ts";
 
 const DEFAULT_USERNAME = "admin";
@@ -25,7 +26,7 @@ export async function ensureMaster(
 	db: Db,
 	print: (line: string) => void = console.log,
 ): Promise<string | null> {
-	const { n } = db.get<CountRow>("SELECT COUNT(*) as n FROM users")!;
+	const { n } = present(db.get<CountRow>("SELECT COUNT(*) as n FROM users"));
 	if (n > 0) return null;
 
 	const password = tokenUrlsafe(12);
@@ -42,7 +43,9 @@ export async function ensureMaster(
 				$createdAt: createdAt,
 			},
 		);
-		const { id } = db.get<{ id: number }>("SELECT last_insert_rowid() as id")!;
+		const { id } = present(
+			db.get<{ id: number }>("SELECT last_insert_rowid() as id"),
+		);
 
 		db.run(
 			`INSERT INTO permissions (

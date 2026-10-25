@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { present } from "../src/lib/present";
 
 // In-memory localStorage stub so CSRF storage has no disk side-effects.
 const store = new Map<string, string>();
@@ -50,12 +51,12 @@ describe("api client", () => {
 		mockFetch({ ok: true });
 		const res = await api.post<{ ok: boolean }>("/x", { json: { a: 1 } });
 		expect(res).toEqual({ ok: true });
-		expect(captured!.init.method).toBe("POST");
-		expect(captured!.init.credentials).toBe("same-origin");
-		const headers = captured!.init.headers as Headers;
+		expect(present(captured).init.method).toBe("POST");
+		expect(present(captured).init.credentials).toBe("same-origin");
+		const headers = present(captured).init.headers as Headers;
 		expect(headers.get("Content-Type")).toBe("application/json");
 		expect(headers.get("X-CSRF-Token")).toBe("tok-123");
-		expect(captured!.init.body).toBe(JSON.stringify({ a: 1 }));
+		expect(present(captured).init.body).toBe(JSON.stringify({ a: 1 }));
 	});
 
 	test("GET is not given a CSRF header", async () => {
@@ -65,8 +66,8 @@ describe("api client", () => {
 			query: { p: 1, skip: undefined },
 		});
 		expect(res).toEqual([1, 2, 3]);
-		expect(captured!.url).toBe("/api/y?p=1");
-		const headers = captured!.init.headers as Headers;
+		expect(present(captured).url).toBe("/api/y?p=1");
+		const headers = present(captured).init.headers as Headers;
 		expect(headers.get("X-CSRF-Token")).toBeNull();
 	});
 

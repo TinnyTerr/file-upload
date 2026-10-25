@@ -29,6 +29,7 @@ import { getLogger, queryBackendLogs } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
 import { requirePermission } from "../middleware/deps.ts";
+import { present } from "../present.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { diskUsageBytes, usedStorageBytes } from "../storage/accounting.ts";
 import { safeJoin, storageRoot } from "../storage/paths.ts";
@@ -204,7 +205,7 @@ export function clusterRouter(state: AppState): Router {
 				// best-effort persistence
 			}
 			recordAudit(db, {
-				actor: req.currentUser!.username,
+				actor: present(req.currentUser).username,
 				action: "cluster.token_rotated",
 				target: "cluster_token",
 				ip: clientIp(state, req),
@@ -270,18 +271,20 @@ export function clusterRouter(state: AppState): Router {
 					$name: name,
 					$baseUrl: baseUrl,
 					$token: token,
-					$createdBy: req.currentUser!.id,
+					$createdBy: present(req.currentUser).id,
 					$now: now,
 				},
 			);
-			const node = db.get<ClusterNodeRow>(
-				"SELECT * FROM cluster_nodes WHERE base_url = $baseUrl ORDER BY id DESC LIMIT 1",
-				{
-					$baseUrl: baseUrl,
-				},
-			)!;
+			const node = present(
+				db.get<ClusterNodeRow>(
+					"SELECT * FROM cluster_nodes WHERE base_url = $baseUrl ORDER BY id DESC LIMIT 1",
+					{
+						$baseUrl: baseUrl,
+					},
+				),
+			);
 			recordAudit(db, {
-				actor: req.currentUser!.username,
+				actor: present(req.currentUser).username,
 				action: "cluster.node_linked",
 				target: `node:${node.id}`,
 				ip: clientIp(state, req),
@@ -309,7 +312,7 @@ export function clusterRouter(state: AppState): Router {
 			}
 			db.run("DELETE FROM cluster_nodes WHERE id = $id", { $id: id });
 			recordAudit(db, {
-				actor: req.currentUser!.username,
+				actor: present(req.currentUser).username,
 				action: "cluster.node_unlinked",
 				target: `node:${id}`,
 				ip: clientIp(state, req),
@@ -639,7 +642,8 @@ export function adminClusterRouter(state: AppState): Router {
 			after,
 			limit,
 		});
-		const lastId = events.length > 0 ? events[events.length - 1]!.id : after;
+		const lastId =
+			events.length > 0 ? present(events[events.length - 1]).id : after;
 		res.json({ events, last_id: lastId, count: events.length });
 	});
 

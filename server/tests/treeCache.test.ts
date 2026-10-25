@@ -12,6 +12,7 @@ import {
 } from "../src/crypto/effectiveEncryption.ts";
 import { type DirectoryRow, type FileRow, nowIso } from "../src/db/rows.ts";
 import { createTreeCache, directoryRole } from "../src/directoryTree.ts";
+import { present } from "../src/present.ts";
 import {
 	type Harness,
 	makeDirectory,
@@ -28,9 +29,11 @@ beforeAll(async () => {
 afterAll(() => h.close());
 
 function dir(id: number): DirectoryRow {
-	return h.db.get<DirectoryRow>("SELECT * FROM directories WHERE id = $id", {
-		$id: id,
-	})!;
+	return present(
+		h.db.get<DirectoryRow>("SELECT * FROM directories WHERE id = $id", {
+			$id: id,
+		}),
+	);
 }
 
 describe("tree cache and encryption resolver", () => {
@@ -64,9 +67,11 @@ describe("tree cache and encryption resolver", () => {
 			name: "in-leaf.txt",
 			directoryId: leaf,
 		});
-		const file = h.db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
-			$id: fileId,
-		})!;
+		const file = present(
+			h.db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+				$id: fileId,
+			}),
+		);
 
 		const enc = createEncryptionResolver(h.db);
 		for (const id of [root, mid, leaf]) {

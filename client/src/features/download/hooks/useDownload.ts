@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import type { EncryptionMode } from "@/features/files/types";
 import { base64UrlToBytes } from "@/lib/base64url";
 import { saveBlob } from "@/lib/download";
+import { present } from "@/lib/present";
 import { decryptBlob } from "@/workers/aeadClient";
 import { publicService, rawPath } from "../services/publicService";
 
@@ -57,7 +58,8 @@ export function useDownload(
 					);
 					return;
 				}
-				const keyBytes = keys.sealKey ?? base64UrlToBytes(keys.clientKey!);
+				const keyBytes =
+					keys.sealKey ?? base64UrlToBytes(present(keys.clientKey));
 				setStatus("downloading");
 				setPercent(0);
 				const cipher = await publicService.fetchRawChunked(slug, {

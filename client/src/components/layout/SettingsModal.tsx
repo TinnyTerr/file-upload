@@ -39,6 +39,7 @@ import { WebhooksTab } from "@/features/account/components/WebhooksTab";
 import { accountService } from "@/features/account/services/accountService";
 import { ME_QUERY_KEY, useAuth } from "@/features/auth/hooks/auth";
 import { cn } from "@/lib/cn";
+import { present } from "@/lib/present";
 import { type Theme, useTheme } from "@/providers/ThemeProvider";
 
 // ---------------------------------------------------------------------------
@@ -394,7 +395,7 @@ async function getCroppedBlob(
 	const SIZE = 256;
 	canvas.width = SIZE;
 	canvas.height = SIZE;
-	const ctx = canvas.getContext("2d")!;
+	const ctx = present(canvas.getContext("2d"));
 
 	// Draw circular clip
 	ctx.beginPath();
@@ -612,10 +613,9 @@ function ProfileTab() {
 		}
 	};
 
-	const avatarSrc =
-		user && user.has_avatar
-			? accountService.avatarUrl(user.id, avatarVersion)
-			: null;
+	const avatarSrc = user?.has_avatar
+		? accountService.avatarUrl(user.id, avatarVersion)
+		: null;
 
 	const displaySrc = preview ?? avatarSrc;
 

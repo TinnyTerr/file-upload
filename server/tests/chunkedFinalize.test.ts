@@ -1,3 +1,4 @@
+import { present } from "../src/present.ts";
 /**
  * Finalizing a chunked upload is a minute or more of hashing on a multi-GB
  * file — longer than any proxy holds a request open. So it doesn't run inside
@@ -114,7 +115,7 @@ function finalizer(
 }
 
 function fileCount(db: Db): number {
-	return db.get<{ n: number }>("SELECT COUNT(*) AS n FROM files")!.n;
+	return present(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM files")).n;
 }
 
 describe("chunked upload finalize", () => {
@@ -155,11 +156,13 @@ describe("chunked upload finalize", () => {
 		// so this is what proves the offsets are right — and that the digests,
 		// which are no longer recomputed from a re-read, still describe the
 		// bytes the client sent. Get either wrong and dedup matches wrong blobs.
-		const row = h.db.get<{ sha256: string; size_bytes: number }>(
-			`SELECT b.sha256 AS sha256, f.size_bytes AS size_bytes
+		const row = present(
+			h.db.get<{ sha256: string; size_bytes: number }>(
+				`SELECT b.sha256 AS sha256, f.size_bytes AS size_bytes
          FROM files f JOIN content_blobs b ON b.id = f.blob_id WHERE f.id = $id`,
-			{ $id: settled.body.file_id },
-		)!;
+				{ $id: settled.body.file_id },
+			),
+		);
 		expect(row.size_bytes).toBe(body.length);
 		expect(row.sha256).toBe(createHash("sha256").update(body).digest("hex"));
 
@@ -254,9 +257,11 @@ describe("chunked upload finalize", () => {
 		// the job writes them. `clientIp` reads `req.socket.remoteAddress` last,
 		// which empties on a destroyed socket — so these come from values read
 		// while the socket was still up, not from the stale `req`.
-		const audit = h.db.get<{ ip: string }>(
-			"SELECT ip FROM audit_log WHERE action = 'file.uploaded' ORDER BY id DESC LIMIT 1",
-		)!;
+		const audit = present(
+			h.db.get<{ ip: string }>(
+				"SELECT ip FROM audit_log WHERE action = 'file.uploaded' ORDER BY id DESC LIMIT 1",
+			),
+		);
 		expect(audit.ip).toBeTruthy();
 		expect(String(settled.body.url)).toContain("/file/");
 

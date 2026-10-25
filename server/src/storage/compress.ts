@@ -3,6 +3,7 @@ import { open, stat, unlink } from "node:fs/promises";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import zlib from "node:zlib";
+import { present } from "../present.ts";
 
 /** Mirrors app/storage/compress.py: zstd level 3, skip already-compressed
  * MIME types, zip-bomb guards on decompression. */
@@ -51,7 +52,7 @@ const PROBE_BYTES = 256 * 1024;
 const MIN_SAVING = 0.05;
 
 export function shouldCompress(contentType: string): boolean {
-	const base = contentType.split(";")[0]!.trim().toLowerCase();
+	const base = present(contentType.split(";")[0]).trim().toLowerCase();
 	return !NO_COMPRESS.has(base);
 }
 

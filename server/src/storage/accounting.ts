@@ -6,6 +6,7 @@ import {
 } from "../db/rows.ts";
 import type { Db } from "../db/types.ts";
 import { HttpError } from "../httpError.ts";
+import { present } from "../present.ts";
 import { storageRoot } from "./paths.ts";
 
 /** Mirrors app/storage/accounting.py (cluster peers excluded — cluster port
@@ -29,9 +30,9 @@ export function ensureStorageSettings(db: Db): StorageSettingsRow {
      VALUES (1, $quota, $now, $now)`,
 		{ $quota: DEFAULT_GLOBAL_STORAGE_QUOTA_BYTES, $now: now },
 	);
-	return db.get<StorageSettingsRow>(
-		"SELECT * FROM storage_settings WHERE id = 1",
-	)!;
+	return present(
+		db.get<StorageSettingsRow>("SELECT * FROM storage_settings WHERE id = 1"),
+	);
 }
 
 export function usedStorageBytes(db: Db): number {
@@ -154,7 +155,7 @@ export function setGlobalStorageCap(
 			$now: nowIso(),
 		},
 	);
-	return db.get<StorageSettingsRow>(
-		"SELECT * FROM storage_settings WHERE id = 1",
-	)!;
+	return present(
+		db.get<StorageSettingsRow>("SELECT * FROM storage_settings WHERE id = 1"),
+	);
 }

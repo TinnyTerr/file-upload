@@ -16,6 +16,7 @@ import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
 import { fetchLogged } from "../outbound.ts";
 import { ensurePermissions } from "../permissions.ts";
+import { present } from "../present.ts";
 import { debridRoot, safeJoin } from "../storage/paths.ts";
 import {
 	addTorrent as qbitAddTorrent,
@@ -161,7 +162,7 @@ export async function dispatchTorrent(
 				? await rd.addMagnet(settings.realDebridApiKey, source.magnet)
 				: await rd.addTorrentFile(
 						settings.realDebridApiKey,
-						source.file!.bytes,
+						present(source.file).bytes,
 					);
 			// A freshly added torrent sits in `waiting_files_selection` until told
 			// what to take; a magnet passes through `magnet_conversion` first and
@@ -386,8 +387,8 @@ function planFiles(info: rd.DebridTorrentInfo): PlannedFile[] | null {
 	if (selected.length !== links.length) return null;
 	return links.map((link, i) => ({
 		link,
-		relPath: relPathFor(selected[i]!.path),
-		bytes: selected[i]!.bytes ?? 0,
+		relPath: relPathFor(present(selected[i]).path),
+		bytes: present(selected[i]).bytes ?? 0,
 	}));
 }
 
@@ -569,12 +570,12 @@ export async function fetchDebridFiles(
 	publish(true);
 
 	for (let i = 0; i < links.length; i++) {
-		const link = links[i]!;
+		const link = present(links[i]);
 		// Unrestricted URLs are short-lived, so each one is minted immediately
 		// before its own transfer rather than all up front.
 		const direct = await rd.unrestrict(settings.realDebridApiKey, link);
 		const relPath = plan
-			? plan[i]!.relPath
+			? present(plan[i]).relPath
 			: relPathFor(direct.filename || `part-${i + 1}.bin`);
 		const destination = safeJoin(jobDir, relPath);
 		await streamToFile(direct.download, destination, (delta) => {

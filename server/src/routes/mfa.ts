@@ -8,6 +8,7 @@ import { sealSecret } from "../crypto/secretEncrypt.ts";
 import type { UserRow } from "../db/rows.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
+import { present } from "../present.ts";
 import * as credentials from "../security/credentials.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { verifyPassword } from "../security/passwords.ts";
@@ -37,7 +38,7 @@ export function mfaRouter(state: AppState): Router {
 	const { db } = state;
 
 	router.get("/", requireSession(state), (req, res) => {
-		const userId = req.sessionRow!.user_id;
+		const userId = present(req.sessionRow).user_id;
 		const rows = credentials.listForUser(db, userId);
 		res.json({
 			credentials: rows.map((c) => ({
@@ -62,9 +63,11 @@ export function mfaRouter(state: AppState): Router {
 		res: Response,
 	): Promise<UserRow | null> {
 		const { current_password: currentPassword } = req.body ?? {};
-		const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
-			$id: req.sessionRow!.user_id,
-		})!;
+		const user = present(
+			db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
+				$id: present(req.sessionRow).user_id,
+			}),
+		);
 		const ip = clientIp(state, req);
 		if (!state.lockout.checkLoginAllowed(db, user.username, ip)) {
 			res.status(429).json({ detail: "too many attempts, try again later" });
@@ -108,7 +111,7 @@ export function mfaRouter(state: AppState): Router {
 				res.status(422).json({ detail: "secret and code required" });
 				return;
 			}
-			const sessionKey = `mfa-setup:${req.sessionRow!.id}`;
+			const sessionKey = `mfa-setup:${present(req.sessionRow).id}`;
 			if (!state.lockout.checkLoginAllowed(db, sessionKey, sessionKey)) {
 				res.status(429).json({ detail: "too many attempts, try again later" });
 				return;
@@ -119,7 +122,7 @@ export function mfaRouter(state: AppState): Router {
 				return;
 			}
 			state.lockout.resetSuccess(db, sessionKey);
-			const userId = req.sessionRow!.user_id;
+			const userId = present(req.sessionRow).user_id;
 			const encrypted = sealSecret(
 				getMasterKey(state.settings),
 				Buffer.from(secret),
@@ -169,10 +172,10 @@ export function mfaRouter(state: AppState): Router {
 				.filter((c) => c.kind === "webauthn" && c.webauthn_id);
 			const options = await buildRegistrationOptions(
 				rpContext,
-				req.sessionRow!.id,
+				present(req.sessionRow).id,
 				userHandle,
 				user.username,
-				existing.map((c) => c.webauthn_id!),
+				existing.map((c) => present(c.webauthn_id)),
 			);
 			res.json({ options });
 		}),
@@ -197,7 +200,9 @@ export function mfaRouter(state: AppState): Router {
 				});
 				return;
 			}
-			const expectedChallenge = takeRegistrationChallenge(req.sessionRow!.id);
+			const expectedChallenge = takeRegistrationChallenge(
+				present(req.sessionRow).id,
+			);
 			if (!expectedChallenge) {
 				res
 					.status(400)
@@ -222,7 +227,7 @@ export function mfaRouter(state: AppState): Router {
 				return;
 			}
 			const { credential } = verification.registrationInfo;
-			const userId = req.sessionRow!.user_id;
+			const userId = present(req.sessionRow).user_id;
 			const id = credentials.createWebauthn(
 				db,
 				userId,
@@ -251,10 +256,12 @@ export function mfaRouter(state: AppState): Router {
 		requireCsrf,
 		asyncHandler(async (req, res) => {
 			const { current_password: currentPassword } = req.body ?? {};
-			const sessionRow = req.sessionRow!;
-			const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
-				$id: sessionRow.user_id,
-			})!;
+			const sessionRow = present(req.sessionRow);
+			const user = present(
+				db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
+					$id: sessionRow.user_id,
+				}),
+			);
 			if (
 				typeof currentPassword !== "string" ||
 				!(await verifyPassword(currentPassword, user.password_hash))

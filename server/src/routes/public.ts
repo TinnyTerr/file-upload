@@ -18,6 +18,7 @@ import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requestProtocol } from "../middleware/auth.ts";
 import { BYTES_HEADERS } from "../middleware/securityHeaders.ts";
+import { present } from "../present.ts";
 import { checkLinkAccess } from "../security/accessLock.ts";
 import { COOKIE_NAME } from "../security/sessions.ts";
 import { escapeHtml, sendSpa, siteMetaTags } from "../spa.ts";
@@ -40,7 +41,7 @@ function contentDisposition(
 	type: "attachment" | "inline" = "attachment",
 ): string {
 	const cleaned = [...filename]
-		.filter((c) => c.codePointAt(0)! >= 0x20)
+		.filter((c) => present(c.codePointAt(0)) >= 0x20)
 		.join("");
 	const asciiFallback = cleaned
 		// biome-ignore lint/suspicious/noControlCharactersInRegex: the ASCII range is deliberate -- non-ASCII must degrade to "?" in the legacy filename param.

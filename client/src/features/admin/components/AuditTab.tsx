@@ -32,6 +32,7 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { errorMessage } from "@/config/api";
+import { present } from "@/lib/present";
 import { formatDateTime } from "@/lib/time";
 import { useAudit, useClusterAudit } from "../hooks/useAdminData";
 import { adminService } from "../services/adminService";
@@ -228,7 +229,7 @@ export function AuditTab() {
 							</TableHeader>
 							<TableBody>
 								{isLocal
-									? local.data!.entries.map((e) => (
+									? present(local.data).entries.map((e) => (
 											<TableRow key={e.id}>
 												<TableCell className="font-mono text-xs text-muted-foreground">
 													{e.id}
@@ -250,7 +251,7 @@ export function AuditTab() {
 												</TableCell>
 											</TableRow>
 										))
-									: cluster.data!.entries.map((e) => (
+									: present(cluster.data).entries.map((e) => (
 											<TableRow key={`${e.node_id}-${e.id}`}>
 												<TableCell className="font-mono text-xs text-muted-foreground">
 													{e.id}

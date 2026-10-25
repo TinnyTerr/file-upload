@@ -19,6 +19,7 @@ import {
 	requirePermission,
 } from "../middleware/deps.ts";
 import { ensurePermissions, hasPermission } from "../permissions.ts";
+import { present } from "../present.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import {
 	consumeAuthCode,
@@ -187,7 +188,7 @@ export function oauthRouter(state: AppState): Router {
 		requireCsrf,
 		requirePermission(state, "can_use_api_keys"),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const { name, redirect_uris, scopes, confidential } = req.body ?? {};
 			if (typeof name !== "string" || !name.trim() || name.length > 100) {
 				res.status(400).json({ detail: "name required (1-100 chars)" });
@@ -230,10 +231,12 @@ export function oauthRouter(state: AppState): Router {
 					return;
 				}
 			}
-			const activeCount = db.get<CountRow>(
-				"SELECT COUNT(*) as n FROM oauth_clients WHERE owner_id = $id AND active = 1",
-				{ $id: user.id },
-			)!.n;
+			const activeCount = present(
+				db.get<CountRow>(
+					"SELECT COUNT(*) as n FROM oauth_clients WHERE owner_id = $id AND active = 1",
+					{ $id: user.id },
+				),
+			).n;
 			if (activeCount >= MAX_CLIENTS_PER_USER) {
 				res.status(429).json({
 					detail: `app limit reached (${MAX_CLIENTS_PER_USER}); delete one first`,
@@ -259,7 +262,7 @@ export function oauthRouter(state: AppState): Router {
 					$now: nowIso(),
 				},
 			);
-			const client = findClient(db, clientId)!;
+			const client = present(findClient(db, clientId));
 			recordAudit(db, {
 				actor: user.username,
 				action: "oauth.client_created",
@@ -271,7 +274,7 @@ export function oauthRouter(state: AppState): Router {
 	);
 
 	router.get("/clients", requireActiveUser(state), (req, res) => {
-		const user = req.currentUser!;
+		const user = present(req.currentUser);
 		const clients = db.all<OauthClientRow>(
 			"SELECT * FROM oauth_clients WHERE owner_id = $id AND active = 1 ORDER BY id ASC",
 			{ $id: user.id },
@@ -285,7 +288,7 @@ export function oauthRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const client = db.get<OauthClientRow>(
 				"SELECT * FROM oauth_clients WHERE client_id = $clientId",
 				{ $clientId: req.params.clientId },
@@ -330,7 +333,7 @@ export function oauthRouter(state: AppState): Router {
 			const owner = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 				$id: parsed.client.owner_id,
 			});
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const perm = ensurePermissions(db, user.id, {
 				master: user.role === "master",
 			});
@@ -368,7 +371,7 @@ export function oauthRouter(state: AppState): Router {
 			try {
 				const body = (req.body ?? {}) as Record<string, unknown>;
 				const parsed = parseAuthorizeRequest(state, body);
-				const user = req.currentUser!;
+				const user = present(req.currentUser);
 
 				if (body.approve !== true) {
 					recordAudit(db, {
@@ -432,7 +435,7 @@ export function oauthRouter(state: AppState): Router {
 	// ---- The user's own view of what they have authorized ----
 
 	router.get("/authorizations", requireActiveUser(state), (req, res) => {
-		const user = req.currentUser!;
+		const user = present(req.currentUser);
 		const rows = db.all<OauthTokenRow>(
 			`SELECT * FROM oauth_tokens
          WHERE user_id = $id AND revoked_at IS NULL AND expires_at > $now
@@ -486,7 +489,7 @@ export function oauthRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			db.run(
 				`UPDATE oauth_tokens SET revoked_at = $now
            WHERE user_id = $userId AND client_id = $clientId AND revoked_at IS NULL`,
@@ -654,7 +657,7 @@ export function oauthPublicRouter(state: AppState): Router {
 
 	/** Minimal identity endpoint -- the `profile` scope's entire payload. */
 	router.get("/userinfo", requireOauthScope(state, "profile"), (req, res) => {
-		const user = req.currentUser!;
+		const user = present(req.currentUser);
 		res.json({
 			sub: String(user.id),
 			username: user.username,

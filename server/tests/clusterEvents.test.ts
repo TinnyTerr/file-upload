@@ -1,3 +1,4 @@
+import { present } from "../src/present.ts";
 /**
  * Cluster event pipeline (redesign Phase 1, §5.12 — B1, B2, B3).
  *
@@ -85,7 +86,10 @@ describe("EventBus.recent (B2)", () => {
 		expect(page.map((e) => e.id)).toEqual([1, 2, 3, 4]);
 
 		// A consumer advancing its cursor to last_id must not skip anything.
-		const next = bus.recent({ afterId: page[page.length - 1]!.id, limit: 4 });
+		const next = bus.recent({
+			afterId: present(page[page.length - 1]).id,
+			limit: 4,
+		});
 		expect(next.map((e) => e.id)).toEqual([5, 6, 7, 8]);
 	});
 });
@@ -96,10 +100,10 @@ describe("GET /api/admin/cluster/events (B3)", () => {
 		try {
 			const [a, b] = cluster.nodes;
 			for (let i = 0; i < 3; i++) {
-				a!.state.eventBus.publish({ action: `a${i}`, actor: "tester" });
+				present(a).state.eventBus.publish({ action: `a${i}`, actor: "tester" });
 			}
 
-			const res = await a!.asPeer(
+			const res = await present(a).asPeer(
 				"/api/admin/cluster/events?after=0&limit=100",
 				{
 					method: "GET",
@@ -113,7 +117,7 @@ describe("GET /api/admin/cluster/events (B3)", () => {
 
 			// b's token is the same shared cluster token today, but a node with no
 			// token must still be refused.
-			const unauthorized = await b!.request(
+			const unauthorized = await present(b).request(
 				"/api/admin/cluster/events?after=0",
 			);
 			expect(unauthorized.status).toBe(401);

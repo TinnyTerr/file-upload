@@ -1,6 +1,7 @@
 import type { DirectoryRow, UserRow } from "./db/rows.ts";
 import type { Db } from "./db/types.ts";
 import { HttpError } from "./httpError.ts";
+import { present } from "./present.ts";
 
 interface RoleRow {
 	role: string;
@@ -92,7 +93,7 @@ export function subtree(db: Db, directoryId: number): DirectoryRow[] {
 	const out: DirectoryRow[] = [root];
 	const seen = new Set<number>([root.id]);
 	for (let i = 0; i < out.length; i++) {
-		for (const child of childDirectories(db, out[i]!.id)) {
+		for (const child of childDirectories(db, present(out[i]).id)) {
 			if (seen.has(child.id)) continue; // cycle guard; see ancestorChain
 			seen.add(child.id);
 			out.push(child);

@@ -56,6 +56,7 @@ import {
 } from "../middleware/deps.ts";
 import { BYTES_HEADERS } from "../middleware/securityHeaders.ts";
 import { ensurePermissions } from "../permissions.ts";
+import { present } from "../present.ts";
 import {
 	type AccessCheck,
 	checkLinkAccess,
@@ -126,7 +127,7 @@ function resolveActiveDirLink(db: Db, slug: string): DirectoryLinkRow | null {
 		"SELECT * FROM directory_links WHERE slug = $slug",
 		{ $slug: slug },
 	);
-	if (!link || !link.active) return null;
+	if (!link?.active) return null;
 	const now = new Date().toISOString();
 	if (link.expires_at !== null && link.expires_at <= now) return null;
 	if (link.max_uses !== null && link.use_count >= link.max_uses) return null;
@@ -331,14 +332,18 @@ function publicSubdirectories(
 		return {
 			id: sub.id,
 			title: sub.title,
-			file_count: db.get<FileCountRow>(
-				"SELECT COUNT(*) as n FROM files WHERE directory_id = $id",
-				{ $id: sub.id },
-			)!.n,
-			subdirectory_count: db.get<FileCountRow>(
-				"SELECT COUNT(*) as n FROM directories WHERE parent_directory_id = $id",
-				{ $id: sub.id },
-			)!.n,
+			file_count: present(
+				db.get<FileCountRow>(
+					"SELECT COUNT(*) as n FROM files WHERE directory_id = $id",
+					{ $id: sub.id },
+				),
+			).n,
+			subdirectory_count: present(
+				db.get<FileCountRow>(
+					"SELECT COUNT(*) as n FROM directories WHERE parent_directory_id = $id",
+					{ $id: sub.id },
+				),
+			).n,
 			total_bytes: sub.total_bytes,
 			encryption_mode: eff.mode,
 			password_locked: eff.passwordLocked,
@@ -556,7 +561,7 @@ export function directoriesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const body = req.body ?? {};
 			let encryptionMode = body.encryption_mode || "none";
 			if (!["none", "server", "client"].includes(encryptionMode)) {
@@ -707,9 +712,11 @@ export function directoriesRouter(state: AppState): Router {
 					$now: nowIso(),
 				},
 			);
-			const d = db.get<DirectoryRow>(
-				"SELECT * FROM directories WHERE id = last_insert_rowid()",
-			)!;
+			const d = present(
+				db.get<DirectoryRow>(
+					"SELECT * FROM directories WHERE id = last_insert_rowid()",
+				),
+			);
 			// Default DirectoryLink so /d/{slug} resolves via the link system, mirrors
 			// the directory-links auto-create noted in CLAUDE.md's "Share links (folders)".
 			db.run(
@@ -854,7 +861,7 @@ export function directoriesRouter(state: AppState): Router {
 		"/directories",
 		requireScopeOrSession(state, "directories:read"),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 
 			const scope = String(req.query.scope ?? "level");
 			if (scope !== "level" && scope !== "subtree" && scope !== "all") {
@@ -920,9 +927,11 @@ export function directoriesRouter(state: AppState): Router {
 				// subtree() is "at or below", so it hands back the bounding folder
 				// itself -- drop it, or the folder you asked about turns up as one of
 				// its own descendants (and its files get counted twice below).
-				dirs = subtree(db, parent!.id).filter((d) => d.id !== parent!.id);
+				dirs = subtree(db, present(parent).id).filter(
+					(d) => d.id !== present(parent).id,
+				);
 				// The bounding folder's own files do belong to its subtree, though.
-				files = wantFiles ? filesUnder([parent!, ...dirs], q) : [];
+				files = wantFiles ? filesUnder([present(parent), ...dirs], q) : [];
 			} else {
 				dirs = parent
 					? db.all<DirectoryRow>(
@@ -986,7 +995,7 @@ export function directoriesRouter(state: AppState): Router {
 
 			res.json({
 				directory: parent
-					? serializeDirectories(state, req, [parent], user)[0]!
+					? present(serializeDirectories(state, req, [parent], user)[0])
 					: null,
 				breadcrumbs: parent
 					? [...ancestorChain(db, parent.id)]
@@ -997,11 +1006,16 @@ export function directoriesRouter(state: AppState): Router {
 				directories: serializeDirectories(state, req, pagedDirs, user).map(
 					(d, i) =>
 						pathOf
-							? { ...d, path: pathOf(pagedDirs[i]!.parent_directory_id) }
+							? {
+									...d,
+									path: pathOf(present(pagedDirs[i]).parent_directory_id),
+								}
 							: d,
 				),
 				files: serializeFiles(state, req, pagedFiles).map((f, i) =>
-					pathOf ? { ...f, path: pathOf(pagedFiles[i]!.directory_id) } : f,
+					pathOf
+						? { ...f, path: pathOf(present(pagedFiles[i]).directory_id) }
+						: f,
 				),
 				scope,
 				query: q || null,
@@ -1020,7 +1034,7 @@ export function directoriesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const d = getDirectory(db, Number(req.params.dirId));
 			if (!d) {
 				res.status(404).json({ detail: "not found" });
@@ -1068,8 +1082,8 @@ export function directoriesRouter(state: AppState): Router {
 				target: `directory:${d.id}`,
 				ip: clientIp(state, req),
 			});
-			const updated = getDirectory(db, d.id)!;
-			res.json(serializeDirectories(state, req, [updated], user)[0]!);
+			const updated = present(getDirectory(db, d.id));
+			res.json(present(serializeDirectories(state, req, [updated], user)[0]));
 		},
 	);
 
@@ -1080,7 +1094,7 @@ export function directoriesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const d = getDirectory(db, Number(req.params.dirId));
 			if (!d) {
 				res.status(404).json({ detail: "not found" });
@@ -1185,8 +1199,8 @@ export function directoriesRouter(state: AppState): Router {
 				target: `directory:${d.id}->${target ? `directory:${target.id}` : "root"}`,
 				ip: clientIp(state, req),
 			});
-			const updated = getDirectory(db, d.id)!;
-			res.json(serializeDirectories(state, req, [updated], user)[0]!);
+			const updated = present(getDirectory(db, d.id));
+			res.json(present(serializeDirectories(state, req, [updated], user)[0]));
 		},
 	);
 
@@ -1205,7 +1219,7 @@ export function directoriesRouter(state: AppState): Router {
 		requireCsrf,
 		requirePermission(state, "can_create_directories"),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const sourceDir = getDirectory(db, Number(req.params.dirId));
 			if (!sourceDir) {
 				res.status(404).json({ detail: "not found" });
@@ -1389,9 +1403,11 @@ export function directoriesRouter(state: AppState): Router {
 						$now: nowIso(),
 					},
 				);
-				const copy = db.get<DirectoryRow>(
-					"SELECT * FROM directories WHERE id = last_insert_rowid()",
-				)!;
+				const copy = present(
+					db.get<DirectoryRow>(
+						"SELECT * FROM directories WHERE id = last_insert_rowid()",
+					),
+				);
 				db.run(
 					"INSERT INTO directory_links (directory_id, slug, use_count, active, created_at) VALUES ($dirId, $slug, 0, 1, $now)",
 					{ $dirId: copy.id, $slug: slug, $now: nowIso() },
@@ -1489,7 +1505,7 @@ export function directoriesRouter(state: AppState): Router {
 			log.info(
 				`directory copied source_directory_id=${sourceDir.id} copy_directory_id=${newDir.id} owner_id=${user.id} copied_files=${copiedFiles}`,
 			);
-			res.json(serializeDirectories(state, req, [newDir], user)[0]!);
+			res.json(present(serializeDirectories(state, req, [newDir], user)[0]));
 		},
 	);
 
@@ -1509,7 +1525,7 @@ export function directoriesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const d = getDirectory(db, Number(req.params.dirId));
 			if (!d) {
 				res.status(404).json({ detail: "not found" });
@@ -1571,7 +1587,7 @@ export function directoriesRouter(state: AppState): Router {
 			let accessKey: string | null = null;
 			let fileKey: Buffer | null = null;
 			if (adopt) {
-				next = resolveDirectoryEncryption(db, parent!);
+				next = resolveDirectoryEncryption(db, present(parent));
 				overridden = 0;
 				accessKey = recoverAccessSecret(masterKey, next);
 				if (next.mode === "server") {
@@ -1678,9 +1694,9 @@ export function directoriesRouter(state: AppState): Router {
 			log.info(
 				`directory encryption changed directory_id=${d.id} mode=${next.mode} inherited=${overridden === 0} files_reencrypted=${rewritten}`,
 			);
-			const updated = getDirectory(db, d.id)!;
+			const updated = present(getDirectory(db, d.id));
 			res.json({
-				...serializeDirectories(state, req, [updated], user)[0]!,
+				...present(serializeDirectories(state, req, [updated], user)[0]),
 				access_key: accessKey,
 				files_reencrypted: rewritten,
 			});
@@ -1696,7 +1712,7 @@ export function directoriesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const d = getDirectory(db, Number(req.params.dirId));
 			if (!d) {
 				res.status(404).json({ detail: "not found" });
@@ -1784,7 +1800,7 @@ export function directoriesRouter(state: AppState): Router {
 		"/directories/:dirId(\\d+)/files",
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const d = db.get<DirectoryRow>(
 				"SELECT * FROM directories WHERE id = $id",
 				{ $id: req.params.dirId },
@@ -1827,7 +1843,7 @@ export function directoriesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const d = db.get<DirectoryRow>(
 				"SELECT * FROM directories WHERE id = $id",
 				{ $id: req.params.dirId },
@@ -1884,7 +1900,7 @@ export function directoriesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const d = db.get<DirectoryRow>(
 				"SELECT * FROM directories WHERE id = $id",
 				{ $id: req.params.dirId },
@@ -1921,9 +1937,11 @@ export function directoriesRouter(state: AppState): Router {
            VALUES ($dir, $user, $invitedBy, 'editor', $now)`,
 					{ $dir: d.id, $user: target.id, $invitedBy: user.id, $now: nowIso() },
 				);
-				existing = db.get<{ id: number; role: string }>(
-					"SELECT id, role FROM directory_collaborators WHERE id = last_insert_rowid()",
-				)!;
+				existing = present(
+					db.get<{ id: number; role: string }>(
+						"SELECT id, role FROM directory_collaborators WHERE id = last_insert_rowid()",
+					),
+				);
 			}
 			recordAudit(db, {
 				actor: user.username,
@@ -1947,7 +1965,7 @@ export function directoriesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const d = db.get<DirectoryRow>(
 				"SELECT * FROM directories WHERE id = $id",
 				{ $id: req.params.dirId },
@@ -1987,7 +2005,7 @@ export function directoriesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const d = db.get<DirectoryRow>(
 				"SELECT * FROM directories WHERE id = $id",
 				{ $id: req.params.dirId },
@@ -2068,7 +2086,7 @@ export function directoriesRouter(state: AppState): Router {
 		"/directories/:dirId(\\d+)/links",
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const d = db.get<DirectoryRow>(
 				"SELECT * FROM directories WHERE id = $id",
 				{ $id: req.params.dirId },
@@ -2097,7 +2115,7 @@ export function directoriesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const perm = ensurePermissions(db, user.id, {
 				master: user.role === "master",
 			});
@@ -2133,9 +2151,11 @@ export function directoriesRouter(state: AppState): Router {
 					$now: nowIso(),
 				},
 			);
-			const lk = db.get<DirectoryLinkRow>(
-				"SELECT * FROM directory_links WHERE id = last_insert_rowid()",
-			)!;
+			const lk = present(
+				db.get<DirectoryLinkRow>(
+					"SELECT * FROM directory_links WHERE id = last_insert_rowid()",
+				),
+			);
 			recordAudit(db, {
 				actor: user.username,
 				action: "directory_link.created",
@@ -2152,7 +2172,7 @@ export function directoriesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const perm = ensurePermissions(db, user.id, {
 				master: user.role === "master",
 			});
@@ -2216,10 +2236,12 @@ export function directoriesRouter(state: AppState): Router {
 				target: `directory_link:${lk.id}`,
 				ip: clientIp(state, req),
 			});
-			const updated = db.get<DirectoryLinkRow>(
-				"SELECT * FROM directory_links WHERE id = $id",
-				{ $id: lk.id },
-			)!;
+			const updated = present(
+				db.get<DirectoryLinkRow>(
+					"SELECT * FROM directory_links WHERE id = $id",
+					{ $id: lk.id },
+				),
+			);
 			res.json(serializeDirLink(state, updated, req));
 		},
 	);
@@ -2230,7 +2252,7 @@ export function directoriesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const perm = ensurePermissions(db, user.id, {
 				master: user.role === "master",
 			});
@@ -2293,7 +2315,7 @@ export function adminDirectoriesRouter(state: AppState): Router {
 		res.json({
 			directories: rows.map((row, i) => ({
 				...row,
-				directory_path: pathOf(dirs[i]!.parent_directory_id),
+				directory_path: pathOf(present(dirs[i]).parent_directory_id),
 			})),
 		});
 	});
@@ -2481,7 +2503,7 @@ export function publicDirectoriesRouter(state: AppState): Router {
 				};
 				const group = previewGroup(f.content_type, f.original_filename);
 				if (group === "archives") row.preview = await archivePreview(db, f);
-				groups[group]!.push(row);
+				present(groups[group]).push(row);
 			}
 			res.json({
 				id: d.id,
@@ -2503,7 +2525,7 @@ export function publicDirectoriesRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const resolved = resolveDirectory(db, req.params.slug);
 			if (!resolved) {
 				res.status(404).json({ detail: "not found" });
@@ -2653,9 +2675,11 @@ export function publicDirectoriesRouter(state: AppState): Router {
 						$now: nowIso(),
 					},
 				);
-				const copy = db.get<DirectoryRow>(
-					"SELECT * FROM directories WHERE id = last_insert_rowid()",
-				)!;
+				const copy = present(
+					db.get<DirectoryRow>(
+						"SELECT * FROM directories WHERE id = last_insert_rowid()",
+					),
+				);
 				db.run(
 					"INSERT INTO directory_links (directory_id, slug, use_count, active, created_at) VALUES ($dirId, $slug, 0, 1, $now)",
 					{ $dirId: copy.id, $slug: slug, $now: nowIso() },
@@ -2715,9 +2739,11 @@ export function publicDirectoriesRouter(state: AppState): Router {
 							$now: nowIso(),
 						},
 					);
-					const copied = db.get<FileRow>(
-						"SELECT * FROM files WHERE id = last_insert_rowid()",
-					)!;
+					const copied = present(
+						db.get<FileRow>(
+							"SELECT * FROM files WHERE id = last_insert_rowid()",
+						),
+					);
 					db.run(
 						"INSERT INTO links (file_id, slug, use_count, active, created_at) VALUES ($fid, $slug, 0, 1, $now)",
 						{

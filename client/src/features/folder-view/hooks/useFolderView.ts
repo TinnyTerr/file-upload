@@ -6,6 +6,7 @@ import {
 	rawPath,
 } from "@/features/download/services/publicService";
 import { saveBlob } from "@/lib/download";
+import { present } from "@/lib/present";
 import { createZip } from "@/lib/zip";
 import { decryptBlob } from "@/workers/aeadClient";
 import {
@@ -18,7 +19,7 @@ import type { FolderKeys } from "./useFolderKeys";
 export function useDirInfo(slug: string | undefined, dir: number | null) {
 	return useQuery({
 		queryKey: ["public", "dir", slug, dir ?? "entry"],
-		queryFn: () => publicDirService.info(slug!, dir),
+		queryFn: () => publicDirService.info(present(slug), dir),
 		enabled: !!slug,
 		retry: false,
 	});

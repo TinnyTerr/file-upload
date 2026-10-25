@@ -2,6 +2,7 @@ import { Folder } from "lucide-react";
 import { UsageMeter } from "@/features/files/components/UsageMeter";
 import { iconForType } from "@/features/files/lib/fileMeta";
 import { formatBytes } from "@/lib/bytes";
+import { present } from "@/lib/present";
 import type { TreeProgress } from "../../hooks/useDriveUpload";
 import { useExplorer } from "../../hooks/useExplorer";
 import { itemName } from "../../lib/items";
@@ -31,7 +32,7 @@ export function DetailsPane({
 
 	const header = (() => {
 		if (selected.length === 1) {
-			const item = selected[0]!;
+			const item = present(selected[0]);
 			return (
 				<div className="flex items-center gap-3 border-b border-border px-3 py-3">
 					<ItemThumb item={item} size="lg" />
@@ -75,7 +76,7 @@ export function DetailsPane({
 
 	const body = () => {
 		if (selected.length === 1) {
-			const item = selected[0]!;
+			const item = present(selected[0]);
 			return item.kind === "folder" ? (
 				<FolderDetails dir={item.dir} />
 			) : (

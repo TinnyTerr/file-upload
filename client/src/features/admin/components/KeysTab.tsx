@@ -27,6 +27,7 @@ import { NewKeyModal } from "@/features/apikeys/components/NewKeyModal";
 import { useApiKeys } from "@/features/apikeys/hooks/useApiKeys";
 import type { AdminApiKey, NewApiKey } from "@/features/apikeys/types";
 import { cn } from "@/lib/cn";
+import { present } from "@/lib/present";
 import { formatDate, relativeTime } from "@/lib/time";
 import { useAdminKeys } from "../hooks/useAdminData";
 import { useBulk } from "../hooks/useBulk";
@@ -161,7 +162,7 @@ export function KeysTab() {
 		for (const k of filtered) {
 			const u = k.owner_username;
 			if (!map.has(u)) map.set(u, []);
-			map.get(u)!.push(k);
+			present(map.get(u)).push(k);
 		}
 		return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b));
 	}, [keys.data, filter, status]);

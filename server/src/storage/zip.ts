@@ -9,6 +9,7 @@ import { openBox } from "../crypto/secretbox.ts";
 import type { FileRow } from "../db/rows.ts";
 import type { Db } from "../db/types.ts";
 import { HttpError } from "../httpError.ts";
+import { present } from "../present.ts";
 import { decompressGuarded, decompressStream } from "./compress.ts";
 import { safeJoin, storageRoot } from "./paths.ts";
 
@@ -18,7 +19,7 @@ export function safeArcname(name: string, seen: Set<string>): string {
 	let base = name.replace(/\\/g, "/").split("/").pop() ?? "";
 	base = base
 		.split("")
-		.filter((c) => c.codePointAt(0)! >= 0x20)
+		.filter((c) => present(c.codePointAt(0)) >= 0x20)
 		.join("")
 		.trim();
 	// Separators are already stripped, so a bare "." / ".." can't traverse --
@@ -51,7 +52,7 @@ export function safeArcsegment(name: string): string {
 	const cleaned = name
 		.replace(/[\\/]/g, "_")
 		.split("")
-		.filter((c) => c.codePointAt(0)! >= 0x20)
+		.filter((c) => present(c.codePointAt(0)) >= 0x20)
 		.join("")
 		.trim();
 	if (!cleaned || cleaned === "." || cleaned === "..") return "folder";

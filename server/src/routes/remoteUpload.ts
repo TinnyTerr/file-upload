@@ -1,9 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { createWriteStream, mkdirSync, unlinkSync } from "node:fs";
-import { createConnection, isIPv4, isIPv6 } from "node:net";
+import { isIPv4, isIPv6 } from "node:net";
 import { join } from "node:path";
-import { connect as tlsConnect } from "node:tls";
 import { URL } from "node:url";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
@@ -21,12 +20,13 @@ import { clientIp, requireSession } from "../middleware/auth.ts";
 import { requireActiveUser, requirePermission } from "../middleware/deps.ts";
 import { beginOutbound } from "../outbound.ts";
 import { ensurePermissions } from "../permissions.ts";
+import { present } from "../present.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { storageRoot } from "../storage/paths.ts";
 import { checkUploadHalt, finalizeStoredFile } from "./files.ts";
 
 const log = getLogger("app.routes.remote_upload");
-const CHUNK = 256 * 1024;
+const _CHUNK = 256 * 1024;
 // The most response head (status line + headers) we will accumulate while
 // looking for the blank line that ends it. The body never sits in memory.
 const HEADER_ALLOWANCE = 64 * 1024;
@@ -37,11 +37,11 @@ function isPublicIp(value: string): boolean {
 		const parts = value.split(".").map(Number);
 		const [a, b] = parts;
 		if (a === 10) return false;
-		if (a === 172 && b! >= 16 && b! <= 31) return false;
+		if (a === 172 && present(b) >= 16 && present(b) <= 31) return false;
 		if (a === 192 && b === 168) return false;
 		if (a === 127) return false;
 		if (a === 169 && b === 254) return false;
-		if (a! >= 224) return false; // multicast/reserved
+		if (present(a) >= 224) return false; // multicast/reserved
 		if (value === "0.0.0.0") return false;
 		return true;
 	}
@@ -79,7 +79,7 @@ export async function resolvePublicAddress(hostname: string): Promise<string> {
 				"remote host resolves to a private or local address",
 			);
 	}
-	return addresses[0]!.address;
+	return present(addresses[0]).address;
 }
 
 export function validatePublicHttpUrl(url: string): URL {
@@ -131,11 +131,12 @@ export class ChunkedDecoder {
 					if (this.buf.length - off > 1024) throw malformedChunked();
 					break;
 				}
-				const sizeLine = this.buf
-					.subarray(off, lineEnd)
-					.toString("latin1")
-					.split(";")[0]!
-					.trim();
+				const sizeLine =
+					this.buf
+						.subarray(off, lineEnd)
+						.toString("latin1")
+						.split(";")[0]
+						?.trim() ?? "";
 				if (!/^[0-9a-fA-F]{1,16}$/.test(sizeLine)) throw malformedChunked();
 				const size = Number.parseInt(sizeLine, 16);
 				off = lineEnd + 2;
@@ -202,10 +203,10 @@ async function downloadRemoteUrl(
 	for (let redirect = 0; redirect < 6; redirect++) {
 		const parsed = validatePublicHttpUrl(current);
 		const host = parsed.hostname;
-		const port = Number(
+		const _port = Number(
 			parsed.port || (parsed.protocol === "https:" ? 443 : 80),
 		);
-		const ip = await resolvePublicAddress(host);
+		const _ip = await resolvePublicAddress(host);
 
 		const target = parsed.pathname + parsed.search;
 		const call = beginOutbound("remote-upload", "GET", current);
@@ -214,7 +215,7 @@ async function downloadRemoteUrl(
 			| { redirect: string; status: number }
 		>((resolve, reject) => {
 			const requestLine = `GET ${target} HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: fileupload-remote-fetch/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n`;
-			const onSocket = (
+			const _onSocket = (
 				socket: import("node:net").Socket | import("node:tls").TLSSocket,
 			) => {
 				// Phase 1 accumulates only the response head; phase 2 streams the
@@ -263,9 +264,9 @@ async function downloadRemoteUrl(
 							fail(new HttpError(413, "remote file exceeds max file size"));
 							return;
 						}
-						if (!out!.write(piece)) {
+						if (!present(out).write(piece)) {
 							socket.pause();
-							out!.once("drain", () => socket.resume());
+							present(out).once("drain", () => socket.resume());
 						}
 					}
 				};
@@ -289,7 +290,7 @@ async function downloadRemoteUrl(
 						headerDone = true;
 						const headerText = head.subarray(0, headerEnd).toString("latin1");
 						const [statusLine, ...headerLines] = headerText.split("\r\n");
-						status = Number(statusLine!.split(" ")[1]);
+						status = Number(present(statusLine).split(" ")[1]);
 						headers = {};
 						for (const line of headerLines) {
 							const idx = line.indexOf(":");
@@ -391,7 +392,8 @@ async function downloadRemoteUrl(
 		}
 		const ctype = result.headers["content-type"];
 		const contentType =
-			(ctype ? ctype.split(";")[0]!.trim() : "") || "application/octet-stream";
+			(ctype ? present(ctype.split(";")[0]).trim() : "") ||
+			"application/octet-stream";
 		return {
 			filename: filenameFromUrl(parsed, "remote-upload"),
 			contentType,
@@ -413,7 +415,7 @@ export function remoteUploadRouter(state: AppState): Router {
 		requireCsrf,
 		requirePermission(state, "can_upload"),
 		asyncHandler(async (req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			checkUploadHalt(state, user.id);
 			const body = req.body ?? {};
 			const url = String(body.url ?? "");
@@ -450,9 +452,11 @@ export function remoteUploadRouter(state: AppState): Router {
 					$now: nowIso(),
 				},
 			);
-			const job = db.get<RemoteUploadJobRow>(
-				"SELECT * FROM remote_upload_jobs WHERE id = last_insert_rowid()",
-			)!;
+			const job = present(
+				db.get<RemoteUploadJobRow>(
+					"SELECT * FROM remote_upload_jobs WHERE id = last_insert_rowid()",
+				),
+			);
 
 			try {
 				// Validated here (inside the try) rather than before job creation so a
@@ -554,7 +558,7 @@ export function remoteUploadRouter(state: AppState): Router {
 	);
 
 	router.get("/remote-upload/:jobId", requireActiveUser(state), (req, res) => {
-		const user = req.currentUser!;
+		const user = present(req.currentUser);
 		const job = db.get<RemoteUploadJobRow>(
 			"SELECT * FROM remote_upload_jobs WHERE id = $id",
 			{ $id: req.params.jobId },

@@ -1,3 +1,4 @@
+import { present } from "../present.ts";
 /**
  * Re-encrypting stored bytes in place.
  *
@@ -79,7 +80,7 @@ export function filesFollowingDirectory(
 	const stack: DirectoryRow[] = [dir];
 	const seen = new Set<number>([dir.id]);
 	while (stack.length) {
-		const node = stack.pop()!;
+		const node = present(stack.pop());
 		for (const f of db.all<FileRow>(
 			"SELECT * FROM files WHERE directory_id = $id",
 			{ $id: node.id },
@@ -110,7 +111,7 @@ export function directoriesFollowingDirectory(
 	const stack: DirectoryRow[] = [dir];
 	const seen = new Set<number>([dir.id]);
 	while (stack.length) {
-		for (const child of childDirectories(db, stack.pop()!.id)) {
+		for (const child of childDirectories(db, present(stack.pop()).id)) {
 			if (child.encryption_overridden || seen.has(child.id)) continue;
 			seen.add(child.id);
 			out.push(child);

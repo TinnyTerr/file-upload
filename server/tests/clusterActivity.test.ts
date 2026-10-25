@@ -1,3 +1,4 @@
+import { present } from "../src/present.ts";
 /**
  * Live cluster activity tracer. The property that matters is the cost model:
  * nothing is built or buffered unless a watcher is subscribed.
@@ -58,7 +59,7 @@ describe("activity tracer", () => {
 			ActivityMessage,
 			{ type: "snapshot" }
 		>;
-		const j = snap.jobs.find((x) => x.id === "j")!;
+		const j = present(snap.jobs.find((x) => x.id === "j"));
 		expect(j.lastOk).toBe(true);
 		expect(j.running).toBe(false);
 		expect(j.lastMs).not.toBeNull();

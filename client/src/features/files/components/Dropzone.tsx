@@ -23,7 +23,7 @@ export function Dropzone({
 	const dragDepth = useRef(0);
 
 	const pick = (list: FileList | null) => {
-		if (!list || !list.length) return;
+		if (!list?.length) return;
 		onFiles(Array.from(list), false);
 	};
 

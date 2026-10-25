@@ -54,3 +54,7 @@ desktop.ini
 # --- Claude Code local state ------------------------------------------------
 .claude/settings.local.json
 .claude/worktrees/
+
+# --- Claude Code guides (kept local, not in the repo) ---
+CLAUDE.md
+**/CLAUDE.md

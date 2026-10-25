@@ -7,6 +7,7 @@ import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
 import { requireActiveUser } from "../middleware/deps.ts";
 import { ensurePermissions } from "../permissions.ts";
+import { present } from "../present.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { hashPassword, verifyPassword } from "../security/passwords.ts";
 import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
@@ -145,7 +146,7 @@ export function accountRouter(state: AppState): Router {
 				res.status(400).json({ detail: "new username is required" });
 				return;
 			}
-			const sessionRow = req.sessionRow!;
+			const sessionRow = present(req.sessionRow);
 			const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 				$id: sessionRow.user_id,
 			});
@@ -190,7 +191,7 @@ export function accountRouter(state: AppState): Router {
 	);
 
 	router.get("/me", requireActiveUser(state), (req, res) => {
-		const user = req.currentUser!;
+		const user = present(req.currentUser);
 		const perm = ensurePermissions(db, user.id, {
 			master: user.role === "master",
 		});
@@ -237,7 +238,9 @@ export function accountRouter(state: AppState): Router {
 
 		bb.on("file", (_name, stream, info) => {
 			sawFile = true;
-			const ct = (info.mimeType || "").toLowerCase().split(";")[0]!.trim();
+			const ct = present(
+				(info.mimeType || "").toLowerCase().split(";")[0],
+			).trim();
 			if (!ALLOWED_AVATAR_TYPES.has(ct)) {
 				handled = true;
 				res.status(415).json({
@@ -276,7 +279,7 @@ export function accountRouter(state: AppState): Router {
 						.json({ detail: "file does not match a supported image format" });
 					return;
 				}
-				const sessionRow = req.sessionRow!;
+				const sessionRow = present(req.sessionRow);
 				const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 					$id: sessionRow.user_id,
 				});
@@ -312,7 +315,7 @@ export function accountRouter(state: AppState): Router {
 	});
 
 	router.delete("/avatar", requireSession(state), requireCsrf, (req, res) => {
-		const sessionRow = req.sessionRow!;
+		const sessionRow = present(req.sessionRow);
 		const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 			$id: sessionRow.user_id,
 		});
@@ -352,7 +355,7 @@ export function accountRouter(state: AppState): Router {
 		requireCsrf,
 		asyncHandler(async (req, res) => {
 			const { current_password: currentPassword } = req.body ?? {};
-			const sessionRow = req.sessionRow!;
+			const sessionRow = present(req.sessionRow);
 			const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 				$id: sessionRow.user_id,
 			});
@@ -385,7 +388,7 @@ export function accountRouter(state: AppState): Router {
 		requireCsrf,
 		asyncHandler(async (req, res) => {
 			const { current_password: currentPassword } = req.body ?? {};
-			const sessionRow = req.sessionRow!;
+			const sessionRow = present(req.sessionRow);
 			const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 				$id: sessionRow.user_id,
 			});
@@ -398,9 +401,11 @@ export function accountRouter(state: AppState): Router {
 				return;
 			}
 			if (user.role === "master") {
-				const masterCount = db.get<{ n: number }>(
-					"SELECT COUNT(*) as n FROM users WHERE role = 'master'",
-				)!.n;
+				const masterCount = present(
+					db.get<{ n: number }>(
+						"SELECT COUNT(*) as n FROM users WHERE role = 'master'",
+					),
+				).n;
 				if (masterCount <= 1) {
 					res.status(409).json({
 						detail:

@@ -1,5 +1,6 @@
 import { nowIso, type PermissionRow, type UserRow } from "./db/rows.ts";
 import type { Db } from "./db/types.ts";
+import { present } from "./present.ts";
 
 /** Mirrors app/permissions/policy.py. */
 
@@ -66,7 +67,7 @@ export function ensurePermissions(
 			},
 		);
 	}
-	return getPermissions(db, userId)!;
+	return present(getPermissions(db, userId));
 }
 
 interface CountRow {
@@ -106,17 +107,21 @@ export function missingRequiredCredential(
 		master: user.role === "master",
 	});
 	if (perm.require_passkey) {
-		const n = db.get<CountRow>(
-			"SELECT COUNT(*) as n FROM credentials WHERE user_id = $id AND kind = 'webauthn'",
-			{ $id: user.id },
-		)!.n;
+		const n = present(
+			db.get<CountRow>(
+				"SELECT COUNT(*) as n FROM credentials WHERE user_id = $id AND kind = 'webauthn'",
+				{ $id: user.id },
+			),
+		).n;
 		if (n === 0) return "passkey";
 	}
 	if (perm.require_mfa) {
-		const n = db.get<CountRow>(
-			"SELECT COUNT(*) as n FROM credentials WHERE user_id = $id",
-			{ $id: user.id },
-		)!.n;
+		const n = present(
+			db.get<CountRow>(
+				"SELECT COUNT(*) as n FROM credentials WHERE user_id = $id",
+				{ $id: user.id },
+			),
+		).n;
 		if (n === 0) return "mfa";
 	}
 	return null;

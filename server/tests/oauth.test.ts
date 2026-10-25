@@ -1,3 +1,4 @@
+import { present } from "../src/present.ts";
 /**
  * OAuth 2.0 authorization server (security/oauth.ts + routes/oauth.ts).
  *
@@ -51,10 +52,12 @@ function registerClient(
 			$now: nowIso(),
 		},
 	);
-	return h.db.get<OauthClientRow>(
-		"SELECT * FROM oauth_clients WHERE client_id = $id",
-		{ $id: clientId },
-	)!;
+	return present(
+		h.db.get<OauthClientRow>(
+			"SELECT * FROM oauth_clients WHERE client_id = $id",
+			{ $id: clientId },
+		),
+	);
 }
 
 beforeEach(async () => {
@@ -144,7 +147,7 @@ describe("PKCE", () => {
 			codeChallenge: challenge,
 			codeChallengeMethod: "S256",
 		});
-		return consumeAuthCode(h.db, code)!.row;
+		return present(consumeAuthCode(h.db, code)).row;
 	}
 
 	test("accepts the matching verifier", () => {
@@ -199,7 +202,7 @@ describe("authorization codes", () => {
 
 	test("a replay revokes every token already minted from the grant", () => {
 		const { code } = mint();
-		const { row } = consumeAuthCode(h.db, code)!;
+		const { row } = present(consumeAuthCode(h.db, code));
 		const tokens = issueTokens(h.db, {
 			clientId: client.client_id,
 			userId,
@@ -396,9 +399,9 @@ describe("the machine surface", () => {
 	});
 
 	test("userinfo refuses a session cookie — it is bearer-only", async () => {
-		const user = h.db.get<{ id: number }>(
-			"SELECT id FROM users WHERE username = 'alice'",
-		)!;
+		const user = present(
+			h.db.get<{ id: number }>("SELECT id FROM users WHERE username = 'alice'"),
+		);
 		const { cookie } = h.signIn(user as never);
 		const res = await h.request("/api/oauth/userinfo", { cookie });
 		expect(res.status).toBe(401);

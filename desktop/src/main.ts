@@ -23,13 +23,17 @@ interface DownloadProgress {
 	total: number;
 }
 
-const authStatus =
-	document.querySelector<HTMLParagraphElement>("#auth-status")!;
-const folderPath = document.querySelector<HTMLSpanElement>("#folder-path")!;
-const changeLog = document.querySelector<HTMLUListElement>("#change-log")!;
-const downloadDirLabel =
-	document.querySelector<HTMLSpanElement>("#download-dir")!;
-const fileList = document.querySelector<HTMLUListElement>("#file-list")!;
+function required<T extends Element>(selector: string): T {
+	const el = document.querySelector<T>(selector);
+	if (!el) throw new Error(`missing element ${selector}`);
+	return el;
+}
+
+const authStatus = required<HTMLParagraphElement>("#auth-status");
+const folderPath = required<HTMLSpanElement>("#folder-path");
+const changeLog = required<HTMLUListElement>("#change-log");
+const downloadDirLabel = required<HTMLSpanElement>("#download-dir");
+const fileList = required<HTMLUListElement>("#file-list");
 
 let downloadDir: string | null = null;
 
@@ -38,18 +42,19 @@ async function refreshDownloadDirLabel() {
 	downloadDirLabel.textContent = downloadDir;
 }
 
-document
-	.querySelector<HTMLButtonElement>("#pick-download-dir")!
-	.addEventListener("click", async () => {
+required<HTMLButtonElement>("#pick-download-dir").addEventListener(
+	"click",
+	async () => {
 		const dir = await open({ directory: true, multiple: false });
 		if (!dir || Array.isArray(dir)) return;
 		downloadDir = dir;
 		downloadDirLabel.textContent = downloadDir;
-	});
+	},
+);
 
-document
-	.querySelector<HTMLButtonElement>("#refresh-files")!
-	.addEventListener("click", async () => {
+required<HTMLButtonElement>("#refresh-files").addEventListener(
+	"click",
+	async () => {
 		fileList.innerHTML = "<li>Loading…</li>";
 		try {
 			const res = await invoke<{ files: RemoteFile[] }>("list_files");
@@ -57,7 +62,8 @@ document
 		} catch (err) {
 			fileList.innerHTML = `<li>Failed to list files: ${err}</li>`;
 		}
-	});
+	},
+);
 
 function renderFiles(files: RemoteFile[]) {
 	fileList.innerHTML = "";
@@ -115,26 +121,23 @@ await listen<DownloadProgress>("download-progress", (event) => {
 
 void refreshDownloadDirLabel();
 
-document
-	.querySelector<HTMLFormElement>("#server-form")!
-	.addEventListener("submit", async (e) => {
+required<HTMLFormElement>("#server-form").addEventListener(
+	"submit",
+	async (e) => {
 		e.preventDefault();
-		const url = document
-			.querySelector<HTMLInputElement>("#server-url")!
-			.value.trim();
+		const url = required<HTMLInputElement>("#server-url").value.trim();
 		if (!url) return;
 		await invoke("set_server_url", { url });
 		authStatus.textContent = `Server set: ${url}`;
-	});
+	},
+);
 
-document
-	.querySelector<HTMLFormElement>("#login-form")!
-	.addEventListener("submit", async (e) => {
+required<HTMLFormElement>("#login-form").addEventListener(
+	"submit",
+	async (e) => {
 		e.preventDefault();
-		const username =
-			document.querySelector<HTMLInputElement>("#username")!.value;
-		const password =
-			document.querySelector<HTMLInputElement>("#password")!.value;
+		const username = required<HTMLInputElement>("#username").value;
+		const password = required<HTMLInputElement>("#password").value;
 		try {
 			const result = await invoke<{ status: string }>("login", {
 				username,
@@ -144,16 +147,18 @@ document
 		} catch (err) {
 			authStatus.textContent = `Login failed: ${err}`;
 		}
-	});
+	},
+);
 
-document
-	.querySelector<HTMLButtonElement>("#pick-folder")!
-	.addEventListener("click", async () => {
+required<HTMLButtonElement>("#pick-folder").addEventListener(
+	"click",
+	async () => {
 		const dir = await open({ directory: true, multiple: false });
 		if (!dir || Array.isArray(dir)) return;
 		folderPath.textContent = dir;
 		await invoke("watch_folder", { path: dir });
-	});
+	},
+);
 
 await listen<FsChange>("fs-change", (event) => {
 	const item = document.createElement("li");

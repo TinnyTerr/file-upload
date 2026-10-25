@@ -9,6 +9,7 @@ import {
 	requireMaster,
 	requirePermission,
 } from "../middleware/deps.ts";
+import { present } from "../present.ts";
 import { generateKey, hashKey } from "../security/apiKeys.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import { verifyPassword } from "../security/passwords.ts";
@@ -50,11 +51,13 @@ export function keysRouter(state: AppState): Router {
 		requireCsrf,
 		requirePermission(state, "can_use_api_keys"),
 		(req, res) => {
-			const user = req.currentUser!;
-			const activeCount = db.get<CountRow>(
-				"SELECT COUNT(*) as n FROM api_keys WHERE owner_id = $id AND active = 1",
-				{ $id: user.id },
-			)!.n;
+			const user = present(req.currentUser);
+			const activeCount = present(
+				db.get<CountRow>(
+					"SELECT COUNT(*) as n FROM api_keys WHERE owner_id = $id AND active = 1",
+					{ $id: user.id },
+				),
+			).n;
 			if (activeCount >= MAX_ACTIVE_KEYS_PER_USER) {
 				res.status(429).json({
 					detail: `active API key limit reached (${MAX_ACTIVE_KEYS_PER_USER}); delete one first`,
@@ -77,9 +80,11 @@ export function keysRouter(state: AppState): Router {
 					$now: nowIso(),
 				},
 			);
-			const key = db.get<ApiKeyRow>(
-				"SELECT * FROM api_keys WHERE id = last_insert_rowid()",
-			)!;
+			const key = present(
+				db.get<ApiKeyRow>(
+					"SELECT * FROM api_keys WHERE id = last_insert_rowid()",
+				),
+			);
 			recordAudit(db, {
 				actor: user.username,
 				action: "apikey.created",
@@ -91,7 +96,7 @@ export function keysRouter(state: AppState): Router {
 	);
 
 	router.get("/", requireActiveUser(state), (req, res) => {
-		const user = req.currentUser!;
+		const user = present(req.currentUser);
 		const keys = db.all<ApiKeyRow>(
 			"SELECT * FROM api_keys WHERE owner_id = $id AND active = 1 ORDER BY user_key_number ASC",
 			{ $id: user.id },
@@ -105,7 +110,7 @@ export function keysRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const key = db.get<ApiKeyRow>("SELECT * FROM api_keys WHERE id = $id", {
 				$id: req.params.keyId,
 			});
@@ -136,7 +141,7 @@ export function keysRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const key = db.get<ApiKeyRow>("SELECT * FROM api_keys WHERE id = $id", {
 				$id: req.params.keyId,
 			});
@@ -148,7 +153,7 @@ export function keysRouter(state: AppState): Router {
 				res.status(403).json({ detail: "not your key" });
 				return;
 			}
-			const raw = (req.body ?? {}).rate_limit_per_min;
+			const raw = req.body?.rate_limit_per_min;
 			let value: number | null;
 			if (raw === null) {
 				value = null;
@@ -190,7 +195,7 @@ export function keysRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const key = db.get<ApiKeyRow>("SELECT * FROM api_keys WHERE id = $id", {
 				$id: req.params.keyId,
 			});

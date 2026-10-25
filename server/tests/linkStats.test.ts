@@ -1,3 +1,4 @@
+import { present } from "../src/present.ts";
 /** Share-link analytics: hits are recorded where a link is used, the stats
  * endpoint is owner-scoped, and the window is zero-filled. */
 
@@ -40,16 +41,18 @@ describe("link stats", () => {
        VALUES ($o, $p, 'a.txt', 'upload', 5, 5, 'application/octet-stream', 'none', 1, $now)`,
 			{ $o: owner.id, $p: rel, $now: nowIso() },
 		);
-		const fileId = h.db.get<{ id: number }>(
-			"SELECT last_insert_rowid() AS id",
-		)!.id;
+		const fileId = present(
+			h.db.get<{ id: number }>("SELECT last_insert_rowid() AS id"),
+		).id;
 		slug = randomBytes(8).toString("base64url");
 		h.db.run(
 			`INSERT INTO links (file_id, slug, use_count, active, created_at)
        VALUES ($f, $s, 0, 1, $now)`,
 			{ $f: fileId, $s: slug, $now: nowIso() },
 		);
-		linkId = h.db.get<{ id: number }>("SELECT last_insert_rowid() AS id")!.id;
+		linkId = present(
+			h.db.get<{ id: number }>("SELECT last_insert_rowid() AS id"),
+		).id;
 	});
 	afterAll(() => h.close());
 
@@ -84,7 +87,7 @@ describe("link stats", () => {
 		);
 		expect(pruneLinkHits(h.db)).toBe(1);
 		expect(
-			h.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM link_hits")!.n,
+			present(h.db.get<{ n: number }>("SELECT COUNT(*) AS n FROM link_hits")).n,
 		).toBe(2);
 	});
 });

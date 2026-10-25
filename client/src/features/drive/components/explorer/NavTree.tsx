@@ -17,7 +17,6 @@ export function NavTree() {
 	const trail = data?.breadcrumbs ?? [];
 	const trailKey = trail.map((c) => c.id).join(",");
 
-	// biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the contents of the trail, not its identity
 	useEffect(() => {
 		if (!trailKey) return;
 		const ids = trailKey.split(",").map(Number);

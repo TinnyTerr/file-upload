@@ -4,6 +4,7 @@ import { nowIso, type TorrentJobRow } from "../db/rows.ts";
 import type { Db } from "../db/types.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
+import { present } from "../present.ts";
 import { triggerWebhooks } from "../webhooks.ts";
 import {
 	cleanupDebridDir,
@@ -155,7 +156,7 @@ export async function importJob(
 		} else if (willSeed) {
 			// The import *copied* into blob storage, so the downloaded files are
 			// still on disk and qBittorrent can keep serving them untouched.
-			await setShareLimits(state.settings, job.info_hash!, {
+			await setShareLimits(state.settings, present(job.info_hash), {
 				ratio: state.settings.qbittorrentSeedRatio,
 				minutes: state.settings.qbittorrentSeedMinutes,
 			});

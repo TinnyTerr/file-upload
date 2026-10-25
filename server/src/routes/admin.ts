@@ -27,6 +27,7 @@ import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
 import { requireActiveUser, requireMaster } from "../middleware/deps.ts";
 import { ensurePermissions, hasPermission } from "../permissions.ts";
+import { present } from "../present.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import {
 	allocatedQuotaBytes,
@@ -333,8 +334,8 @@ function storageDetails(db: Db) {
 			file_type_counts: fileTypeCounts,
 			source_type_counts: sourceTypeCounts,
 			remote_upload_counts: remoteUploadCounts,
-			dropbox_upload_count: sourceTypeCounts["dropbox"] ?? 0,
-			remote_upload_count: sourceTypeCounts["remote"] ?? 0,
+			dropbox_upload_count: sourceTypeCounts.dropbox ?? 0,
+			remote_upload_count: sourceTypeCounts.remote ?? 0,
 			collaborator_count: collaboratorCount,
 			busiest_directories: busiestDirectories,
 		},
@@ -618,7 +619,7 @@ export function adminRouter(state: AppState): Router {
 		requireCsrf,
 		requireMaster(state),
 		(req, res) => {
-			const master = req.currentUser!;
+			const master = present(req.currentUser);
 			const body = req.body ?? {};
 			const raw = body.global_storage_quota_bytes;
 			if (
@@ -686,7 +687,7 @@ export function adminRouter(state: AppState): Router {
 		requireCsrf,
 		requireMaster(state),
 		(req, res) => {
-			const master = req.currentUser!;
+			const master = present(req.currentUser);
 			log.warning(`backend worker restart requested actor_id=${master.id}`);
 			const result = restartBackendWorkers(state);
 			log.warning(
@@ -713,7 +714,7 @@ export function adminRouter(state: AppState): Router {
 		requireCsrf,
 		requireMaster(state),
 		asyncHandler(async (req, res) => {
-			const master = req.currentUser!;
+			const master = present(req.currentUser);
 			const f = getFileOr404(res, Number(req.params.fileId));
 			if (!f) return;
 			try {
@@ -735,7 +736,7 @@ export function adminRouter(state: AppState): Router {
 		requireCsrf,
 		requireMaster(state),
 		asyncHandler(async (req, res) => {
-			const master = req.currentUser!;
+			const master = present(req.currentUser);
 			const f = getFileOr404(res, Number(req.params.fileId));
 			if (!f) return;
 			try {
@@ -811,7 +812,7 @@ export function adminRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const body = req.body ?? {};
 			const action = String(body.action ?? "");
 			const ids = dedupeIds(
@@ -843,7 +844,7 @@ export function adminRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const body = req.body ?? {};
 			const action = String(body.action ?? "");
 			const ids = dedupeIds(

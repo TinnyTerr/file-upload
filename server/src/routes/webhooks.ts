@@ -5,6 +5,7 @@ import { nowIso, type WebhookRow } from "../db/rows.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requireSession } from "../middleware/auth.ts";
 import { requireActiveUser } from "../middleware/deps.ts";
+import { present } from "../present.ts";
 import { requireCsrf } from "../security/csrf.ts";
 import {
 	generateWebhookSecret,
@@ -53,7 +54,7 @@ export function webhooksRouter(state: AppState): Router {
 	const { db } = state;
 
 	router.get("/", requireActiveUser(state), (req, res) => {
-		const user = req.currentUser!;
+		const user = present(req.currentUser);
 		const hooks = db.all<WebhookRow>(
 			"SELECT * FROM webhooks WHERE owner_id = $id ORDER BY created_at DESC",
 			{ $id: user.id },
@@ -71,11 +72,13 @@ export function webhooksRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
-			const user = req.currentUser!;
-			const count = db.get<{ n: number }>(
-				"SELECT COUNT(*) as n FROM webhooks WHERE owner_id = $id",
-				{ $id: user.id },
-			)!.n;
+			const user = present(req.currentUser);
+			const count = present(
+				db.get<{ n: number }>(
+					"SELECT COUNT(*) as n FROM webhooks WHERE owner_id = $id",
+					{ $id: user.id },
+				),
+			).n;
 			if (count >= MAX_WEBHOOKS_PER_USER) {
 				res.status(429).json({
 					detail: `webhook limit reached (${MAX_WEBHOOKS_PER_USER}); delete one first`,
@@ -123,9 +126,11 @@ export function webhooksRouter(state: AppState): Router {
 					$now: nowIso(),
 				},
 			);
-			const hook = db.get<WebhookRow>(
-				"SELECT * FROM webhooks WHERE id = last_insert_rowid()",
-			)!;
+			const hook = present(
+				db.get<WebhookRow>(
+					"SELECT * FROM webhooks WHERE id = last_insert_rowid()",
+				),
+			);
 			recordAudit(db, {
 				actor: user.username,
 				action: "webhook.created",
@@ -142,7 +147,7 @@ export function webhooksRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const hook = db.get<WebhookRow>("SELECT * FROM webhooks WHERE id = $id", {
 				$id: req.params.webhookId,
 			});
@@ -200,9 +205,11 @@ export function webhooksRouter(state: AppState): Router {
 			);
 			res.json(
 				serializeWebhook(
-					db.get<WebhookRow>("SELECT * FROM webhooks WHERE id = $id", {
-						$id: hook.id,
-					})!,
+					present(
+						db.get<WebhookRow>("SELECT * FROM webhooks WHERE id = $id", {
+							$id: hook.id,
+						}),
+					),
 				),
 			);
 		}),
@@ -214,7 +221,7 @@ export function webhooksRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		(req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const hook = db.get<WebhookRow>("SELECT * FROM webhooks WHERE id = $id", {
 				$id: req.params.webhookId,
 			});
@@ -239,7 +246,7 @@ export function webhooksRouter(state: AppState): Router {
 		requireCsrf,
 		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
-			const user = req.currentUser!;
+			const user = present(req.currentUser);
 			const hook = db.get<WebhookRow>("SELECT * FROM webhooks WHERE id = $id", {
 				$id: req.params.webhookId,
 			});

@@ -10,13 +10,10 @@ import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientCountry, clientIp, requireSession } from "../middleware/auth.ts";
 import { mfaEnforcedFor, passkeyEnforcedFor } from "../permissions.ts";
+import { present } from "../present.ts";
 import * as credentials from "../security/credentials.ts";
 import { requireCsrf } from "../security/csrf.ts";
-import {
-	hashPassword,
-	verifyDummyPassword,
-	verifyPassword,
-} from "../security/passwords.ts";
+import { verifyDummyPassword, verifyPassword } from "../security/passwords.ts";
 import { COOKIE_NAME, type SessionRow } from "../security/sessions.ts";
 import {
 	buildAuthenticationOptions,
@@ -104,9 +101,10 @@ export function authRouter(state: AppState): Router {
 				{ $username: username },
 			);
 
-			const ok = user
-				? await verifyPassword(password, user.password_hash)
-				: (await verifyDummyPassword(password), false);
+			// A miss still pays for a hash, so timing doesn't reveal the username.
+			let ok = false;
+			if (user) ok = await verifyPassword(password, user.password_hash);
+			else await verifyDummyPassword(password);
 
 			if (!user || !ok) {
 				lockout.recordFailure(db, username, "username");
@@ -205,7 +203,7 @@ export function authRouter(state: AppState): Router {
 				try {
 					const secret = openSecret(
 						masterKey,
-						Buffer.from(c.secret_blob!),
+						Buffer.from(present(c.secret_blob)),
 					).toString();
 					return authenticator.verify({ token: code, secret });
 				} catch {
@@ -297,7 +295,7 @@ export function authRouter(state: AppState): Router {
 				db,
 				(response as { id?: string }).id ?? "",
 			);
-			if (!credRow || !credRow.webauthn_id || !credRow.webauthn_public_key) {
+			if (!credRow?.webauthn_id || !credRow.webauthn_public_key) {
 				recordAudit(db, {
 					actor: "unknown",
 					action: "login.webauthn_failure",
@@ -379,10 +377,10 @@ export function authRouter(state: AppState): Router {
 		const cookieValue = req.cookies?.[COOKIE_NAME] as string | undefined;
 		sessionManager.destroy(db, cookieValue);
 		const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
-			$id: req.sessionRow!.user_id,
+			$id: present(req.sessionRow).user_id,
 		});
 		recordAudit(db, {
-			actor: user?.username ?? String(req.sessionRow!.user_id),
+			actor: user?.username ?? String(present(req.sessionRow).user_id),
 			action: "logout",
 		});
 		res.clearCookie(COOKIE_NAME, { path: "/" });
@@ -390,7 +388,7 @@ export function authRouter(state: AppState): Router {
 	});
 
 	router.get("/sessions", requireSession(state), (req, res) => {
-		const current = req.sessionRow!;
+		const current = present(req.sessionRow);
 		const rows = db.all<SessionRow>(
 			"SELECT * FROM sessions WHERE user_id = $userId AND expires_at > $now",
 			{ $userId: current.user_id, $now: new Date().toISOString() },
@@ -415,10 +413,12 @@ export function authRouter(state: AppState): Router {
 		requireCsrf,
 		asyncHandler(async (req, res) => {
 			const { current_password: currentPassword } = req.body ?? {};
-			const current = req.sessionRow!;
-			const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
-				$id: current.user_id,
-			})!;
+			const current = present(req.sessionRow);
+			const user = present(
+				db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
+					$id: current.user_id,
+				}),
+			);
 			if (
 				typeof currentPassword !== "string" ||
 				!(await verifyPassword(currentPassword, user.password_hash))
@@ -450,10 +450,12 @@ export function authRouter(state: AppState): Router {
 		requireCsrf,
 		asyncHandler(async (req, res) => {
 			const { current_password: currentPassword } = req.body ?? {};
-			const current = req.sessionRow!;
-			const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
-				$id: current.user_id,
-			})!;
+			const current = present(req.sessionRow);
+			const user = present(
+				db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
+					$id: current.user_id,
+				}),
+			);
 			if (
 				typeof currentPassword !== "string" ||
 				!(await verifyPassword(currentPassword, user.password_hash))

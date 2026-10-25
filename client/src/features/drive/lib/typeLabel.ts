@@ -1,3 +1,4 @@
+import { present } from "@/lib/present";
 import type { DriveItem } from "./items";
 
 /** Specific enough to be worth a column. Anything unlisted falls back to the
@@ -41,7 +42,9 @@ function fromExtension(filename: string): string | null {
 export function typeLabel(item: DriveItem): string {
 	if (item.kind === "folder") return "Folder";
 
-	const ct = (item.file.content_type ?? "").toLowerCase().split(";")[0]!.trim();
+	const ct = present(
+		(item.file.content_type ?? "").toLowerCase().split(";")[0],
+	).trim();
 	const named = NAMED[ct];
 	// `application/octet-stream` is what the server stores for anything it
 	// wouldn't serve inline, so the filename is more informative than the type.

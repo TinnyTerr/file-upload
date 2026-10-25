@@ -2,6 +2,7 @@ import type { Settings } from "../config.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
 import { fetchLogged } from "../outbound.ts";
+import { present } from "../present.ts";
 
 const log = getLogger("app.torrents.qbittorrent");
 
@@ -101,7 +102,7 @@ async function login(settings: Settings): Promise<string> {
 	// for bypassed auth -- an empty SID is fine there, requests just work.
 	const setCookie = res.headers.get("set-cookie") ?? "";
 	const match = /SID=([^;]+)/.exec(setCookie);
-	sid = match ? match[1]! : "";
+	sid = match ? present(match[1]) : "";
 	sidUrl = settings.qbittorrentUrl;
 	return sid;
 }
@@ -288,5 +289,5 @@ export async function deleteTorrent(
 /** Extracts the v1 info hash from a magnet URI, if present. */
 export function infoHashFromMagnet(magnet: string): string | null {
 	const match = /xt=urn:btih:([a-zA-Z0-9]+)/.exec(magnet);
-	return match ? match[1]!.toLowerCase() : null;
+	return match ? present(match[1]).toLowerCase() : null;
 }

@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider } from "@/features/auth/hooks/auth";
 import { RevealedKeyProvider } from "@/features/drive/hooks/useRevealedKeys";
 import { UploadProvider } from "@/features/files/hooks/useUpload";
+import { present } from "@/lib/present";
 import { initSentry } from "@/lib/sentry";
 import { DialogProvider } from "@/providers/DialogProvider";
 import { QueryProvider } from "@/providers/QueryProvider";
@@ -30,7 +31,7 @@ initSentry();
 	root.classList.add(dark ? "dark" : "light");
 })();
 
-createRoot(document.getElementById("root")!).render(
+createRoot(present(document.getElementById("root"))).render(
 	<StrictMode>
 		{/* Outermost on purpose: a provider that throws while mounting must still
 		    reach a rendered error page, not a blank document. */}

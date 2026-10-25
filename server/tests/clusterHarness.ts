@@ -1,3 +1,4 @@
+import { present } from "../src/present.ts";
 /**
  * Multi-node in-process cluster harness (redesign Phase 0).
  *
@@ -130,7 +131,7 @@ export async function makeCluster(
 
 	return {
 		nodes,
-		master: nodes[0]!,
+		master: present(nodes[0]),
 		node(nodeId) {
 			const found = nodes.find((n) => n.nodeId === nodeId);
 			if (!found) throw new Error(`no such node in harness: ${nodeId}`);
