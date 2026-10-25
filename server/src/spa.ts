@@ -1,5 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { gzipSync } from "node:zlib";
+import { extname, join, relative, sep } from "node:path";
 import express, {
 	type Express,
 	type NextFunction,
@@ -98,7 +99,14 @@ export function sendSpa(res: Response, meta = ""): void {
 		"Content-Type": "text/html; charset=utf-8",
 		"Cache-Control": "no-cache",
 	});
-	res.send(meta ? html.replace("</head>", `${meta}\n</head>`) : html);
+	const body = meta ? html.replace("</head>", `${meta}\n</head>`) : html;
+	res.vary("Accept-Encoding");
+	if (/\bgzip\b/.test(String(res.req?.headers["accept-encoding"] ?? ""))) {
+		res.set("Content-Encoding", "gzip");
+		res.send(gzipSync(body));
+		return;
+	}
+	res.send(body);
 }
 
 // --------------------------------------------------------------------------
@@ -285,6 +293,14 @@ function wantsHtml(req: Request): boolean {
  * inscrutable syntax error in the console instead of a 404 in the network tab. */
 const LOOKS_LIKE_A_FILE = /\/[^/]+\.[a-zA-Z0-9]{1,8}$/;
 
+const PRECOMPRESSED_TYPES: Record<string, string> = {
+	".js": "text/javascript; charset=utf-8",
+	".css": "text/css; charset=utf-8",
+	".svg": "image/svg+xml",
+	".json": "application/json; charset=utf-8",
+	".wasm": "application/wasm",
+};
+
 /**
  * Mounts static assets + the SPA fallback. Must be mounted after every
  * `/api/*` router, and the fallback deliberately refuses to answer `/api/*` at
@@ -296,6 +312,41 @@ export function mountSpa(app: Express): void {
 			`no built client at ${SPA_DIR} -- API routes work, page requests will 503 until \`bun run build\` runs`,
 		);
 	}
+
+	// Vite writes `.br`/`.gz` next to each asset (see client/vite.config.ts).
+	// Serve the best one the client accepts under the original's content type.
+	app.use("/assets", (req: Request, res: Response, next: NextFunction) => {
+		if (req.method !== "GET" && req.method !== "HEAD") return next();
+		const accepts = String(req.headers["accept-encoding"] ?? "");
+		const ext = extname(req.path);
+		const type = PRECOMPRESSED_TYPES[ext];
+		if (!type) return next();
+		res.vary("Accept-Encoding");
+		for (const [enc, suffix] of [
+			["br", ".br"],
+			["gzip", ".gz"],
+		] as const) {
+			if (!new RegExp(`\\b${enc}\\b`).test(accepts)) continue;
+			let abs: string;
+			try {
+				abs = join(ASSETS_DIR, decodeURIComponent(req.path) + suffix);
+				if (!abs.startsWith(ASSETS_DIR + sep) || !statSync(abs).isFile())
+					continue;
+			} catch {
+				continue;
+			}
+			res.set({
+				"Content-Type": type,
+				"Content-Encoding": enc,
+				"Cache-Control": "public, max-age=31536000, immutable",
+			});
+			res.sendFile(abs, { dotfiles: "deny" }, (err) => {
+				if (err && !res.headersSent) next(err);
+			});
+			return;
+		}
+		next();
+	});
 
 	app.use(
 		express.static(SPA_DIR, {

@@ -1,7 +1,10 @@
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath, URL } from "node:url";
+import { brotliCompressSync, constants, gzipSync } from "node:zlib";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig, loadEnv, type Plugin } from "vite";
 
 const BACKEND = process.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8000";
 
@@ -9,13 +12,43 @@ const BACKEND = process.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8000";
 // into this bundle; the server and desktop keys never reach the browser.
 const rootEnv = loadEnv(process.env.NODE_ENV ?? "development", "..", "SENTRY_DSN_");
 
+/** Writes `.br` and `.gz` siblings of every compressible file in assets/, so
+ * the server (`spa.ts`) can hand out the smallest variant without compressing
+ * per request. Skipped when the compressed copy isn't smaller. */
+function precompress(): Plugin {
+	let outDir = "";
+	return {
+		name: "precompress-assets",
+		apply: "build",
+		configResolved(c) {
+			outDir = join(c.root, c.build.outDir, "assets");
+		},
+		closeBundle() {
+			for (const f of readdirSync(outDir)) {
+				if (!/\.(js|css|svg|json|wasm)$/.test(f)) continue;
+				const buf = readFileSync(join(outDir, f));
+				if (buf.length < 1024) continue;
+				const br = brotliCompressSync(buf, {
+					params: {
+						[constants.BROTLI_PARAM_QUALITY]: 11,
+						[constants.BROTLI_PARAM_SIZE_HINT]: buf.length,
+					},
+				});
+				if (br.length < buf.length) writeFileSync(join(outDir, `${f}.br`), br);
+				const gz = gzipSync(buf, { level: 9 });
+				if (gz.length < buf.length) writeFileSync(join(outDir, `${f}.gz`), gz);
+			}
+		},
+	};
+}
+
 export default defineConfig({
 	define: {
 		__SENTRY_DSN__: JSON.stringify(
 			process.env.SENTRY_DSN_WEB ?? rootEnv.SENTRY_DSN_WEB ?? "",
 		),
 	},
-	plugins: [react(), tailwindcss()],
+	plugins: [react(), tailwindcss(), precompress()],
 	resolve: {
 		alias: {
 			"@": fileURLToPath(new URL("./src", import.meta.url)),

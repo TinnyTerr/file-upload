@@ -621,6 +621,8 @@ the three HTML entry points (`/`, `/file/:slug`, `/d/:slug`) all go out through
   build → 503 with the `bun run build` hint, unknown URL → 404, thrown error on
   a page request → 500), so it must not depend on the thing it is replacing. Its
   palette duplicates `client/src/index.css`'s tokens on purpose.
+- **Assets are precompressed at build time.** `client/vite.config.ts`'s `precompress` plugin writes `.br`/`.gz` siblings into `public/assets/`; `mountSpa` serves the best one the client accepts (under the original's content type, `Vary: Accept-Encoding`) before `express.static`. The shell is gzipped per request. Nothing else is compressed — there is no `compression` middleware.
+- **`@sentry/react` is lazy.** `lib/sentry.ts` imports it after `window.load` and queues `captureException` calls until it lands; don't add a static `@sentry/react` import or it goes back into the entry chunk (~200 kB).
 - **Cache headers**: `assets/*` is content-hashed by Vite and goes out
   `immutable` for a year; the shell and everything else is `no-cache` (must
   revalidate, may 304). Getting this backwards makes a deploy invisible to an
