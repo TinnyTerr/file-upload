@@ -450,6 +450,10 @@ link out of service.
 - **One download is one use, however many requests it took.** `/file/:slug/raw` serves `Range` for untransformed blobs, so a chunked or resumed download is many requests; only the one covering byte zero consumes a use, stamps `last_downloaded_at` and writes the audit row (`isRangeStart` in `routes/public.ts`).
 - **A limited-use link serves no ranges at all** (`rangesAllowed`): no `Accept-Ranges`, `Range` ignored, `200` with the whole body. Its budget is enforced per request, so honouring ranges would either spend it N ways or — with continuations free — hand out the whole file for `bytes=1-`. Same reasoning as `/preview` refusing limited-use links.
 
+### Webhooks
+
+`webhooks.ts` delivers `WEBHOOK_EVENTS` to a user's hooks, shaped by `format` (`json` signed envelope · `discord` · `ntfy`; `shapeDelivery`). Adding an event means adding it to `WEBHOOK_EVENTS`, giving `describeEvent` a sentence for it **and** calling `triggerWebhooks` from the route that produces it. `file.uploaded` already fires for every source (dropbox, torrent, remote) via `finalizeStoredFile`; `dropbox.received` and `torrent.completed` are the specific ones. Node-local, and cleared on user deletion (`users.ts`, `account.ts`).
+
 ### Share-link analytics
 
 `link_hits` (one row per view / download / save, `linkStats.ts`) is written where a link is actually used: the `/info` calls (views; the folder page's `?dir=` descents are not visits), the use-consuming download and zip, and the two `save` routes. `GET /api/link-stats/:kind/:linkId` is owner-or-master. **Node-local** (absent from `REPLICATED_TABLES`), **stores no IP** — only `clientCountry()`, which is NULL unless the proxy header is trusted — and is aged out at 90 days by `link_hits_prune`. `recordLinkHit` never throws; analytics must not fail a download. Orphan rows from a deleted file are harmless (ids are AUTOINCREMENT) and get pruned.
@@ -659,7 +663,7 @@ Non-obvious rules that are easy to re-break. Each one has bitten this codebase a
 - **The SPA fallback must never answer a path with a file extension.** It is a missing asset, and serving the shell for it turns a 404 into a 200 of HTML delivered as JavaScript. `mountSpa` in `spa.ts` is the only place this rule lives — see "Serving the SPA".
 - **`mountSpa` goes after every API router, and the `/api` JSON 404 after it.** The fallback passes `/api/*` through untouched precisely so that 404 can answer in JSON; reordering the two makes unknown endpoints return HTML.
 - **The server error handler branches on `res.headersSent`.** A streamed download that dies mid-body has no status left to set, so it destroys the socket instead of appending an error page to a half-written file.
-- **Deleting a user requires clearing every table that FKs to `users`** — `PRAGMA foreign_keys = ON` means a missed one throws instead of cascading. Currently: `permissions`, `sessions`, `credentials`, `files`, `directories`, `directory_collaborators` (both `user_id` and `invited_by_id`), `api_keys`, `dropbox_upload_links`, `remote_upload_jobs`, `torrent_jobs`, `media_play_keys`, the three `oauth_*` tables (via
+- **Deleting a user requires clearing every table that FKs to `users`** — `PRAGMA foreign_keys = ON` means a missed one throws instead of cascading. Currently: `permissions`, `sessions`, `credentials`, `files`, `directories`, `directory_collaborators` (both `user_id` and `invited_by_id`), `api_keys`, `dropbox_upload_links`, `remote_upload_jobs`, `torrent_jobs`, `media_play_keys`, `webhooks`, the three `oauth_*` tables (via
 `routes/oauth.ts::purgeOauthForUser`, which clears both the apps they *own* and
 the grants they were *issued*), and `cluster_nodes.created_by_id`.
 - **`/account/reset` must not delete the user's `permissions` row** — that would silently reset an admin-assigned quota to the default. Reset purges *content*; only true account deletion purges identity.

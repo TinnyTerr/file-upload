@@ -9,8 +9,10 @@ import { requireCsrf } from "../security/csrf.ts";
 import {
 	generateWebhookSecret,
 	isWebhookEvent,
+	isWebhookFormat,
 	sendTestWebhook,
 	WEBHOOK_EVENTS,
+	WEBHOOK_FORMATS,
 } from "../webhooks.ts";
 import { resolvePublicAddress, validatePublicHttpUrl } from "./remoteUpload.ts";
 
@@ -22,6 +24,7 @@ function serializeWebhook(h: WebhookRow) {
 		url: h.url,
 		events: h.events.split(","),
 		active: !!h.active,
+		format: h.format,
 		created_at: h.created_at,
 		last_triggered_at: h.last_triggered_at,
 		last_status: h.last_status,
@@ -55,7 +58,11 @@ export function webhooksRouter(state: AppState): Router {
 			"SELECT * FROM webhooks WHERE owner_id = $id ORDER BY created_at DESC",
 			{ $id: user.id },
 		);
-		res.json({ webhooks: hooks.map(serializeWebhook), events: WEBHOOK_EVENTS });
+		res.json({
+			webhooks: hooks.map(serializeWebhook),
+			events: WEBHOOK_EVENTS,
+			formats: WEBHOOK_FORMATS,
+		});
 	});
 
 	router.post(
@@ -96,15 +103,23 @@ export function webhooksRouter(state: AppState): Router {
 				});
 				return;
 			}
+			const format = body.format ?? "json";
+			if (!isWebhookFormat(format)) {
+				res.status(400).json({
+					detail: `format must be one of: ${WEBHOOK_FORMATS.join(", ")}`,
+				});
+				return;
+			}
 			const secret = generateWebhookSecret();
 			db.run(
-				`INSERT INTO webhooks (owner_id, url, secret, events, active, created_at)
-       VALUES ($ownerId, $url, $secret, $events, 1, $now)`,
+				`INSERT INTO webhooks (owner_id, url, secret, events, active, format, created_at)
+       VALUES ($ownerId, $url, $secret, $events, 1, $format, $now)`,
 				{
 					$ownerId: user.id,
 					$url: url,
 					$secret: secret,
 					$events: events.join(","),
+					$format: format,
 					$now: nowIso(),
 				},
 			);
@@ -163,9 +178,25 @@ export function webhooksRouter(state: AppState): Router {
 				events = parsed.join(",");
 			}
 			const active = body.active !== undefined ? !!body.active : !!hook.active;
+			let format = hook.format;
+			if (body.format !== undefined) {
+				if (!isWebhookFormat(body.format)) {
+					res.status(400).json({
+						detail: `format must be one of: ${WEBHOOK_FORMATS.join(", ")}`,
+					});
+					return;
+				}
+				format = body.format;
+			}
 			db.run(
-				"UPDATE webhooks SET url = $url, events = $events, active = $active WHERE id = $id",
-				{ $url: url, $events: events, $active: active ? 1 : 0, $id: hook.id },
+				"UPDATE webhooks SET url = $url, events = $events, active = $active, format = $format WHERE id = $id",
+				{
+					$url: url,
+					$events: events,
+					$active: active ? 1 : 0,
+					$format: format,
+					$id: hook.id,
+				},
 			);
 			res.json(
 				serializeWebhook(

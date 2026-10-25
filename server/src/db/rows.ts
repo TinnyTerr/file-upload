@@ -220,6 +220,8 @@ export interface WebhookRow {
 	created_at: string;
 	last_triggered_at: string | null;
 	last_status: number | null;
+	/** `json` | `discord` | `ntfy` -- see webhooks.ts::WEBHOOK_FORMATS. */
+	format: string;
 }
 
 export interface OauthClientRow {

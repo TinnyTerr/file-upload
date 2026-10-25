@@ -580,7 +580,9 @@ CREATE TABLE IF NOT EXISTS webhooks (
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   last_triggered_at TEXT,
-  last_status INTEGER
+  last_status INTEGER,
+  -- json | discord | ntfy (webhooks.ts::WEBHOOK_FORMATS)
+  format TEXT NOT NULL DEFAULT 'json'
 );
 CREATE INDEX IF NOT EXISTS ix_webhooks_owner_id ON webhooks(owner_id);
 

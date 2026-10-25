@@ -26,6 +26,7 @@ import {
 } from "../db/rows.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
+import { triggerWebhooks } from "../webhooks.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import {
 	clientIp,
@@ -558,6 +559,10 @@ export function dropboxRouter(state: AppState): Router {
 						target: `dropbox:${row.id}:file:${result.file_id}`,
 						ip: requestOrigin.ip,
 					});
+					void triggerWebhooks(state, owner.id, "dropbox.received", {
+						file_id: result.file_id,
+						original_filename: meta.fn,
+					}).catch(() => {});
 					await rm(parts, { recursive: true, force: true });
 					log.info(
 						`dropbox chunked upload completed id=${row.id} file_id=${result.file_id} owner_id=${owner.id}`,
@@ -693,6 +698,10 @@ export function dropboxRouter(state: AppState): Router {
 						target: `dropbox:${row.id}:file:${result.file_id}`,
 						ip: clientIp(state, req),
 					});
+					void triggerWebhooks(state, owner.id, "dropbox.received", {
+						file_id: result.file_id,
+						original_filename: originalFilename,
+					}).catch(() => {});
 					log.info(
 						`dropbox upload completed id=${row.id} file_id=${result.file_id} owner_id=${owner.id}`,
 					);

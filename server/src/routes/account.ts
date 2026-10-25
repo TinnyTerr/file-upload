@@ -418,6 +418,7 @@ export function accountRouter(state: AppState): Router {
 				// and detach any cluster nodes this user registered so the
 				// PRAGMA foreign_keys = ON DELETE FROM users below doesn't throw.
 				db.run("DELETE FROM credentials WHERE user_id = $id", { $id: user.id });
+				db.run("DELETE FROM webhooks WHERE owner_id = $id", { $id: user.id });
 				db.run(
 					"UPDATE cluster_nodes SET created_by_id = NULL WHERE created_by_id = $id",
 					{ $id: user.id },

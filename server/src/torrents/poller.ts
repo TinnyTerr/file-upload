@@ -4,6 +4,7 @@ import { nowIso, type TorrentJobRow } from "../db/rows.ts";
 import type { Db } from "../db/types.ts";
 import { HttpError } from "../httpError.ts";
 import { getLogger } from "../logging.ts";
+import { triggerWebhooks } from "../webhooks.ts";
 import {
 	cleanupDebridDir,
 	dispatchTorrent,
@@ -163,6 +164,11 @@ export async function importJob(
 				await deleteTorrent(state.settings, job.info_hash, true);
 			cleanupJobDir(state, job);
 		}
+		void triggerWebhooks(state, job.owner_id, "torrent.completed", {
+			name: job.name,
+			files: result.fileCount,
+			size_bytes: result.totalBytes,
+		}).catch(() => {});
 		log.info(
 			`torrent job ${willSeed ? "imported, now seeding" : "completed"} job_id=${job.id} owner_id=${job.owner_id} files=${result.fileCount}`,
 		);

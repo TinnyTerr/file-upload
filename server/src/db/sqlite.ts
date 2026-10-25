@@ -257,6 +257,12 @@ export function createSqliteDb(path: string): Db {
 	ensureColumn(sqlite, "torrent_jobs", "started_at", "started_at TEXT");
 	ensureColumn(sqlite, "torrent_jobs", "seed_ratio", "seed_ratio REAL");
 	ensureColumn(sqlite, "torrent_jobs", "seed_seconds", "seed_seconds INTEGER");
+	ensureColumn(
+		sqlite,
+		"webhooks",
+		"format",
+		"format TEXT NOT NULL DEFAULT 'json'",
+	);
 	// Per-key override of the process-wide default rate limit. Existing keys
 	// predate the feature and get NULL, meaning "use the default".
 	ensureColumn(

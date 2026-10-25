@@ -701,6 +701,44 @@ Response (200 OK):
 }
 ```
 
+## Webhooks
+
+Outbound requests when something happens to your files. Manage them in
+Settings → Webhooks or over the API (session auth). Targets must resolve to a
+public address. Delivery is fire-and-forget with a 10 s timeout; `last_status`
+on each hook shows the most recent HTTP status (`null` = the request failed).
+
+Events: `file.uploaded`, `file.downloaded`, `link.created`, `dropbox.received`,
+`torrent.completed`.
+
+Formats:
+
+| `format` | Body |
+| --- | --- |
+| `json` (default) | `{"event", "fired_at", "data"}`, signed: `X-Webhook-Signature` is the hex HMAC-SHA256 of the raw body under the hook's secret. |
+| `discord` | `{"content": "**Title** — sentence"}` for a Discord channel webhook URL. |
+| `ntfy` | A plain-text sentence, with `Title` and `Tags` headers, for an ntfy topic URL. |
+
+### GET /api/webhooks/ — List your webhooks
+
+Returns `{ "webhooks": [...], "events": [...], "formats": [...] }`.
+
+### POST /api/webhooks/ — Create a webhook
+
+```json
+{ "url": "https://ntfy.sh/my-topic", "events": ["torrent.completed"], "format": "ntfy" }
+```
+
+The response includes `secret` — shown once.
+
+### PATCH /api/webhooks/{id} — Edit
+
+Any of `url`, `events`, `format`, `active`.
+
+### POST /api/webhooks/{id}/test — Send a test delivery
+
+### DELETE /api/webhooks/{id} — Delete
+
 ## Public download
 
 ### GET /api/file/{slug}/info — File metadata

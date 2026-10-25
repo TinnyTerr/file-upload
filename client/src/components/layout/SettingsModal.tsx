@@ -19,6 +19,7 @@ import {
 	TriangleAlert,
 	Upload,
 	User as UserIcon,
+	Webhook,
 	X,
 } from "lucide-react";
 import type * as React from "react";
@@ -34,6 +35,7 @@ import { Tooltip } from "@/components/ui/tooltip";
 import { UserAvatar } from "@/components/ui/user-avatar";
 import { api, errorMessage } from "@/config/api";
 import { SecurityTab } from "@/features/account/components/SecurityTab";
+import { WebhooksTab } from "@/features/account/components/WebhooksTab";
 import { accountService } from "@/features/account/services/accountService";
 import { ME_QUERY_KEY, useAuth } from "@/features/auth/hooks/auth";
 import { cn } from "@/lib/cn";
@@ -1281,6 +1283,7 @@ type SettingsTab =
 	| "account"
 	| "security"
 	| "sessions"
+	| "webhooks"
 	| "preferences"
 	| "danger";
 
@@ -1294,6 +1297,7 @@ const SETTINGS_TABS: {
 	{ id: "account", label: "Account", icon: UserIcon },
 	{ id: "security", label: "Security", icon: ShieldCheck },
 	{ id: "sessions", label: "Sessions", icon: Laptop },
+	{ id: "webhooks", label: "Webhooks", icon: Webhook },
 	{ id: "preferences", label: "Preferences", icon: SlidersHorizontal },
 	{ id: "danger", label: "Danger Zone", icon: TriangleAlert, danger: true },
 ];
@@ -1386,6 +1390,7 @@ export function SettingsModal({
 							{activeTab === "account" && <AccountTab />}
 							{activeTab === "security" && <SecurityTab />}
 							{activeTab === "sessions" && <SessionsTab />}
+							{activeTab === "webhooks" && <WebhooksTab />}
 							{activeTab === "preferences" && <PreferencesTab />}
 							{activeTab === "danger" && <DangerZoneTab />}
 						</div>

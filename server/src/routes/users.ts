@@ -475,6 +475,7 @@ export function usersRouter(state: AppState): Router {
 					$id: userId,
 				});
 				db.run("DELETE FROM api_keys WHERE owner_id = $id", { $id: userId });
+				db.run("DELETE FROM webhooks WHERE owner_id = $id", { $id: userId });
 				db.run("DELETE FROM sessions WHERE user_id = $id", { $id: userId });
 				db.run("DELETE FROM permissions WHERE user_id = $id", { $id: userId });
 				// PRAGMA foreign_keys = ON means any of these referencing the user
