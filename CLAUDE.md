@@ -76,7 +76,7 @@ the wrong cwd.
 
 **Coverage:** `bun run test:coverage` prints a table and writes `{client,server}/coverage/lcov.info` (gitignored); CI uploads both as artifacts.
 
-**Releases are automatic.** `.github/workflows/release.yml` runs after CI passes on `main`: `scripts/release.ts` reads commit titles since the last `v*` tag (`feat` → minor, `!:`/`BREAKING` → major, anything else → patch), bumps the three `package.json` versions, commits `release vX.Y.Z`, tags it and creates a GitHub release with the titles as notes. `bun scripts/release.ts` is a dry run. Desktop releases are separate (`desktop-v*` tags).
+**Releases are automatic.** `.github/workflows/release.yml` runs after CI passes on `main`: `scripts/release.ts` reads commit titles since the last `v*` tag (`feat` → minor, `!:`/`BREAKING` → major, anything else → patch), bumps the three `package.json` versions, commits `release vX.Y.Z`, tags it and creates a GitHub release with the titles as notes. `bun scripts/release.ts` is a dry run. After tagging it builds the client with `BUILD_SHA` = the release commit, which uploads source maps and creates the Sentry release `fileupload@X.Y.Z+<sha>`, and attaches `public.tar.gz` (the exact bundle those maps belong to) to the GitHub release. Needs secrets `SENTRY_AUTH_TOKEN`, `SENTRY_DSN_WEB` and vars `SENTRY_ORG`, `SENTRY_PROJECT_WEB`. Desktop releases are separate (`desktop-v*` tags; takes secret `SENTRY_DSN_DESKTOP`).
 
 Config lives in `./data/app.env`, auto-generated on first run (mode `0600`).
 

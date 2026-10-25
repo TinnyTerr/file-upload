@@ -56,4 +56,29 @@ jobs:
           git commit -am "release v$V"
           git tag "v$V"
           git push origin HEAD:main "v$V"
+          echo "SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           gh release create "v$V" --title "v$V" --notes-file notes.md
+      # Built after the release commit so the Sentry release name
+      # (fileupload@X.Y.Z+<sha>) is the one a deploy of this tag reports. The
+      # Vite plugin uploads maps, creates the release and links commits when
+      # the three SENTRY_* build vars are set; the tarball is the exact bundle
+      # those maps belong to, so deploy that rather than rebuilding.
+      - name: Build client (uploads source maps)
+        if: steps.guard.outputs.skip != 'true' && steps.ver.outputs.skip != 'true'
+        env:
+          BUILD_SHA: ${{ env.SHA }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT_WEB: ${{ vars.SENTRY_PROJECT_WEB }}
+          SENTRY_DSN_WEB: ${{ secrets.SENTRY_DSN_WEB }}
+        run: |
+          bun install --frozen-lockfile
+          bun --cwd=client run build
+      - name: Attach built client
+        if: steps.guard.outputs.skip != 'true' && steps.ver.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          tar -czf public.tar.gz -C public .
+          gh release upload "v$V" public.tar.gz
