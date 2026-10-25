@@ -3,6 +3,13 @@ import { pollFinalize } from "@/lib/finalizePoll";
 import { encryptBlob } from "@/workers/aeadClient";
 import { filesService } from "../services/filesService";
 import type { UploadOptions, UploadResult } from "../types";
+import {
+	forgetSession,
+	isResumable,
+	loadSession,
+	resumeKey,
+	saveSession,
+} from "./uploadResume";
 
 /** Switch to the resumable chunked endpoint above this ciphertext size. */
 const CHUNKED_THRESHOLD = 80 * 1024 * 1024; // 80 MiB
@@ -79,12 +86,10 @@ async function chunkedUpload(
 	onProgress?: (p: UploadProgress) => void,
 	signal?: AbortSignal,
 ): Promise<UploadResult> {
-	const init = await filesService.chunkedInit(
-		file.name,
-		payload.size,
-		file.type || undefined,
-		options,
-	);
+	const resumeId = isResumable(options)
+		? resumeKey(file, payload.size, options)
+		: null;
+	const init = await openSession(file, payload.size, options, resumeId);
 	const { upload_id, chunk_size, num_chunks } = init;
 	const done = new Set<number>(init.received ?? []);
 
@@ -177,11 +182,16 @@ async function chunkedUpload(
 			),
 		);
 	} catch (err) {
-		// Best-effort cleanup of the partial session unless we were cancelled.
-		// Only the *transfer* is cleaned up this way: once finalize has been
-		// asked for, the server may be minutes into assembling a multi-GB file
-		// and an abort would be aimed at an upload that is about to succeed.
-		if (!signal?.aborted) filesService.chunkedAbort(upload_id).catch(() => {});
+		// A cancel throws the session away. Any other failure (a dropped
+		// connection, a reload mid-transfer) keeps it: the chunks that landed are
+		// what a re-picked file resumes from, and the server sweeps abandoned
+		// sessions after 12 h. Only the *transfer* is cleaned up here: once
+		// finalize has been asked for, the server may be minutes into assembling a
+		// multi-GB file and an abort would be aimed at an upload about to succeed.
+		if (signal?.aborted) {
+			if (resumeId) forgetSession(resumeId);
+			filesService.chunkedAbort(upload_id).catch(() => {});
+		}
 		throw err;
 	}
 
@@ -189,9 +199,49 @@ async function chunkedUpload(
 	// Polled, not awaited once: finalizing a large upload outlives any proxy's
 	// request timeout, so the first response is usually a dead connection rather
 	// than a verdict. See lib/finalizePoll.ts.
-	return await pollFinalize(() => filesService.chunkedFinalize(upload_id), {
-		signal,
-	});
+	const result = await pollFinalize(
+		() => filesService.chunkedFinalize(upload_id),
+		{ signal },
+	);
+	if (resumeId) forgetSession(resumeId);
+	return result;
+}
+
+/** Continues a remembered session if the server still holds it and it still
+ * describes this exact payload; otherwise starts a fresh one. */
+async function openSession(
+	file: File,
+	payloadSize: number,
+	options: UploadOptions,
+	resumeId: string | null,
+) {
+	if (resumeId) {
+		const remembered = loadSession(resumeId);
+		if (remembered) {
+			try {
+				const status = await filesService.chunkedStatus(remembered);
+				if (status.total === payloadSize) {
+					return {
+						upload_id: remembered,
+						chunk_size: status.chunk_size,
+						num_chunks: status.num_chunks,
+						received: status.received,
+					};
+				}
+			} catch {
+				// 410 gone, 403 other user, token expired: all mean start over.
+			}
+			forgetSession(resumeId);
+		}
+	}
+	const init = await filesService.chunkedInit(
+		file.name,
+		payloadSize,
+		file.type || undefined,
+		options,
+	);
+	if (resumeId) saveSession(resumeId, init.upload_id);
+	return init;
 }
 
 function delay(ms: number) {

@@ -92,7 +92,12 @@ export const filesService = {
 		}),
 
 	chunkedStatus: (uploadId: string) =>
-		api.get<{ received: number[] }>("/files/upload/status", {
+		api.get<{
+			received: number[];
+			total: number;
+			chunk_size: number;
+			num_chunks: number;
+		}>("/files/upload/status", {
 			query: { upload_id: uploadId },
 		}),
 
