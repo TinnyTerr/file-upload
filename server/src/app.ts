@@ -10,6 +10,7 @@ import { HttpError } from "./httpError.ts";
 import { getLogger } from "./logging.ts";
 import { httpsRedirect } from "./middleware/httpsRedirect.ts";
 import { requestLogging } from "./middleware/requestLogging.ts";
+import { BUILD_VERSION } from "./version.ts";
 import { securityHeaders } from "./middleware/securityHeaders.ts";
 import { accountRouter } from "./routes/account.ts";
 import { adminRouter } from "./routes/admin.ts";
@@ -43,6 +44,10 @@ export function createApp(state: AppState): Express {
 	const app = express();
 
 	app.use(httpsRedirect(state.settings));
+	app.use((_req, res, next) => {
+		res.setHeader("X-Build-Version", BUILD_VERSION);
+		next();
+	});
 	app.use(securityHeaders(secure));
 	app.use(requestLogging(state));
 	// Base64 .torrent uploads (routes/torrents.ts) inflate by 4/3 and are capped
