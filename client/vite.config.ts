@@ -65,6 +65,10 @@ function precompress(): Plugin {
 			outDir = join(c.root, c.build.outDir, "assets");
 		},
 		closeBundle() {
+      		if (!existsSync(outDir)) {
+        		return;
+      		}
+			
 			for (const f of readdirSync(outDir)) {
 				if (!/\.(js|css|svg|json|wasm)$/.test(f)) continue;
 				const buf = readFileSync(join(outDir, f));
