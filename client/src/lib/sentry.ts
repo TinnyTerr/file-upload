@@ -18,6 +18,9 @@ export function initSentry(): void {
 		import("@sentry/react").then((Sentry) => {
 			Sentry.init({
 				dsn: __SENTRY_DSN__,
+				// Relayed by the server: same-origin for the CSP, and not a
+				// recognisable ingest host for ad blockers.
+				tunnel: "/api/sentry-tunnel",
 				// Same string the server reports (server/src/version.ts), so one
 				// release holds both surfaces and the commits behind them.
 				release: __SENTRY_RELEASE__,

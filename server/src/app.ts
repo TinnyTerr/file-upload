@@ -33,6 +33,7 @@ import { mfaRouter } from "./routes/mfa.ts";
 import { oauthPublicRouter, oauthRouter } from "./routes/oauth.ts";
 import { publicPageRouter, publicRouter } from "./routes/public.ts";
 import { remoteUploadRouter } from "./routes/remoteUpload.ts";
+import { sentryTunnelRouter } from "./routes/sentryTunnel.ts";
 import { adminTorrentsRouter, torrentsRouter } from "./routes/torrents.ts";
 import { usersRouter } from "./routes/users.ts";
 import { webhooksRouter } from "./routes/webhooks.ts";
@@ -57,6 +58,8 @@ export function createApp(state: AppState): Express {
 	// at MAX_TORRENT_FILE_BYTES (2 MiB) -- this limit must stay comfortably above
 	// that (2 MiB * 4/3 =~ 2.67 MiB) or valid uploads get rejected before the
 	// route's own size check ever runs.
+	// Before the JSON parser: envelopes are raw text and parsed by the route.
+	app.use("/api/sentry-tunnel", sentryTunnelRouter());
 	app.use(express.json({ limit: "8mb" }));
 	app.use(cookieParser());
 

@@ -45,6 +45,23 @@ export function sentryWebConnectOrigin(): string {
 	}
 }
 
+/** Where the browser tunnel forwards: the ingest envelope endpoint for
+ * `SENTRY_DSN_WEB`, plus the DSN sans key/query to compare envelopes against. */
+export function sentryWebEnvelopeUrl(): { url: string; dsnKey: string } | null {
+	const web = envValue("SENTRY_DSN_WEB");
+	if (!web) return null;
+	try {
+		const u = new URL(web);
+		const project = u.pathname.replace(/^\/+/, "");
+		return {
+			url: `${u.origin}/api/${project}/envelope/?sentry_key=${u.username}`,
+			dsnKey: u.origin + u.pathname,
+		};
+	} catch {
+		return null;
+	}
+}
+
 /** Share links carry their secret in the path (`/file/<slug>`, `/d/<slug>`,
  * dropbox tokens) and query (`?ek=`, `?k=`, `?receive=`). A trace or event
  * must show the route, not the credential. */
