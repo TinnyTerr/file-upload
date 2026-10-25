@@ -74,6 +74,10 @@ wrong. Both scripts pass `./tests` explicitly — a bare `bun test` from either
 workspace globs the whole monorepo and runs the *other* workspace's tests with
 the wrong cwd.
 
+**Coverage:** `bun run test:coverage` prints a table and writes `{client,server}/coverage/lcov.info` (gitignored); CI uploads both as artifacts.
+
+**Releases are automatic.** `.github/workflows/release.yml` runs after CI passes on `main`: `scripts/release.ts` reads commit titles since the last `v*` tag (`feat` → minor, `!:`/`BREAKING` → major, anything else → patch), bumps the three `package.json` versions, commits `release vX.Y.Z`, tags it and creates a GitHub release with the titles as notes. `bun scripts/release.ts` is a dry run. Desktop releases are separate (`desktop-v*` tags).
+
 Config lives in `./data/app.env`, auto-generated on first run (mode `0600`).
 
 **`app.env` and the process environment are one namespace** (`config.ts`).

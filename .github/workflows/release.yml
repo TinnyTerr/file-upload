@@ -1,0 +1,59 @@
+name: Release
+
+# Runs after CI is green on main: picks the next semver from commit titles
+# (scripts/release.ts), bumps package.json, tags vX.Y.Z and publishes a release.
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+
+permissions:
+  contents: write
+
+concurrency: release
+
+jobs:
+  release:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Skip if main moved on or HEAD is already a release
+        id: guard
+        run: |
+          git fetch origin main
+          if [ "$(git rev-parse origin/main)" != "$(git rev-parse HEAD)" ] || \
+             git log -1 --format=%s | grep -q '^release v'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Compute and bump
+        if: steps.guard.outputs.skip != 'true'
+        id: ver
+        run: |
+          set +e
+          out=$(bun scripts/release.ts --write); code=$?
+          if [ $code -eq 2 ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          [ $code -eq 0 ] || exit $code
+          echo "version=$(echo "$out" | sed -n 's/^VERSION=//p')" >> "$GITHUB_OUTPUT"
+          echo "$out" | sed '1,/^---$/d' > notes.md
+      - name: Commit, tag, release
+        if: steps.guard.outputs.skip != 'true' && steps.ver.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "release v$V"
+          git tag "v$V"
+          git push origin HEAD:main "v$V"
+          gh release create "v$V" --title "v$V" --notes-file notes.md

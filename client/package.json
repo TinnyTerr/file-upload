@@ -9,6 +9,7 @@
 		"build:prod": "bun run build.ts",
 		"typecheck": "tsc -b --noEmit",
 		"test": "bun test ./tests",
+		"test:coverage": "bun test ./tests --coverage --coverage-reporter=text --coverage-reporter=lcov --coverage-dir=coverage",
 		"test:crypto": "bun scripts/fupl-vectors.mjs",
 		"preview": "vite preview"
 	},

@@ -25,7 +25,11 @@ jobs:
           bun-version: latest
       - run: bun install --frozen-lockfile
       - working-directory: server
-        run: bun run test
+        run: bun run test:coverage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-server
+          path: server/coverage/lcov.info
 
 
   server-biome:
@@ -65,7 +69,11 @@ jobs:
           bun-version: latest
       - run: bun install --frozen-lockfile
       - working-directory: client
-        run: bun run test
+        run: bun run test:coverage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-client
+          path: client/coverage/lcov.info
       - working-directory: client
         run: bun run test:crypto
 

@@ -12,6 +12,7 @@
 		"start": "bun run build && bun --cwd=server run start",
 		"typecheck": "bun --cwd=client run typecheck && bun --cwd=server run typecheck",
 		"test": "bun --cwd=client run test && bun --cwd=server run test",
+		"test:coverage": "bun --cwd=client run test:coverage && bun --cwd=server run test:coverage",
 		"doctor": "npx react-doctor@latest"
 	},
 	"dependencies": {
