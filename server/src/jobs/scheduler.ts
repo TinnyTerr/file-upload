@@ -1,4 +1,5 @@
 import type { AppState } from "../appState.ts";
+import { pruneLinkHits } from "../linkStats.ts";
 import { cacheEvictionJob } from "../cluster/cacheEviction.ts";
 import { syncCheckJob } from "../cluster/digest.ts";
 import { checkMasterLivenessJob } from "../cluster/election.ts";
@@ -96,6 +97,15 @@ function buildJobSpecs(state: AppState): JobSpec[] {
 		// Only deletes rows already past expires_at, so a revoked-but-unexpired
 		// refresh token survives as its own reuse-detection record -- see
 		// security/oauth.ts::pruneOauth.
+		// Share-link analytics past their retention window.
+		{
+			id: "link_hits_prune",
+			touches: ["db"],
+			intervalMs: HOUR_MS,
+			run: () => {
+				pruneLinkHits(db);
+			},
+		},
 		{
 			id: "oauth_prune",
 			touches: ["db"],

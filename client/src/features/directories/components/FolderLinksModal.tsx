@@ -18,6 +18,7 @@ import {
 	DialogTitle,
 } from "@/components/ui/dialog";
 import { Tooltip } from "@/components/ui/tooltip";
+import { LinkStats } from "@/features/files/components/LinkStats";
 import type { EncryptionMode } from "@/features/files/types";
 import { formatDateTime } from "@/lib/time";
 import { useDialogs } from "@/providers/DialogProvider";
@@ -192,6 +193,7 @@ export function FolderLinksModal({
 												</Tooltip>
 											</div>
 										</div>
+										<LinkStats kind="dir" linkId={link.id} />
 									</li>
 								);
 							})}

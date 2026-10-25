@@ -667,6 +667,40 @@ Response (200 OK):
 { "status": "deleted" }
 ```
 
+### GET /api/link-stats/{kind}/{link_id} — Share link analytics
+
+How a share link has been used. `kind` is `file` (a `links` id) or `dir` (a
+folder link id). Only the owner of the file or folder, or a master, may read it.
+
+A **view** is the public page loading its info, a **download** is a download
+that spent a use (a chunked download counts once), and a **save** is someone
+copying it into their own drive. No IP address is recorded; `country` comes from
+Cloudflare's `CF-IPCountry` and is `null` when the server isn't behind a proxy
+it trusts (`XX` = no data, `T1` = Tor). Counts are per node and kept for 90 days.
+
+Query parameters:
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `days` | integer | no | Window length, 1–90. Default 30. |
+
+```bash
+curl "{{BASE_URL}}/api/link-stats/file/1?days=7" \
+  -H "Authorization: Bearer <your-api-key>"
+```
+
+Response (200 OK):
+
+```json
+{
+  "days": 7,
+  "totals": { "view": 12, "download": 5, "save": 0 },
+  "last_event_at": "2026-10-25T16:05:46.000Z",
+  "series": [{ "day": "2026-10-19", "view": 0, "download": 0, "save": 0 }],
+  "countries": [{ "country": "GB", "count": 4 }, { "country": null, "count": 1 }]
+}
+```
+
 ## Public download
 
 ### GET /api/file/{slug}/info — File metadata

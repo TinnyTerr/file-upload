@@ -450,6 +450,10 @@ link out of service.
 - **One download is one use, however many requests it took.** `/file/:slug/raw` serves `Range` for untransformed blobs, so a chunked or resumed download is many requests; only the one covering byte zero consumes a use, stamps `last_downloaded_at` and writes the audit row (`isRangeStart` in `routes/public.ts`).
 - **A limited-use link serves no ranges at all** (`rangesAllowed`): no `Accept-Ranges`, `Range` ignored, `200` with the whole body. Its budget is enforced per request, so honouring ranges would either spend it N ways or — with continuations free — hand out the whole file for `bytes=1-`. Same reasoning as `/preview` refusing limited-use links.
 
+### Share-link analytics
+
+`link_hits` (one row per view / download / save, `linkStats.ts`) is written where a link is actually used: the `/info` calls (views; the folder page's `?dir=` descents are not visits), the use-consuming download and zip, and the two `save` routes. `GET /api/link-stats/:kind/:linkId` is owner-or-master. **Node-local** (absent from `REPLICATED_TABLES`), **stores no IP** — only `clientCountry()`, which is NULL unless the proxy header is trusted — and is aged out at 90 days by `link_hits_prune`. `recordLinkHit` never throws; analytics must not fail a download. Orphan rows from a deleted file are harmless (ids are AUTOINCREMENT) and get pruned.
+
 ### Permissions
 
 Defined in `server/src/permissions.ts` (`BOOL_FLAGS`) and mirrored in `client/src/config/permissions.ts`:

@@ -596,3 +596,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_directories_uid ON directories(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_directory_links_uid ON directory_links(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_files_uid ON files(uid);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_links_uid ON links(uid);
+
+-- Share-link analytics. One row per public view / download / save of a link.
+-- Node-local, like sessions: a visit is counted on the node that served it and
+-- deliberately absent from REPLICATED_TABLES. No IP is stored -- only the
+-- Cloudflare country (when trustworthy) -- so this can't become a visitor log.
+-- `link_id` is links.id or directory_links.id per `link_kind`; rows are
+-- removed with their link and aged out by the link_hits_prune job.
+CREATE TABLE IF NOT EXISTS link_hits (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  link_kind TEXT NOT NULL,
+  link_id INTEGER NOT NULL,
+  event TEXT NOT NULL,
+  country TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_link_hits_link ON link_hits(link_kind, link_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_link_hits_created_at ON link_hits(created_at);

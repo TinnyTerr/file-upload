@@ -8,6 +8,7 @@ import { useDialogs } from "@/providers/DialogProvider";
 import { useLinks } from "../hooks/useLinks";
 import { fileUrl, shareUrl } from "../lib/shareUrl";
 import type { FileLink, FileObject } from "../types";
+import { LinkStats } from "./LinkStats";
 import { type ShareEntry, ShareModal } from "./ShareModal";
 
 function linkStatus(link: FileLink): {
@@ -149,6 +150,7 @@ export function LinkList({ file }: { file: FileObject }) {
 									</Tooltip>
 								</div>
 							</div>
+							<LinkStats kind="file" linkId={link.id} />
 						</li>
 					);
 				})}

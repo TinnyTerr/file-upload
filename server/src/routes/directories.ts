@@ -40,6 +40,7 @@ import {
 } from "../directoryTree.ts";
 import { HttpError } from "../httpError.ts";
 import { newSlug } from "../links.ts";
+import { deleteLinkHits, recordLinkHit } from "../linkStats.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import {
@@ -2258,6 +2259,7 @@ export function directoriesRouter(state: AppState): Router {
 				return;
 			}
 			db.run("DELETE FROM directory_links WHERE id = $id", { $id: lk.id });
+			deleteLinkHits(db, "dir", lk.id);
 			recordAudit(db, {
 				actor: user.username,
 				action: "directory_link.deleted",
@@ -2319,6 +2321,10 @@ export function publicDirectoriesRouter(state: AppState): Router {
 			res.status(404).json({ detail: "not found" });
 			return;
 		}
+		// The page calls /info again for every folder it descends into; only the
+		// landing request (no ?dir=) is a visit.
+		if (req.query.dir === undefined)
+			recordLinkHit(state, req, "dir", resolved.link.id, "view");
 		const { directory: entry, link } = resolved;
 		const d = publicSubdirectory(db, entry, req.query.dir);
 		if (!d) {
@@ -2590,6 +2596,7 @@ export function publicDirectoriesRouter(state: AppState): Router {
 				res.status(404).json({ detail: "not found" });
 				return;
 			}
+			recordLinkHit(state, req, "dir", resolved.link.id, "save");
 
 			/** Copies one folder, then everything under it.
 			 *
@@ -2813,6 +2820,7 @@ export function publicDirectoriesRouter(state: AppState): Router {
 				res.status(404).json({ detail: "not found" });
 				return;
 			}
+			recordLinkHit(state, req, "dir", resolved.link.id, "download");
 
 			const zipName =
 				(d.title || "bundle").trim().replace(/"/g, "") || "bundle";

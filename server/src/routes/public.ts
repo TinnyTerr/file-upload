@@ -13,6 +13,7 @@ import { sealKdfId } from "../crypto/passwordKey.ts";
 import { openBox } from "../crypto/secretbox.ts";
 import { type FileRow, nowIso, type UserRow } from "../db/rows.ts";
 import { consumeUse, resolveActiveLink } from "../links.ts";
+import { recordLinkHit } from "../linkStats.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import { clientIp, requestProtocol } from "../middleware/auth.ts";
@@ -222,6 +223,7 @@ export function publicRouter(state: AppState): Router {
 			res.status(404).json({ detail: "not found" });
 			return;
 		}
+		recordLinkHit(state, req, "file", link.id, "view");
 		const f = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
 			$id: link.file_id,
 		});
@@ -344,6 +346,7 @@ export function publicRouter(state: AppState): Router {
 					$now: nowIso(),
 					$id: f.id,
 				});
+				recordLinkHit(state, req, "file", link.id, "download");
 				recordAudit(db, {
 					actor: "anonymous",
 					action: "file.downloaded",

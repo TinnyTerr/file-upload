@@ -49,6 +49,7 @@ import {
 import { buildPathIndex, getDirectory, isEditor } from "../directoryTree.ts";
 import { HttpError } from "../httpError.ts";
 import { consumeUse, newSlug, resolveActiveLink } from "../links.ts";
+import { deleteLinkHits, recordLinkHit } from "../linkStats.ts";
 import { getLogger } from "../logging.ts";
 import { asyncHandler } from "../middleware/asyncHandler.ts";
 import {
@@ -1801,6 +1802,7 @@ export function filesRouter(state: AppState): Router {
 				res.status(404).json({ detail: "not found" });
 				return;
 			}
+			recordLinkHit(state, req, "file", link.id, "save");
 			const sourceEff = resolveFileEncryption(db, source);
 			if (source.blob_id) {
 				db.run(
@@ -3014,6 +3016,7 @@ export function linksRouter(state: AppState): Router {
 				return;
 			}
 			db.run("DELETE FROM links WHERE id = $id", { $id: link.id });
+			deleteLinkHits(db, "file", link.id);
 			recordAudit(db, {
 				actor: user.username,
 				action: "link.deleted",

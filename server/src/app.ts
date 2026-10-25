@@ -34,6 +34,7 @@ import { publicPageRouter, publicRouter } from "./routes/public.ts";
 import { remoteUploadRouter } from "./routes/remoteUpload.ts";
 import { adminTorrentsRouter, torrentsRouter } from "./routes/torrents.ts";
 import { usersRouter } from "./routes/users.ts";
+import { linkStatsRouter } from "./routes/linkStats.ts";
 import { webhooksRouter } from "./routes/webhooks.ts";
 import { mountSpa, SERVER_ERROR_PAGE, sendErrorPage } from "./spa.ts";
 
@@ -81,6 +82,7 @@ export function createApp(state: AppState): Express {
 	app.use("/api/files", remoteUploadRouter(state));
 	app.use("/api/admin/files", adminFilesRouter(state));
 	app.use("/api/links", linksRouter(state));
+	app.use("/api/link-stats", linkStatsRouter(state));
 	app.use("/api/admin/directories", adminDirectoriesRouter(state));
 	app.use("/api", directoriesRouter(state));
 	app.use("/api", dropboxRouter(state));
