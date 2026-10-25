@@ -1,4 +1,5 @@
 import type { AppState } from "../appState.ts";
+import { Sentry, sentryEnabled } from "../sentry.ts";
 import { pruneLinkHits } from "../linkStats.ts";
 import { cacheEvictionJob } from "../cluster/cacheEviction.ts";
 import { syncCheckJob } from "../cluster/digest.ts";
@@ -170,7 +171,32 @@ function buildJobSpecs(state: AppState): JobSpec[] {
  * passes rewriting the same file at once. The tick is skipped, not queued. */
 const running = new Set<string>();
 
-async function runJob(id: string, run: () => unknown): Promise<void> {
+/** Sentry cron check-ins for jobs slow enough to express (the monitor schedule
+ * has minute resolution), so a job that silently stops running pages someone.
+ * The 1 s and 5 s pollers would be noise and are left out. */
+function monitored<T>(
+	id: string,
+	intervalMs: number,
+	fn: () => Promise<T>,
+): Promise<T> {
+	if (!sentryEnabled || intervalMs < MINUTE_MS) return fn();
+	return Sentry.withMonitor(`job-${id}`, fn, {
+		schedule: {
+			type: "interval",
+			value: Math.max(1, Math.round(intervalMs / MINUTE_MS)),
+			unit: "minute",
+		},
+		// Generous: a job may overrun its tick (see `running` above) and timers drift.
+		checkinMargin: 5,
+		maxRuntime: 60,
+	});
+}
+
+async function runJob(
+	id: string,
+	run: () => unknown,
+	intervalMs: number,
+): Promise<void> {
 	if (running.has(id)) {
 		activity.jobSkipped(id);
 		log.warning(`scheduled job skipped, previous run still active job=${id}`);
@@ -178,7 +204,7 @@ async function runJob(id: string, run: () => unknown): Promise<void> {
 	}
 	running.add(id);
 	try {
-		await activity.runJob(id, run);
+		await monitored(id, intervalMs, () => activity.runJob(id, run));
 	} catch (err) {
 		log.error(
 			`scheduled job failed job=${id}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
@@ -199,7 +225,7 @@ export function startBackendWorkers(state: AppState): string[] {
 		activity.registerJob(spec.id, spec.intervalMs, spec.touches);
 		const timer = setInterval(() => {
 			activity.jobTicked(spec.id);
-			void runJob(spec.id, spec.run);
+			void runJob(spec.id, spec.run, spec.intervalMs);
 		}, spec.intervalMs);
 		// Don't hold the process open just for background sweeps.
 		timer.unref?.();

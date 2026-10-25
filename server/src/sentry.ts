@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import * as Sentry from "@sentry/bun";
+import { SENTRY_RELEASE } from "./version.ts";
 
 /**
  * Sentry for the server. Imported first in `index.ts` so uncaught exceptions
@@ -25,14 +26,66 @@ function rootEnvValue(key: string): string | undefined {
 	return undefined;
 }
 
-const dsn = process.env.SENTRY_DSN_SERVER ?? rootEnvValue("SENTRY_DSN_SERVER");
+const envValue = (key: string) => process.env[key] ?? rootEnvValue(key);
+
+const dsn = envValue("SENTRY_DSN_SERVER");
 
 export const sentryEnabled = Boolean(dsn);
+
+/** The browser DSN's origin, for the page CSP's `connect-src` -- without it
+ * the browser blocks every event the client tries to send. Empty = web
+ * reporting is off. */
+export function sentryWebConnectOrigin(): string {
+	const web = envValue("SENTRY_DSN_WEB");
+	if (!web) return "";
+	try {
+		return new URL(web).origin;
+	} catch {
+		return "";
+	}
+}
+
+/** Share links carry their secret in the path (`/file/<slug>`, `/d/<slug>`,
+ * dropbox tokens) and query (`?ek=`, `?k=`, `?receive=`). A trace or event
+ * must show the route, not the credential. */
+export function scrubPath(url: string): string {
+	return url
+		.replace(/#.*$/, "")
+		.replace(/\/(api\/)?(file|d)\/[^/?#]+/g, "/$1$2/:slug")
+		.replace(/\/(api\/)?dropbox\/[^/?#]+/g, "/$1dropbox/:token")
+		.replace(/([?&](?:ek|k|receive)=)[^&]*/g, "$1[redacted]");
+}
+
+/** Paths that would drown the quota in transactions nobody will read: the 1 s
+ * cluster firehose poll, health probes, websockets and static assets. */
+const UNTRACED =
+	/^\/(assets\/|api\/health|api\/ws\/|api\/admin\/cluster\/(firehose|events)|api\/cluster\/(heartbeat|events))/;
+
+export function isTraced(path: string): boolean {
+	return !UNTRACED.test(path);
+}
+
+const num = (key: string, fallback: number): number => {
+	const n = Number(envValue(key));
+	return envValue(key) !== undefined && Number.isFinite(n) ? n : fallback;
+};
+
+const tracesRate = num("SENTRY_TRACES_SAMPLE_RATE", 0.1);
 
 if (dsn) {
 	Sentry.init({
 		dsn,
+		release: SENTRY_RELEASE,
 		environment: process.env.APP_ENV ?? "prod",
+		// The SDK opens the root http.server span itself (and continues the
+		// browser's sentry-trace); this only decides which requests are worth it.
+		tracesSampler: ({ attributes, parentSampled }) => {
+			const path = String(attributes?.["url.path"] ?? "");
+			if (path && !isTraced(path)) return 0;
+			return parentSampled ?? tracesRate;
+		},
+		// Structured logs are on by default in v11 (forwarded from logging.ts at
+		// WARNING). They only carry the log message, which is already redacted.
 		// Request bodies, cookies and IPs stay out: this server handles
 		// credentials and share-link secrets (?ek=).
 		beforeSend(event) {
@@ -40,17 +93,54 @@ if (dsn) {
 				delete event.request.cookies;
 				delete event.request.headers;
 				delete event.request.data;
-				if (event.request.url) {
-					event.request.url = event.request.url.replace(
-						/([?&](?:ek|k)=)[^&]*/g,
-						"$1[redacted]",
-					);
-				}
+				if (event.request.url) event.request.url = scrubPath(event.request.url);
 				delete event.request.query_string;
 			}
 			return event;
 		},
+		// Spans are streamed (v11 default), so this -- not beforeSendTransaction --
+		// is where the raw request URL the SDK records gets redacted.
+		beforeSendSpan(span) {
+			span.name = scrubPath(span.name);
+			// Attributes arrive raw (`"x"`) or typed (`{ value: "x" }`).
+			const attrs = span.attributes as Record<string, unknown>;
+			const rewrite = (key: string, fn: (v: string) => string) => {
+				const a = attrs[key];
+				if (typeof a === "string") attrs[key] = fn(a);
+				else if (a && typeof (a as { value?: unknown }).value === "string") {
+					(a as { value: string }).value = fn((a as { value: string }).value);
+				}
+			};
+			for (const key of ["url.full", "url.path", "http.url", "http.target"]) {
+				rewrite(key, scrubPath);
+			}
+			rewrite("url.query", () => "[redacted]");
+			return span;
+		},
+		beforeSendLog(log) {
+			log.message = scrubPath(String(log.message));
+			return log;
+		},
+		beforeBreadcrumb(crumb) {
+			if (typeof crumb.data?.url === "string")
+				crumb.data.url = scrubPath(crumb.data.url);
+			return crumb;
+		},
 	});
+}
+
+/** Runs `fn` inside a `db.query` span when a trace is active; otherwise it is
+ * a plain call. The statement text (never its parameters) is the span name. */
+export function dbSpan<T>(sql: string, fn: () => T): T {
+	if (!dsn || !Sentry.getActiveSpan()) return fn();
+	return Sentry.startSpan(
+		{
+			name: sql.replace(/\s+/g, " ").trim().slice(0, 200),
+			op: "db.query",
+			attributes: { "db.system": "sqlite" },
+		},
+		fn,
+	);
 }
 
 export { Sentry };

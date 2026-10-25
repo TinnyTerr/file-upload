@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { dbSpan } from "../sentry.ts";
 import { backfillUids, UID_TABLES } from "../cluster/identity.ts";
 import { ensureColumn } from "./backfill.ts";
 import type { Db, Row, SqlParams } from "./types.ts";
@@ -284,19 +285,22 @@ export function createSqliteDb(path: string): Db {
 	const db: Db = {
 		run(sql: string, params: SqlParams = {}) {
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			sqlite.query(sql).run(params as any);
+			dbSpan(sql, () => sqlite.query(sql).run(params as any));
 		},
 		get<T = Row>(sql: string, params: SqlParams = {}) {
 			// bun:sqlite returns null for a miss, but the Db contract says
 			// `T | undefined` -- normalize, or a caller testing `=== undefined`
 			// silently never matches a genuine miss.
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			const row = sqlite.query(sql).get(params as any) as T | null;
+			const row = dbSpan(
+				sql,
+				() => sqlite.query(sql).get(params as any) as T | null,
+			);
 			return row ?? undefined;
 		},
 		all<T = Row>(sql: string, params: SqlParams = {}) {
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
-			return sqlite.query(sql).all(params as any) as T[];
+			return dbSpan(sql, () => sqlite.query(sql).all(params as any) as T[]);
 		},
 		transaction<T>(fn: () => T): T {
 			return sqlite.transaction(fn)();

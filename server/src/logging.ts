@@ -100,6 +100,9 @@ const sink = {
 				tags: { logger },
 			});
 		}
+		if (sentryEnabled && rec.level >= 40 && rec.level < 50) {
+			Sentry.logger.warn(message, { logger });
+		}
 		entries.push({
 			id: nextId++,
 			created_at: new Date(rec.time).toISOString(),

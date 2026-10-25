@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import { sentryWebConnectOrigin } from "../sentry.ts";
 
 /**
  * Policy for everything this server sends unless a route says otherwise: the
@@ -9,7 +10,15 @@ import type { NextFunction, Request, Response } from "express";
  * inline `style=` and the standalone error page carries its own `<style>`.
  * `connect-src 'self'` covers the same-origin websocket firehose.
  */
-const PAGE_CSP = [
+/** `connect-src` also admits the browser Sentry DSN's origin when one is set;
+ * otherwise the browser blocks every event, trace and replay segment. */
+export function pageCsp(sentryOrigin = sentryWebConnectOrigin()): string {
+	return PAGE_CSP_DIRECTIVES.map((d) =>
+		d === "connect-src 'self'" && sentryOrigin ? `${d} ${sentryOrigin}` : d,
+	).join("; ");
+}
+
+const PAGE_CSP_DIRECTIVES = [
 	"default-src 'self'",
 	"script-src 'self'",
 	"style-src 'self' 'unsafe-inline'",
@@ -22,7 +31,7 @@ const PAGE_CSP = [
 	"base-uri 'self'",
 	"form-action 'self'",
 	"frame-ancestors 'none'",
-].join("; ");
+];
 
 /**
  * Headers for a response whose body is *uploaded bytes*: `/file/:slug/raw`,
@@ -44,11 +53,12 @@ export const BYTES_HEADERS: Readonly<Record<string, string>> = {
 
 /** Mirrors app/main.py::_SecurityHeaders, plus the page CSP. */
 export function securityHeaders(secure: boolean) {
+	const csp = pageCsp();
 	return (_req: Request, res: Response, next: NextFunction): void => {
 		res.setHeader("X-Content-Type-Options", "nosniff");
 		res.setHeader("X-Frame-Options", "DENY");
 		res.setHeader("Referrer-Policy", "no-referrer");
-		res.setHeader("Content-Security-Policy", PAGE_CSP);
+		res.setHeader("Content-Security-Policy", csp);
 		res.setHeader(
 			"Permissions-Policy",
 			"camera=(), microphone=(), geolocation=(), payment=(), usb=()",
