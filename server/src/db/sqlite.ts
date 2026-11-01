@@ -243,6 +243,19 @@ export function createSqliteDb(path: string): Db {
 		"target_directory_id",
 		"target_directory_id INTEGER REFERENCES directories(id) ON DELETE SET NULL",
 	);
+	// Persistent dropboxes. Old rows are all one-time links, which these
+	// defaults describe exactly.
+	for (const ddl of [
+		"name TEXT",
+		"password_hash TEXT",
+		"unlimited INTEGER NOT NULL DEFAULT 0",
+		"token_sealed TEXT",
+		"upload_count INTEGER NOT NULL DEFAULT 0",
+		"bytes_received INTEGER NOT NULL DEFAULT 0",
+		"last_used_at TEXT",
+	]) {
+		ensureColumn(sqlite, "dropbox_upload_links", ddl.split(" ")[0], ddl);
+	}
 	ensureColumn(sqlite, "torrent_jobs", "debrid_id", "debrid_id TEXT");
 	ensureColumn(sqlite, "torrent_jobs", "debrid_status", "debrid_status TEXT");
 	ensureColumn(

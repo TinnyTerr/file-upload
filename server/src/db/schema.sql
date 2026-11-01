@@ -398,11 +398,34 @@ CREATE TABLE IF NOT EXISTS dropbox_upload_links (
   active INTEGER NOT NULL DEFAULT 1,
   expires_at TEXT,
   used_at TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- Persistent boxes: `unlimited` links are never spent by an upload, and keep
+  -- running totals. `token_sealed` lets the owner re-copy the URL later (the
+  -- hash alone can't be reversed); NULL on one-time links.
+  name TEXT,
+  password_hash TEXT,
+  unlimited INTEGER NOT NULL DEFAULT 0,
+  token_sealed TEXT,
+  upload_count INTEGER NOT NULL DEFAULT 0,
+  bytes_received INTEGER NOT NULL DEFAULT 0,
+  last_used_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_dropbox_upload_links_owner_id ON dropbox_upload_links(owner_id);
 CREATE INDEX IF NOT EXISTS ix_dropbox_upload_links_target_directory_id ON dropbox_upload_links(target_directory_id);
 CREATE INDEX IF NOT EXISTS ix_dropbox_upload_links_token_hash ON dropbox_upload_links(token_hash);
+
+-- One row per file a dropbox received. `file_id` is deliberately not a foreign
+-- key: deleting the file shouldn't erase the record that it arrived.
+CREATE TABLE IF NOT EXISTS dropbox_uploads (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  link_id INTEGER NOT NULL REFERENCES dropbox_upload_links(id) ON DELETE CASCADE,
+  file_id INTEGER,
+  original_filename TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  ip TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_dropbox_uploads_link_id ON dropbox_uploads(link_id, id);
 
 -- Playback keys for account-restricted media. The credential the client holds
 -- is a *sealed token* (crypto/secretbox.ts, AES-256-GCM under MASTER_KEY_B64)

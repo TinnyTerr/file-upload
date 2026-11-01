@@ -277,6 +277,23 @@ export interface DropboxLinkRow {
 	expires_at: string | null;
 	used_at: string | null;
 	created_at: string;
+	name: string | null;
+	password_hash: string | null;
+	unlimited: number;
+	token_sealed: string | null;
+	upload_count: number;
+	bytes_received: number;
+	last_used_at: string | null;
+}
+
+export interface DropboxUploadRow {
+	id: number;
+	link_id: number;
+	file_id: number | null;
+	original_filename: string;
+	size: number;
+	ip: string | null;
+	created_at: string;
 }
 
 export interface AuditLogRow {

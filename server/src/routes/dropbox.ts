@@ -10,7 +10,7 @@ import {
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import busboy from "busboy";
-import type { Response } from "express";
+import type { Request, Response } from "express";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
@@ -19,6 +19,7 @@ import { openBox, seal } from "../crypto/secretbox.ts";
 import {
 	type DirectoryRow,
 	type DropboxLinkRow,
+	type DropboxUploadRow,
 	nowIso,
 	type PermissionRow,
 	type UserRow,
@@ -35,6 +36,8 @@ import { requireActiveUser } from "../middleware/deps.ts";
 import { ensurePermissions } from "../permissions.ts";
 import { present } from "../present.ts";
 import { requireCsrf } from "../security/csrf.ts";
+import { hashPassword, verifyPassword } from "../security/passwords.ts";
+import { checkRateLimit } from "../security/rateLimit.ts";
 import type { FileHashes } from "../storage/blobs.ts";
 import { storageRoot } from "../storage/paths.ts";
 import { triggerWebhooks } from "../webhooks.ts";
@@ -62,6 +65,11 @@ const log = getLogger("app.routes.dropbox");
 
 const DROPBOX_CHUNK_TOKEN_AAD = Buffer.from("dropbox-chunked-upload-v1");
 const CHUNK_SESSION_TTL = 12 * 3600;
+const TOKEN_SEAL_AAD = Buffer.from("dropbox-link-token-v1");
+const PASSWORD_HEADER = "x-dropbox-password";
+const MIN_PASSWORD_LEN = 8;
+/** Wrong-or-missing password attempts allowed per link+IP per minute. */
+const PASSWORD_ATTEMPTS_PER_MIN = 10;
 
 function tokenHash(token: string): string {
 	return createHash("sha256").update(token).digest("hex");
@@ -103,7 +111,12 @@ function resolveDropbox(state: AppState, token: string): DropboxLinkRow {
 	);
 	if (!row) throw new HttpError(404, "not found");
 	if (!row.active || row.used_at !== null)
-		throw new HttpError(410, "dropbox link has already been used");
+		throw new HttpError(
+			410,
+			row.unlimited
+				? "this dropbox is closed"
+				: "dropbox link has already been used",
+		);
 	if (row.expires_at !== null && row.expires_at < nowIso())
 		throw new HttpError(410, "dropbox link expired");
 	return row;
@@ -172,6 +185,64 @@ function openDropboxToken(
 	return { row, meta };
 }
 
+/** Gate for the two routes that mint an upload (`/upload` and `/upload/init`).
+ * The chunk/status/finalize routes need no password of their own: they're
+ * keyed by a sealed `upload_id` that only exists once init passed this. */
+async function requireDropboxPassword(
+	state: AppState,
+	row: DropboxLinkRow,
+	req: Request,
+): Promise<void> {
+	if (!row.password_hash) return;
+	const verdict = checkRateLimit(
+		`dropbox-pw:${row.id}:${clientIp(state, req)}`,
+		PASSWORD_ATTEMPTS_PER_MIN,
+	);
+	if (!verdict.allowed) throw new HttpError(429, "too many attempts");
+	const given = req.header(PASSWORD_HEADER);
+	// 403, not 401: the SPA treats a 401 as a dead session.
+	if (!given) throw new HttpError(403, "password required");
+	if (!(await verifyPassword(given, row.password_hash))) {
+		throw new HttpError(403, "wrong password");
+	}
+}
+
+/** Books a completed upload against its link. One-time links are spent;
+ * persistent ones stay open and accumulate totals plus a per-file log. */
+function recordDropboxUpload(
+	state: AppState,
+	row: DropboxLinkRow,
+	file: { fileId: number; filename: string; size: number; ip: string },
+): void {
+	const { db } = state;
+	const now = nowIso();
+	if (row.unlimited) {
+		db.run(
+			`UPDATE dropbox_upload_links
+          SET upload_count = upload_count + 1, bytes_received = bytes_received + $size, last_used_at = $now
+        WHERE id = $id`,
+			{ $size: file.size, $now: now, $id: row.id },
+		);
+		db.run(
+			`INSERT INTO dropbox_uploads (link_id, file_id, original_filename, size, ip, created_at)
+       VALUES ($link, $file, $name, $size, $ip, $now)`,
+			{
+				$link: row.id,
+				$file: file.fileId,
+				$name: file.filename,
+				$size: file.size,
+				$ip: file.ip,
+				$now: now,
+			},
+		);
+		return;
+	}
+	db.run(
+		"UPDATE dropbox_upload_links SET active = 0, used_at = $now WHERE id = $id",
+		{ $now: now, $id: row.id },
+	);
+}
+
 /** Mirrors app/routes/dropbox.py::_dropbox_upload_context -- resolves the
  * dropbox link's owner (and target directory, if any) so the upload is
  * accounted against the link owner's quota/permissions, not the anonymous
@@ -212,11 +283,27 @@ export function dropboxRouter(state: AppState): Router {
 		requireSession(state),
 		requireCsrf,
 		requireActiveUser(state),
-		(req, res) => {
+		asyncHandler(async (req, res) => {
 			const user = present(req.currentUser);
 			const body = req.body ?? {};
 			const targetDirectoryId: number | null = body.target_directory_id ?? null;
 			let ownerId = user.id;
+			const unlimited = body.unlimited === true;
+			const name = cleanName(body.name);
+			const password = typeof body.password === "string" ? body.password : "";
+			if (unlimited && !password) {
+				res
+					.status(400)
+					.json({ detail: "a persistent dropbox needs a password" });
+				return;
+			}
+			if (password && password.length < MIN_PASSWORD_LEN) {
+				res.status(400).json({
+					detail: `password must be at least ${MIN_PASSWORD_LEN} characters`,
+				});
+				return;
+			}
+			const passwordHash = password ? await hashPassword(password) : null;
 
 			if (targetDirectoryId !== null) {
 				const directory = db.get<DirectoryRow>(
@@ -234,12 +321,15 @@ export function dropboxRouter(state: AppState): Router {
 				ownerId = directory.owner_id;
 			}
 
-			// Deactivate existing active links for this exact target to prevent
-			// unbounded accumulation.
-			const existing = db.all<DropboxLinkRow>(
-				"SELECT * FROM dropbox_upload_links WHERE owner_id = $ownerId AND target_directory_id IS $dirId AND active = 1",
-				{ $ownerId: ownerId, $dirId: targetDirectoryId },
-			);
+			// Deactivate existing active one-time links for this exact target to
+			// prevent unbounded accumulation. Persistent boxes are managed by hand
+			// and many can point at the same folder.
+			const existing = unlimited
+				? []
+				: db.all<DropboxLinkRow>(
+						"SELECT * FROM dropbox_upload_links WHERE owner_id = $ownerId AND target_directory_id IS $dirId AND active = 1 AND unlimited = 0",
+						{ $ownerId: ownerId, $dirId: targetDirectoryId },
+					);
 			for (const elink of existing) {
 				db.run("UPDATE dropbox_upload_links SET active = 0 WHERE id = $id", {
 					$id: elink.id,
@@ -252,23 +342,35 @@ export function dropboxRouter(state: AppState): Router {
 				});
 			}
 
-			const expiresInSeconds = Math.min(
-				Math.max(Number(body.expires_in_seconds ?? 3600), 60),
-				60 * 60 * 24 * 30,
-			);
+			// A persistent box has no expiry unless one is asked for; a one-time
+			// link keeps its 1h default and 30d cap.
+			let expiresAt: string | null = null;
+			if (!unlimited || body.expires_in_seconds != null) {
+				const expiresInSeconds = Math.min(
+					Math.max(Number(body.expires_in_seconds ?? 3600), 60),
+					60 * 60 * 24 * (unlimited ? 3650 : 30),
+				);
+				expiresAt = new Date(
+					Date.now() + expiresInSeconds * 1000,
+				).toISOString();
+			}
 			const token = randomBytes(32).toString("base64url");
-			const expiresAt = new Date(
-				Date.now() + expiresInSeconds * 1000,
-			).toISOString();
 			db.run(
-				`INSERT INTO dropbox_upload_links (owner_id, target_directory_id, token_hash, active, expires_at, created_at)
-       VALUES ($ownerId, $dirId, $hash, 1, $expiresAt, $now)`,
+				`INSERT INTO dropbox_upload_links
+         (owner_id, target_directory_id, token_hash, active, expires_at, created_at,
+          name, password_hash, unlimited, token_sealed)
+       VALUES ($ownerId, $dirId, $hash, 1, $expiresAt, $now,
+               $name, $pw, $unlimited, $sealed)`,
 				{
 					$ownerId: ownerId,
 					$dirId: targetDirectoryId,
 					$hash: tokenHash(token),
 					$expiresAt: expiresAt,
 					$now: nowIso(),
+					$name: name,
+					$pw: passwordHash,
+					$unlimited: unlimited ? 1 : 0,
+					$sealed: unlimited ? sealLinkToken(state, token) : null,
 				},
 			);
 			const row = present(
@@ -278,7 +380,9 @@ export function dropboxRouter(state: AppState): Router {
 			);
 			recordAudit(db, {
 				actor: user.username,
-				action: "dropbox_link.created",
+				action: unlimited
+					? "dropbox_link.created_persistent"
+					: "dropbox_link.created",
 				target: `dropbox:${row.id}`,
 				ip: clientIp(state, req),
 			});
@@ -294,7 +398,151 @@ export function dropboxRouter(state: AppState): Router {
 				upload_url: `${base}/dropbox/${token}/upload`,
 				target_directory_id: targetDirectoryId,
 				expires_at: expiresAt,
+				name,
+				unlimited,
+				has_password: passwordHash !== null,
 			});
+		}),
+	);
+
+	// Everything the owner has, newest first. Persistent boxes carry their
+	// sealed token back out so the URL can be copied again.
+	router.get(
+		"/dropbox-links",
+		requireSession(state),
+		requireActiveUser(state),
+		(req, res) => {
+			const user = present(req.currentUser);
+			const rows = db.all<DropboxLinkRow>(
+				`SELECT * FROM dropbox_upload_links
+          WHERE owner_id = $owner AND (unlimited = 1 OR (active = 1 AND used_at IS NULL))
+          ORDER BY id DESC`,
+				{ $owner: user.id },
+			);
+			const base = `${requestProtocol(state.settings, req)}://${req.get("host")}`;
+			res.json(
+				rows.map((r) => {
+					const token = r.token_sealed
+						? openLinkToken(state, r.token_sealed)
+						: null;
+					return {
+						id: r.id,
+						name: r.name,
+						target_directory_id: r.target_directory_id,
+						unlimited: !!r.unlimited,
+						has_password: !!r.password_hash,
+						active: !!r.active,
+						expires_at: r.expires_at,
+						created_at: r.created_at,
+						upload_count: r.upload_count,
+						bytes_received: r.bytes_received,
+						last_used_at: r.last_used_at,
+						token,
+						url: token ? `${base}/?receive=${encodeURIComponent(token)}` : null,
+					};
+				}),
+			);
+		},
+	);
+
+	router.get(
+		"/dropbox-links/:id/uploads",
+		requireSession(state),
+		requireActiveUser(state),
+		(req, res) => {
+			const row = ownedLink(state, req, res);
+			if (!row) return;
+			const limit = Math.min(Math.max(Number(req.query.limit ?? 100), 1), 500);
+			res.json(
+				db.all<DropboxUploadRow>(
+					"SELECT * FROM dropbox_uploads WHERE link_id = $id ORDER BY id DESC LIMIT $limit",
+					{ $id: row.id, $limit: limit },
+				),
+			);
+		},
+	);
+
+	// Rename, pause/resume, or change the password. A persistent box can't have
+	// its password removed: the password is the only thing guarding an
+	// open-ended, expiry-less drop point.
+	router.patch(
+		"/dropbox-links/:id",
+		requireSession(state),
+		requireCsrf,
+		requireActiveUser(state),
+		asyncHandler(async (req, res) => {
+			const user = present(req.currentUser);
+			const row = ownedLink(state, req, res);
+			if (!row) return;
+			const body = req.body ?? {};
+			if ("name" in body) {
+				db.run("UPDATE dropbox_upload_links SET name = $n WHERE id = $id", {
+					$n: cleanName(body.name),
+					$id: row.id,
+				});
+			}
+			if (typeof body.active === "boolean") {
+				db.run("UPDATE dropbox_upload_links SET active = $a WHERE id = $id", {
+					$a: body.active ? 1 : 0,
+					$id: row.id,
+				});
+			}
+			if ("password" in body) {
+				const pw = body.password;
+				if (pw === null || pw === "") {
+					if (row.unlimited) {
+						res
+							.status(400)
+							.json({ detail: "a persistent dropbox needs a password" });
+						return;
+					}
+					db.run(
+						"UPDATE dropbox_upload_links SET password_hash = NULL WHERE id = $id",
+						{ $id: row.id },
+					);
+				} else if (typeof pw !== "string" || pw.length < MIN_PASSWORD_LEN) {
+					res.status(400).json({
+						detail: `password must be at least ${MIN_PASSWORD_LEN} characters`,
+					});
+					return;
+				} else {
+					db.run(
+						"UPDATE dropbox_upload_links SET password_hash = $h WHERE id = $id",
+						{ $h: await hashPassword(pw), $id: row.id },
+					);
+				}
+			}
+			recordAudit(db, {
+				actor: user.username,
+				action: "dropbox_link.updated",
+				target: `dropbox:${row.id}`,
+				ip: clientIp(state, req),
+			});
+			res.json({ status: "ok" });
+		}),
+	);
+
+	// Hard delete, including the receive log. (DELETE /dropbox-links/:token
+	// below only deactivates.)
+	router.delete(
+		"/dropbox-links/by-id/:id",
+		requireSession(state),
+		requireCsrf,
+		requireActiveUser(state),
+		(req, res) => {
+			const user = present(req.currentUser);
+			const row = ownedLink(state, req, res);
+			if (!row) return;
+			db.run("DELETE FROM dropbox_upload_links WHERE id = $id", {
+				$id: row.id,
+			});
+			recordAudit(db, {
+				actor: user.username,
+				action: "dropbox_link.deleted",
+				target: `dropbox:${row.id}`,
+				ip: clientIp(state, req),
+			});
+			res.json({ status: "deleted" });
 		},
 	);
 
@@ -344,15 +592,19 @@ export function dropboxRouter(state: AppState): Router {
 				status: "active",
 				target_directory_id: row.target_directory_id,
 				expires_at: row.expires_at,
+				name: row.name,
+				unlimited: !!row.unlimited,
+				password_required: !!row.password_hash,
 			});
 		} catch (err) {
 			respondError(res, err);
 		}
 	});
 
-	router.post("/dropbox/:token/upload/init", (req, res) => {
+	router.post("/dropbox/:token/upload/init", async (req, res) => {
 		try {
 			const row = resolveDropbox(state, req.params.token);
+			await requireDropboxPassword(state, row, req);
 			const { owner, directory, perm } = dropboxUploadContext(state, row);
 			const body = req.body ?? {};
 			const totalSize = Number(body.total_size ?? 0);
@@ -548,13 +800,12 @@ export function dropboxRouter(state: AppState): Router {
 						expiresInSeconds: null,
 						sourceType: "dropbox",
 					});
-					db.run(
-						"UPDATE dropbox_upload_links SET active = 0, used_at = $now WHERE id = $id",
-						{
-							$now: nowIso(),
-							$id: row.id,
-						},
-					);
+					recordDropboxUpload(state, row, {
+						fileId: Number(result.file_id),
+						filename: meta.fn,
+						size: meta.total,
+						ip: requestOrigin.ip,
+					});
 					recordAudit(db, {
 						actor: "dropbox",
 						action: "dropbox.uploaded",
@@ -564,6 +815,8 @@ export function dropboxRouter(state: AppState): Router {
 					void triggerWebhooks(state, owner.id, "dropbox.received", {
 						file_id: result.file_id,
 						original_filename: meta.fn,
+						dropbox_id: row.id,
+						dropbox_name: row.name,
 					}).catch(() => {});
 					await rm(parts, { recursive: true, force: true });
 					log.info(
@@ -577,13 +830,14 @@ export function dropboxRouter(state: AppState): Router {
 		}),
 	);
 
-	router.post("/dropbox/:token/upload", (req, res) => {
+	router.post("/dropbox/:token/upload", async (req, res) => {
 		let row: DropboxLinkRow;
 		let owner: UserRow;
 		let directory: DirectoryRow | null;
 		let perm: PermissionRow;
 		try {
 			row = resolveDropbox(state, req.params.token);
+			await requireDropboxPassword(state, row, req);
 			({ owner, directory, perm } = dropboxUploadContext(state, row));
 		} catch (err) {
 			respondError(res, err);
@@ -687,13 +941,12 @@ export function dropboxRouter(state: AppState): Router {
 						expiresInSeconds: null,
 						sourceType: "dropbox",
 					});
-					db.run(
-						"UPDATE dropbox_upload_links SET active = 0, used_at = $now WHERE id = $id",
-						{
-							$now: nowIso(),
-							$id: row.id,
-						},
-					);
+					recordDropboxUpload(state, row, {
+						fileId: Number(result.file_id),
+						filename: originalFilename,
+						size: written,
+						ip: clientIp(state, req),
+					});
 					recordAudit(db, {
 						actor: "dropbox",
 						action: "dropbox.uploaded",
@@ -703,6 +956,8 @@ export function dropboxRouter(state: AppState): Router {
 					void triggerWebhooks(state, owner.id, "dropbox.received", {
 						file_id: result.file_id,
 						original_filename: originalFilename,
+						dropbox_id: row.id,
+						dropbox_name: row.name,
 					}).catch(() => {});
 					log.info(
 						`dropbox upload completed id=${row.id} file_id=${result.file_id} owner_id=${owner.id}`,
@@ -734,6 +989,55 @@ export function dropboxRouter(state: AppState): Router {
 	});
 
 	return router;
+}
+
+function cleanName(v: unknown): string | null {
+	if (typeof v !== "string") return null;
+	const t = v.trim().slice(0, 80);
+	return t || null;
+}
+
+function sealLinkToken(state: AppState, token: string): string {
+	return seal(
+		getMasterKey(state.settings),
+		Buffer.from(token),
+		TOKEN_SEAL_AAD,
+	).toString("base64url");
+}
+
+function openLinkToken(state: AppState, sealed: string): string | null {
+	try {
+		return openBox(
+			getMasterKey(state.settings),
+			Buffer.from(sealed, "base64url"),
+			TOKEN_SEAL_AAD,
+		).toString("utf-8");
+	} catch {
+		return null;
+	}
+}
+
+/** Loads `:id` and checks the caller owns it (masters may manage any). Writes
+ * the 404/403 itself and returns null so the handler can just bail. */
+function ownedLink(
+	state: AppState,
+	req: Request,
+	res: Response,
+): DropboxLinkRow | null {
+	const user = present(req.currentUser);
+	const row = state.db.get<DropboxLinkRow>(
+		"SELECT * FROM dropbox_upload_links WHERE id = $id",
+		{ $id: Number(req.params.id) },
+	);
+	if (!row) {
+		res.status(404).json({ detail: "not found" });
+		return null;
+	}
+	if (row.owner_id !== user.id && user.role !== "master") {
+		res.status(403).json({ detail: "not your link" });
+		return null;
+	}
+	return row;
 }
 
 function respondError(res: Response, err: unknown): void {
