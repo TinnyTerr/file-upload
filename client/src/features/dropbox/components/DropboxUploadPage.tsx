@@ -18,6 +18,17 @@ import { Dropzone } from "@/features/files/components/Dropzone";
 import { formatBytes } from "@/lib/bytes";
 import { dropboxService } from "../services/dropboxService";
 
+const fileIds = new WeakMap<File, number>();
+let nextFileId = 0;
+function fileKey(f: File): number {
+	let id = fileIds.get(f);
+	if (id === undefined) {
+		id = nextFileId++;
+		fileIds.set(f, id);
+	}
+	return id;
+}
+
 export function DropboxUploadPage({ token }: { token: string }) {
 	const info = useQuery({
 		queryKey: ["dropbox", token],
@@ -163,7 +174,7 @@ export function DropboxUploadPage({ token }: { token: string }) {
 					<div className="space-y-2">
 						{files.map((f, i) => (
 							<div
-								key={`${f.name}:${f.size}:${f.lastModified}:${i}`}
+								key={fileKey(f)}
 								className="flex items-center justify-between gap-2 rounded-lg border border-border bg-secondary/20 px-3 py-2.5"
 							>
 								<span className="flex min-w-0 items-center gap-2">
