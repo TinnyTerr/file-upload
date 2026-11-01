@@ -423,6 +423,7 @@ CREATE TABLE IF NOT EXISTS dropbox_uploads (
   original_filename TEXT NOT NULL,
   size INTEGER NOT NULL,
   ip TEXT,
+  uploader_id TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_dropbox_uploads_link_id ON dropbox_uploads(link_id, id);

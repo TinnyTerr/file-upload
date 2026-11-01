@@ -207,12 +207,43 @@ async function requireDropboxPassword(
 	}
 }
 
+const UPLOADER_COOKIE = "fu_dropbox_uploader";
+const UPLOADER_COOKIE_MAX_AGE_MS = 365 * 24 * 3600 * 1000;
+
+/** Returns this browser's anonymous uploader id, minting and setting the
+ * cookie if it has none. Not auth: it only lets the owner group a box's files
+ * by who sent them (an IP is shared by a household/NAT and changes on mobile).
+ * Cleared cookies or another browser just look like a new uploader. */
+function readUploaderId(req: Request): string | null {
+	const have = req.cookies?.[UPLOADER_COOKIE];
+	return typeof have === "string" && /^[0-9a-f]{32}$/.test(have) ? have : null;
+}
+
+function uploaderId(state: AppState, req: Request, res: Response): string {
+	const have = readUploaderId(req);
+	if (have) return have;
+	const id = randomBytes(16).toString("hex");
+	res.cookie(UPLOADER_COOKIE, id, {
+		...state.sessionManager.cookieParams(),
+		sameSite: "lax",
+		maxAge: UPLOADER_COOKIE_MAX_AGE_MS,
+		path: "/api/dropbox",
+	});
+	return id;
+}
+
 /** Books a completed upload against its link. One-time links are spent;
  * persistent ones stay open and accumulate totals plus a per-file log. */
 function recordDropboxUpload(
 	state: AppState,
 	row: DropboxLinkRow,
-	file: { fileId: number; filename: string; size: number; ip: string },
+	file: {
+		fileId: number;
+		filename: string;
+		size: number;
+		ip: string;
+		uploaderId: string | null;
+	},
 ): void {
 	const { db } = state;
 	const now = nowIso();
@@ -224,14 +255,15 @@ function recordDropboxUpload(
 			{ $size: file.size, $now: now, $id: row.id },
 		);
 		db.run(
-			`INSERT INTO dropbox_uploads (link_id, file_id, original_filename, size, ip, created_at)
-       VALUES ($link, $file, $name, $size, $ip, $now)`,
+			`INSERT INTO dropbox_uploads (link_id, file_id, original_filename, size, ip, uploader_id, created_at)
+       VALUES ($link, $file, $name, $size, $ip, $uploader, $now)`,
 			{
 				$link: row.id,
 				$file: file.fileId,
 				$name: file.filename,
 				$size: file.size,
 				$ip: file.ip,
+				$uploader: file.uploaderId,
 				$now: now,
 			},
 		);
@@ -608,6 +640,7 @@ export function dropboxRouter(state: AppState): Router {
 		try {
 			const row = resolveDropbox(state, req.params.token);
 			await requireDropboxPassword(state, row, req);
+			uploaderId(state, req, res);
 			const { owner, directory, perm } = dropboxUploadContext(state, row);
 			const body = req.body ?? {};
 			const totalSize = Number(body.total_size ?? 0);
@@ -775,6 +808,7 @@ export function dropboxRouter(state: AppState): Router {
 				// Read while the socket is still up — see FinalizeOpts.requestOrigin.
 				const requestOrigin = {
 					ip: clientIp(state, req),
+					uploaderId: readUploaderId(req),
 					baseUrl: `${requestProtocol(state.settings, req)}://${req.get("host")}`,
 				};
 				startFinalize(res, relPath, `dropbox id=${row.id}`, async () => {
@@ -808,6 +842,7 @@ export function dropboxRouter(state: AppState): Router {
 						filename: meta.fn,
 						size: meta.total,
 						ip: requestOrigin.ip,
+						uploaderId: requestOrigin.uploaderId,
 					});
 					recordAudit(db, {
 						actor: "dropbox",
@@ -838,9 +873,11 @@ export function dropboxRouter(state: AppState): Router {
 		let owner: UserRow;
 		let directory: DirectoryRow | null;
 		let perm: PermissionRow;
+		let uploaderId_: string;
 		try {
 			row = resolveDropbox(state, req.params.token);
 			await requireDropboxPassword(state, row, req);
+			uploaderId_ = uploaderId(state, req, res);
 			({ owner, directory, perm } = dropboxUploadContext(state, row));
 		} catch (err) {
 			respondError(res, err);
@@ -949,6 +986,7 @@ export function dropboxRouter(state: AppState): Router {
 						filename: originalFilename,
 						size: written,
 						ip: clientIp(state, req),
+						uploaderId: uploaderId_,
 					});
 					recordAudit(db, {
 						actor: "dropbox",

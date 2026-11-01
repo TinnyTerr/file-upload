@@ -293,6 +293,7 @@ export interface DropboxUploadRow {
 	original_filename: string;
 	size: number;
 	ip: string | null;
+	uploader_id: string | null;
 	created_at: string;
 }
 

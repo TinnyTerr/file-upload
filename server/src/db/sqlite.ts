@@ -277,6 +277,8 @@ export function createSqliteDb(path: string): Db {
 		"format",
 		"format TEXT NOT NULL DEFAULT 'json'",
 	);
+	// Anonymous per-browser uploader cookie id on dropbox uploads.
+	ensureColumn(sqlite, "dropbox_uploads", "uploader_id", "uploader_id TEXT");
 	// Per-key override of the process-wide default rate limit. Existing keys
 	// predate the feature and get NULL, meaning "use the default".
 	ensureColumn(
