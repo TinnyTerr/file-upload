@@ -10,6 +10,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
+import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError } from "@/config/api";
@@ -32,6 +33,8 @@ export function DropboxUploadPage({ token }: { token: string }) {
 	);
 	const [phase, setPhase] = useState<"uploading" | "finalizing">("uploading");
 	const [error, setError] = useState<string | null>(null);
+	const [password, setPassword] = useState("");
+	const [sent, setSent] = useState(0);
 
 	const upload = async () => {
 		if (!file) return;
@@ -40,10 +43,17 @@ export function DropboxUploadPage({ token }: { token: string }) {
 		setPercent(0);
 		setError(null);
 		try {
-			await dropboxService.upload(token, file, file.name, (progress) => {
-				setPhase(progress.phase);
-				setPercent(progress.percent);
-			});
+			await dropboxService.upload(
+				token,
+				file,
+				file.name,
+				(progress) => {
+					setPhase(progress.phase);
+					setPercent(progress.percent);
+				},
+				password,
+			);
+			setSent((n) => n + 1);
 			setStatus("done");
 		} catch (err) {
 			setError(err instanceof Error ? err.message : "Upload failed");
@@ -78,6 +88,13 @@ export function DropboxUploadPage({ token }: { token: string }) {
 		);
 	}
 
+	const persistent = info.data?.unlimited ?? false;
+	const again = () => {
+		setFile(null);
+		setPercent(0);
+		setStatus("idle");
+	};
+
 	if (status === "done") {
 		return (
 			<Card>
@@ -87,9 +104,15 @@ export function DropboxUploadPage({ token }: { token: string }) {
 					</div>
 					<h1 className="break-words text-xl font-bold">File sent</h1>
 					<p className="max-w-sm text-sm text-muted-foreground">
-						Your file was uploaded successfully. This one-time link is now
-						closed.
+						{persistent
+							? `Your file was uploaded successfully (${sent} sent so far).`
+							: "Your file was uploaded successfully. This one-time link is now closed."}
 					</p>
+					{persistent && (
+						<Button variant="secondary" onClick={again}>
+							Send another
+						</Button>
+					)}
 				</CardContent>
 			</Card>
 		);
@@ -103,9 +126,13 @@ export function DropboxUploadPage({ token }: { token: string }) {
 						<Inbox className="size-6 text-white" />
 					</div>
 					<div>
-						<h1 className="break-words text-xl font-bold">Send a file</h1>
+						<h1 className="break-words text-xl font-bold">
+							{info.data?.name || "Send a file"}
+						</h1>
 						<p className="text-sm text-muted-foreground">
-							Upload one file to the person who shared this link.
+							{persistent
+								? "Upload files to the person who shared this dropbox."
+								: "Upload one file to the person who shared this link."}
 						</p>
 					</div>
 				</div>
@@ -133,13 +160,28 @@ export function DropboxUploadPage({ token }: { token: string }) {
 					</div>
 				)}
 
+				{info.data?.password_required && (
+					<Input
+						type="password"
+						placeholder="Dropbox password"
+						autoComplete="off"
+						value={password}
+						onChange={(e) => setPassword(e.target.value)}
+						disabled={status === "uploading"}
+					/>
+				)}
+
 				{status === "uploading" && <Progress value={percent} />}
 				{error && <p className="text-sm text-destructive">{error}</p>}
 
 				<Button
 					className="w-full"
 					size="lg"
-					disabled={!file || status === "uploading"}
+					disabled={
+						!file ||
+						status === "uploading" ||
+						(!!info.data?.password_required && !password)
+					}
 					loading={status === "uploading"}
 					onClick={upload}
 				>

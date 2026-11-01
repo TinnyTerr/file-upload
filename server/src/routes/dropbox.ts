@@ -413,10 +413,12 @@ export function dropboxRouter(state: AppState): Router {
 		requireActiveUser(state),
 		(req, res) => {
 			const user = present(req.currentUser);
-			const rows = db.all<DropboxLinkRow>(
-				`SELECT * FROM dropbox_upload_links
-          WHERE owner_id = $owner AND (unlimited = 1 OR (active = 1 AND used_at IS NULL))
-          ORDER BY id DESC`,
+			const rows = db.all<DropboxLinkRow & { directory_title: string | null }>(
+				`SELECT l.*, d.title AS directory_title
+           FROM dropbox_upload_links l
+           LEFT JOIN directories d ON d.id = l.target_directory_id
+          WHERE l.owner_id = $owner AND (l.unlimited = 1 OR (l.active = 1 AND l.used_at IS NULL))
+          ORDER BY l.id DESC`,
 				{ $owner: user.id },
 			);
 			const base = `${requestProtocol(state.settings, req)}://${req.get("host")}`;
@@ -429,6 +431,7 @@ export function dropboxRouter(state: AppState): Router {
 						id: r.id,
 						name: r.name,
 						target_directory_id: r.target_directory_id,
+						target_directory_title: r.directory_title,
 						unlimited: !!r.unlimited,
 						has_password: !!r.password_hash,
 						active: !!r.active,

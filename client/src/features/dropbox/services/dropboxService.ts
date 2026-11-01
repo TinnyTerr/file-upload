@@ -14,7 +14,40 @@ export interface DropboxInfo {
 	status: string;
 	target_directory_id: number | null;
 	expires_at: string | null;
+	name: string | null;
+	unlimited: boolean;
+	password_required: boolean;
 }
+
+/** An owner-side row from `GET /dropbox-links`. `token`/`url` are only
+ * present for persistent boxes. */
+export interface DropboxSummary {
+	id: number;
+	name: string | null;
+	target_directory_id: number | null;
+	target_directory_title: string | null;
+	unlimited: boolean;
+	has_password: boolean;
+	active: boolean;
+	expires_at: string | null;
+	created_at: string;
+	upload_count: number;
+	bytes_received: number;
+	last_used_at: string | null;
+	token: string | null;
+	url: string | null;
+}
+
+export interface DropboxReceived {
+	id: number;
+	file_id: number | null;
+	original_filename: string;
+	size: number;
+	ip: string | null;
+	created_at: string;
+}
+
+const PASSWORD_HEADER = "X-Dropbox-Password";
 
 interface DropboxChunkedInit {
 	upload_id: string;
@@ -44,9 +77,25 @@ export function receiveUrl(token: string): string {
 
 export const dropboxService = {
 	create: (body: {
-		expires_in_seconds: number;
+		expires_in_seconds?: number;
 		target_directory_id?: number | null;
+		unlimited?: boolean;
+		name?: string;
+		password?: string;
 	}) => api.post<DropboxLink>("/dropbox-links", { json: body }),
+
+	list: () => api.get<DropboxSummary[]>("/dropbox-links"),
+
+	received: (id: number) =>
+		api.get<DropboxReceived[]>(`/dropbox-links/${id}/uploads`),
+
+	update: (
+		id: number,
+		body: { name?: string | null; active?: boolean; password?: string | null },
+	) => api.patch<{ status: string }>(`/dropbox-links/${id}`, { json: body }),
+
+	remove: (id: number) =>
+		api.delete<{ status: string }>(`/dropbox-links/by-id/${id}`),
 
 	cancel: (token: string) =>
 		api.delete<{ status: string }>(
@@ -60,10 +109,23 @@ export const dropboxService = {
 		file: File,
 		originalFilename: string,
 		onProgress?: (progress: DropboxUploadProgress) => void,
+		password?: string,
 	) =>
 		file.size >= CHUNKED_THRESHOLD
-			? chunkedDropboxUpload(token, file, originalFilename, onProgress)
-			: singleDropboxUpload(token, file, originalFilename, onProgress),
+			? chunkedDropboxUpload(
+					token,
+					file,
+					originalFilename,
+					onProgress,
+					password,
+				)
+			: singleDropboxUpload(
+					token,
+					file,
+					originalFilename,
+					onProgress,
+					password,
+				),
 };
 
 function singleDropboxUpload(
@@ -71,6 +133,7 @@ function singleDropboxUpload(
 	file: File,
 	originalFilename: string,
 	onProgress?: (progress: DropboxUploadProgress) => void,
+	password?: string,
 ) {
 	/**
 	 * Public one-file upload to a dropbox token. No auth/CSRF — the token is the
@@ -84,6 +147,7 @@ function singleDropboxUpload(
 		// apiPath, not a bare path: every backend route lives under /api/*, and a
 		// POST outside that namespace misses the SPA fallback (GET-only) and 404s.
 		xhr.open("POST", apiPath(`/dropbox/${encodeURIComponent(token)}/upload`));
+		if (password) xhr.setRequestHeader(PASSWORD_HEADER, password);
 		xhr.upload.onprogress = (e) => {
 			if (!e.lengthComputable || !onProgress) return;
 			const sent = Math.round((e.loaded / e.total) * 100);
@@ -121,6 +185,7 @@ async function chunkedDropboxUpload(
 	file: File,
 	originalFilename: string,
 	onProgress?: (progress: DropboxUploadProgress) => void,
+	password?: string,
 ): Promise<{ file_id: number; slug: string }> {
 	const encoded = encodeURIComponent(token);
 	const init = await api.post<DropboxChunkedInit>(
@@ -131,6 +196,7 @@ async function chunkedDropboxUpload(
 				total_size: file.size,
 				content_type: file.type || undefined,
 			},
+			headers: password ? { [PASSWORD_HEADER]: password } : undefined,
 		},
 	);
 	const { upload_id, chunk_size, num_chunks } = init;

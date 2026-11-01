@@ -10,7 +10,7 @@ Built with **Bun + Express** on the backend and **React + TypeScript** on the fr
 - Share links with expiry, use limits, and optional password/key gating
 - Three encryption modes: none, server-side AES-GCM, or client-side end-to-end (WebCrypto)
 - API keys for programmatic access (`Authorization: Bearer <key>`)
-- Dropboxes — token-gated public upload links
+- Dropboxes — one-time token links, plus any number of persistent password-guarded boxes, each with its own destination folder and receive log
 - Admin panel: users, permissions, files, keys, audit log, storage/backend controls
 - Remote URL fetch-and-upload
 - Torrenting via Real-Debrid (preferred) or a host qBittorrent (fallback)

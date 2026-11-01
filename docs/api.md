@@ -1369,6 +1369,28 @@ Response (200 OK):
 { "status": "received", "file_id": 42 }
 ```
 
+### Persistent dropboxes
+
+A dropbox created with `"unlimited": true` is never spent by an upload and has
+no expiry unless you ask for one. It requires a password (8+ characters), sent
+by uploaders as the `X-Dropbox-Password` header on `POST /api/dropbox/{token}/upload`
+and `POST /api/dropbox/{token}/upload/init`; a wrong or missing password is a
+`403`, limited to 10 tries a minute per box and IP. Uploads count against the
+owner's quota like any other. Any number can exist at once, each with its own
+destination folder.
+
+All of these need a session (or API key) and CSRF on writes:
+
+| Route | Purpose |
+| --- | --- |
+| `POST /api/dropbox-links` | Create. Body: `unlimited`, `name`, `password`, `target_directory_id`, optional `expires_in_seconds`. |
+| `GET /api/dropbox-links` | Your boxes with `upload_count`, `bytes_received`, `last_used_at`, and the shareable `url`. |
+| `GET /api/dropbox-links/{id}/uploads?limit=100` | What a box received: filename, size, uploader IP, time. |
+| `PATCH /api/dropbox-links/{id}` | `name`, `active` (pause/resume), `password`. |
+| `DELETE /api/dropbox-links/by-id/{id}` | Delete the box and its receive log. Received files are kept. |
+
+The `dropbox.received` webhook payload gains `dropbox_id` and `dropbox_name`.
+
 ## Account
 
 ### GET /api/account/me — Get current user
