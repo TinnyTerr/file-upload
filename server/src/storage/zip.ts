@@ -144,3 +144,22 @@ export async function memberSource(
 	}
 	return [plain, true];
 }
+
+/** Exact byte length of the `ZipArchive({ store: true })` output for these
+ * members, so a download can declare `Content-Length` up front. Per member:
+ * local header (30 + name) + data + data descriptor (16) + central entry
+ * (46 + name); plus the 22-byte end record. Verified against archiver's real
+ * output in tests/zipSize.test.ts -- if archiver changes, that test fails.
+ * Returns null where zip64 records would appear (>= 4 GiB total or 65535
+ * members); the caller then sends no length rather than a wrong one. */
+export function storedZipSize(
+	entries: { name: string; size: number }[],
+): number | null {
+	if (entries.length >= 0xffff) return null;
+	let total = 22;
+	for (const e of entries) {
+		const n = Buffer.byteLength(e.name);
+		total += 30 + n + e.size + 16 + 46 + n;
+	}
+	return total >= 0xffffffff ? null : total;
+}

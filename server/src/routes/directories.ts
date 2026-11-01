@@ -77,7 +77,12 @@ import {
 	rewriteFileEncryption,
 } from "../storage/rekey.ts";
 import { deleteThumbnail } from "../storage/thumbnail.ts";
-import { memberSource, safeArcname, safeArcsegment } from "../storage/zip.ts";
+import {
+	memberSource,
+	safeArcname,
+	safeArcsegment,
+	storedZipSize,
+} from "../storage/zip.ts";
 import { serializeFiles } from "./files.ts";
 import { previewEligible } from "./public.ts";
 
@@ -2850,8 +2855,34 @@ export function publicDirectoriesRouter(state: AppState): Router {
 
 			const zipName =
 				(d.title || "bundle").trim().replace(/"/g, "") || "bundle";
+			// Plan first (names, sizes) so the exact archive length can be declared
+			// before the first byte goes out -- the browser's progress bar needs it.
+			// One namespace per folder: two files can share a name in the zip as
+			// long as they sat in different folders in the source.
+			const seenByPath = new Map<string, Set<string>>();
+			const plan: { file: FileRow; name: string }[] = [];
+			for (const { file: f, path } of members) {
+				// A member the server cannot decrypt would land in the zip as
+				// ciphertext, which is worse than not being there at all.
+				const memberMode = resolveFileEncryption(db, f).mode;
+				if (memberMode === "client" || memberMode === "sealed") continue;
+				const prefix = path.map((p) => safeArcsegment(p)).join("/");
+				let seen = seenByPath.get(prefix);
+				if (!seen) {
+					seen = new Set<string>();
+					seenByPath.set(prefix, seen);
+				}
+				const name = safeArcname(f.original_filename, seen);
+				plan.push({ file: f, name: prefix ? `${prefix}/${name}` : name });
+			}
+			const zipLength = storedZipSize(
+				plan.map((m) => ({ name: m.name, size: m.file.size_bytes })),
+			);
+
 			res.set(BYTES_HEADERS);
 			res.setHeader("Content-Type", "application/zip");
+			if (zipLength !== null)
+				res.setHeader("Content-Length", String(zipLength));
 			res.setHeader(
 				"Content-Disposition",
 				`attachment; filename="${zipName}.zip"`,
@@ -2865,26 +2896,12 @@ export function publicDirectoriesRouter(state: AppState): Router {
 			archive.pipe(res);
 
 			const masterKey = getMasterKey(state.settings);
-			// One namespace per folder: two files can share a name in the zip as
-			// long as they sat in different folders in the source.
-			const seenByPath = new Map<string, Set<string>>();
 			const cleanup: string[] = [];
 			try {
-				for (const { file: f, path } of members) {
-					// A member the server cannot decrypt would land in the zip as
-					// ciphertext, which is worse than not being there at all.
-					const memberMode = resolveFileEncryption(db, f).mode;
-					if (memberMode === "client" || memberMode === "sealed") continue;
-					const prefix = path.map((p) => safeArcsegment(p)).join("/");
-					let seen = seenByPath.get(prefix);
-					if (!seen) {
-						seen = new Set<string>();
-						seenByPath.set(prefix, seen);
-					}
-					const name = safeArcname(f.original_filename, seen);
+				for (const { file: f, name } of plan) {
 					const [src, isTemp] = await memberSource(db, masterKey, f);
 					if (isTemp) cleanup.push(src);
-					archive.file(src, { name: prefix ? `${prefix}/${name}` : name });
+					archive.file(src, { name });
 				}
 				recordAudit(db, {
 					actor: "anonymous",

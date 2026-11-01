@@ -99,7 +99,7 @@ import {
 	plaintextStream,
 } from "../storage/streaming.ts";
 import { deleteThumbnail } from "../storage/thumbnail.ts";
-import { memberSource, safeArcname } from "../storage/zip.ts";
+import { memberSource, safeArcname, storedZipSize } from "../storage/zip.ts";
 import { triggerWebhooks } from "../webhooks.ts";
 
 const log = getLogger("app.routes.files");
@@ -2129,7 +2129,17 @@ export function filesRouter(state: AppState): Router {
 				return;
 			}
 
+			const seen = new Set<string>();
+			const plan = selected.map((f) => ({
+				file: f,
+				name: safeArcname(f.original_filename, seen),
+			}));
+			const zipLength = storedZipSize(
+				plan.map((m) => ({ name: m.name, size: m.file.size_bytes })),
+			);
 			res.setHeader("Content-Type", "application/zip");
+			if (zipLength !== null)
+				res.setHeader("Content-Length", String(zipLength));
 			res.setHeader("Content-Disposition", 'attachment; filename="files.zip"');
 			const archive = new ZipArchive({ store: true });
 			archive.on("error", (err: Error) => {
@@ -2140,11 +2150,9 @@ export function filesRouter(state: AppState): Router {
 			archive.pipe(res);
 
 			const masterKey = getMasterKey(state.settings);
-			const seen = new Set<string>();
 			const cleanup: string[] = [];
 			try {
-				for (const f of selected) {
-					const name = safeArcname(f.original_filename, seen);
+				for (const { file: f, name } of plan) {
 					const [src, isTemp] = await memberSource(db, masterKey, f);
 					if (isTemp) cleanup.push(src);
 					archive.file(src, { name });
