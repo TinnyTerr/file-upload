@@ -26,7 +26,8 @@ export function DropboxUploadPage({ token }: { token: string }) {
 		retry: false,
 	});
 
-	const [file, setFile] = useState<File | null>(null);
+	const [files, setFiles] = useState<File[]>([]);
+	const [current, setCurrent] = useState(0);
 	const [percent, setPercent] = useState(0);
 	const [status, setStatus] = useState<"idle" | "uploading" | "done" | "error">(
 		"idle",
@@ -36,26 +37,39 @@ export function DropboxUploadPage({ token }: { token: string }) {
 	const [password, setPassword] = useState("");
 	const [sent, setSent] = useState(0);
 
+	// A one-time link is spent by its first file; only a persistent box takes a batch.
+	const persistent = info.data?.unlimited ?? false;
+
 	const upload = async () => {
-		if (!file) return;
+		if (!files.length) return;
 		setStatus("uploading");
 		setPhase("uploading");
 		setPercent(0);
 		setError(null);
+		// Sequential, resuming at the first unsent file after an error so a retry
+		// doesn't re-send what already landed.
+		let i = 0;
 		try {
-			await dropboxService.upload(
-				token,
-				file,
-				file.name,
-				(progress) => {
-					setPhase(progress.phase);
-					setPercent(progress.percent);
-				},
-				password,
-			);
-			setSent((n) => n + 1);
+			for (; i < files.length; i++) {
+				const file = files[i];
+				setCurrent(i);
+				setPercent(0);
+				await dropboxService.upload(
+					token,
+					file,
+					file.name,
+					(progress) => {
+						setPhase(progress.phase);
+						setPercent(progress.percent);
+					},
+					password,
+				);
+				setSent((n) => n + 1);
+			}
 			setStatus("done");
 		} catch (err) {
+			setFiles((fs) => fs.slice(i));
+			setCurrent(0);
 			setError(err instanceof Error ? err.message : "Upload failed");
 			setStatus("error");
 		}
@@ -88,9 +102,9 @@ export function DropboxUploadPage({ token }: { token: string }) {
 		);
 	}
 
-	const persistent = info.data?.unlimited ?? false;
 	const again = () => {
-		setFile(null);
+		setFiles([]);
+		setCurrent(0);
 		setPercent(0);
 		setStatus("idle");
 	};
@@ -102,7 +116,9 @@ export function DropboxUploadPage({ token }: { token: string }) {
 					<div className="flex size-14 items-center justify-center rounded-2xl bg-success/15">
 						<CheckCircle2 className="size-7 text-success" />
 					</div>
-					<h1 className="break-words text-xl font-bold">File sent</h1>
+					<h1 className="break-words text-xl font-bold">
+						{sent > 1 ? "Files sent" : "File sent"}
+					</h1>
 					<p className="max-w-sm text-sm text-muted-foreground">
 						{persistent
 							? `Your file was uploaded successfully (${sent} sent so far).`
@@ -137,26 +153,39 @@ export function DropboxUploadPage({ token }: { token: string }) {
 					</div>
 				</div>
 
-				{!file ? (
+				{!files.length ? (
 					<Dropzone
-						multiple={false}
-						onFiles={(fs) => setFile(fs[0] ?? null)}
-						hint="One file only"
+						multiple={persistent}
+						onFiles={(fs) => setFiles(persistent ? fs : fs.slice(0, 1))}
+						hint={persistent ? undefined : "One file only"}
 					/>
 				) : (
-					<div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-secondary/20 px-3 py-2.5">
-						<span className="flex min-w-0 items-center gap-2">
-							<FileIcon className="size-4 shrink-0 text-muted-foreground" />
-							<span className="truncate text-sm">{file.name}</span>
-						</span>
-						<span className="flex items-center gap-2 text-xs text-muted-foreground">
-							{formatBytes(file.size)}
-							{status === "idle" && (
-								<Button variant="ghost" size="sm" onClick={() => setFile(null)}>
-									Change
-								</Button>
-							)}
-						</span>
+					<div className="space-y-2">
+						{files.map((f, i) => (
+							<div
+								key={`${f.name}:${f.size}:${f.lastModified}:${i}`}
+								className="flex items-center justify-between gap-2 rounded-lg border border-border bg-secondary/20 px-3 py-2.5"
+							>
+								<span className="flex min-w-0 items-center gap-2">
+									<FileIcon className="size-4 shrink-0 text-muted-foreground" />
+									<span className="truncate text-sm">{f.name}</span>
+								</span>
+								<span className="flex items-center gap-2 text-xs text-muted-foreground">
+									{formatBytes(f.size)}
+									{status !== "uploading" && (
+										<Button
+											variant="ghost"
+											size="sm"
+											onClick={() =>
+												setFiles((fs) => fs.filter((_, j) => j !== i))
+											}
+										>
+											Remove
+										</Button>
+									)}
+								</span>
+							</div>
+						))}
 					</div>
 				)}
 
@@ -178,7 +207,7 @@ export function DropboxUploadPage({ token }: { token: string }) {
 					className="w-full"
 					size="lg"
 					disabled={
-						!file ||
+						!files.length ||
 						status === "uploading" ||
 						(!!info.data?.password_required && !password)
 					}
@@ -189,8 +218,10 @@ export function DropboxUploadPage({ token }: { token: string }) {
 					{status === "uploading"
 						? phase === "finalizing"
 							? "Finalizing…"
-							: `Uploading… ${percent}%`
-						: "Upload file"}
+							: `Uploading${files.length > 1 ? ` ${current + 1}/${files.length}` : ""}… ${percent}%`
+						: files.length > 1
+							? `Upload ${files.length} files`
+							: "Upload file"}
 				</Button>
 			</CardContent>
 		</Card>

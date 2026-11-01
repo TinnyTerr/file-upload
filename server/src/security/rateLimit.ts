@@ -35,6 +35,8 @@ export interface RateLimitResult {
 export function checkRateLimit(
 	identifier: string,
 	limitPerMin: number = DEFAULT_RATE_LIMIT_PER_MIN,
+	/** 0 reads the bucket without spending from it. */
+	cost = 1,
 ): RateLimitResult {
 	const now = Date.now();
 	let bucket = buckets.get(identifier);
@@ -42,7 +44,7 @@ export function checkRateLimit(
 		bucket = { windowStart: now, count: 0 };
 		buckets.set(identifier, bucket);
 	}
-	bucket.count++;
+	bucket.count += cost;
 	const resetAt = Math.ceil((bucket.windowStart + WINDOW_MS) / 1000);
 	return {
 		allowed: bucket.count <= limitPerMin,

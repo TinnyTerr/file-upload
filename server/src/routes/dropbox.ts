@@ -194,15 +194,17 @@ async function requireDropboxPassword(
 	req: Request,
 ): Promise<void> {
 	if (!row.password_hash) return;
-	const verdict = checkRateLimit(
-		`dropbox-pw:${row.id}:${clientIp(state, req)}`,
-		PASSWORD_ATTEMPTS_PER_MIN,
-	);
-	if (!verdict.allowed) throw new HttpError(429, "too many attempts");
+	// Only wrong guesses spend the budget: a sender uploading a batch inits
+	// once per file and must not lock itself out with the right password.
+	const bucket = `dropbox-pw:${row.id}:${clientIp(state, req)}`;
+	if (!checkRateLimit(bucket, PASSWORD_ATTEMPTS_PER_MIN - 1, 0).allowed) {
+		throw new HttpError(429, "too many attempts");
+	}
 	const given = req.header(PASSWORD_HEADER);
 	// 403, not 401: the SPA treats a 401 as a dead session.
 	if (!given) throw new HttpError(403, "password required");
 	if (!(await verifyPassword(given, row.password_hash))) {
+		checkRateLimit(bucket, PASSWORD_ATTEMPTS_PER_MIN);
 		throw new HttpError(403, "wrong password");
 	}
 }
