@@ -46,7 +46,9 @@ export function requestLogging(state: AppState) {
 				1,
 			)} client=${clientIp(state, req)} actor=${actorOf(req)} ${detail ? ` detail="${detail.slice(0, 300)}"` : ""} ua="${(req.header("user-agent") ?? "-").slice(0, 120)}"`;
 			if (status >= 500) log.error(line);
-			else if (status >= 400) (isNoise ? log.debug : log.warning)(line);
+			// A 4xx is the API answering correctly, so it stays below WARNING --
+			// WARNING is what logging.ts forwards to Sentry. Still in the ring buffer.
+			else if (status >= 400) (isNoise ? log.debug : log.info)(line);
 			else if (isNoise) log.debug(line);
 			else log.info(line);
 		});
