@@ -161,7 +161,6 @@ export function DropboxUploadPage({ token }: { token: string }) {
 					/>
 				) : (
 					<div className="space-y-2">
-						// biome-ignore lint/suspicious/noArrayIndexKey: makes sense, fuck you biome
 						{files.map((f, i) => (
 							<div
 								key={`${f.name}:${f.size}:${f.lastModified}:${i}`}
