@@ -5,6 +5,7 @@ import {
 	Folder,
 	Inbox,
 	KeyRound,
+	Link2,
 	Pause,
 	Play,
 	Trash2,
@@ -22,7 +23,7 @@ import {
 	useDropboxReceived,
 	usePersistentDropboxes,
 } from "../hooks/usePersistentDropboxes";
-import type { DropboxSummary } from "../services/dropboxService";
+import { type DropboxSummary, withPassword } from "../services/dropboxService";
 
 /** Persistent, password-guarded dropboxes: any number at once, each with its
  * own destination folder and a running record of what it received. */
@@ -152,6 +153,7 @@ function BoxRow({
 }) {
 	const [open, setOpen] = useState(false);
 	const [newPw, setNewPw] = useState<string | null>(null);
+	const [linkPw, setLinkPw] = useState<string | null>(null);
 	const received = useDropboxReceived(box.id, open);
 
 	return (
@@ -208,6 +210,16 @@ function BoxRow({
 					>
 						{box.active ? <Pause /> : <Play />}
 					</Button>
+					{box.url && box.has_password && (
+						<Button
+							variant="ghost"
+							size="sm"
+							title="Link with password included"
+							onClick={() => setLinkPw(linkPw === null ? "" : null)}
+						>
+							<Link2 />
+						</Button>
+					)}
 					<Button
 						variant="ghost"
 						size="sm"
@@ -227,6 +239,26 @@ function BoxRow({
 					</Button>
 				</div>
 			</div>
+
+			{linkPw !== null && box.url && (
+				<div className="space-y-2 border-t border-border p-3">
+					<div className="flex gap-2">
+						<Input
+							type="password"
+							autoComplete="off"
+							placeholder="This dropbox's password"
+							value={linkPw}
+							onChange={(e) => setLinkPw(e.target.value)}
+						/>
+						{linkPw && <CopyButton value={withPassword(box.url, linkPw)} />}
+					</div>
+					<p className="text-xs text-muted-foreground">
+						The password goes after the # in the link, so it's never sent to the
+						server. Anyone holding the link can upload without typing it. We
+						don't store the password, so type it to build the link.
+					</p>
+				</div>
+			)}
 
 			{newPw !== null && (
 				<div className="flex gap-2 border-t border-border p-3">

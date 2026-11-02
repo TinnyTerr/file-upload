@@ -1379,6 +1379,13 @@ and `POST /api/dropbox/{token}/upload/init`; a wrong or missing password is a
 owner's quota like any other. Any number can exist at once, each with its own
 destination folder.
 
+Any dropbox (persistent or one-time) may have a password: pass `password` (8+
+characters) to `POST /api/dropbox-links`, or set/clear it with `PATCH`
+(persistent boxes can't clear it). The upload page also accepts it in the link
+fragment, `{{BASE_URL}}/?receive=<token>#pw=<password>` (URL-encoded), which is
+never sent to the server. API clients use the `X-Dropbox-Password` header
+instead.
+
 All of these need a session (or API key) and CSRF on writes:
 
 | Route | Purpose |

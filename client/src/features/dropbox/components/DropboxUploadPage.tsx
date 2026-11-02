@@ -16,7 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError } from "@/config/api";
 import { Dropzone } from "@/features/files/components/Dropzone";
 import { formatBytes } from "@/lib/bytes";
-import { dropboxService } from "../services/dropboxService";
+import { dropboxService, passwordFromHash } from "../services/dropboxService";
 
 const fileIds = new WeakMap<File, number>();
 let nextFileId = 0;
@@ -45,7 +45,9 @@ export function DropboxUploadPage({ token }: { token: string }) {
 	);
 	const [phase, setPhase] = useState<"uploading" | "finalizing">("uploading");
 	const [error, setError] = useState<string | null>(null);
-	const [password, setPassword] = useState("");
+	const [password, setPassword] = useState(() =>
+		passwordFromHash(window.location.hash),
+	);
 	const [sent, setSent] = useState(0);
 
 	// A one-time link is spent by its first file; only a persistent box takes a batch.
