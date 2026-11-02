@@ -56,6 +56,9 @@ export function initSentry(): void {
 						enableScreenshot: true,
 					}),
 				],
+				// Thrown from `<anonymous code>`: a browser extension or userscript
+				// redefining Symbol.hasInstance, never our bundle.
+				ignoreErrors: [/non-configurable property Symbol\.hasInstance/],
 				replaysSessionSampleRate: __SENTRY_REPLAY_RATE__,
 				replaysOnErrorSampleRate: 1,
 
