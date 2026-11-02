@@ -58,3 +58,6 @@ desktop.ini
 # --- Claude Code guides (kept local, not in the repo) ---
 CLAUDE.md
 **/CLAUDE.md
+
+# Claude local notes (referenced from CLAUDE.md)
+.claude/notes/

@@ -13,6 +13,8 @@
 		"typecheck": "bun --cwd=client run typecheck && bun --cwd=server run typecheck",
 		"test": "bun --cwd=client run test && bun --cwd=server run test",
 		"test:coverage": "bun --cwd=client run test:coverage && bun --cwd=server run test:coverage",
+		"lint": "biome check .",
+		"check": "biome check . && bun run typecheck && bun run test",
 		"doctor": "npx react-doctor@latest"
 	},
 	"dependencies": {
