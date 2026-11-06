@@ -64,6 +64,7 @@ if (process.argv.includes("--write")) {
 		j.version = next;
 		writeFileSync(f, `${JSON.stringify(j, null, "\t")}\n`);
 	}
+	sh(["bun", "install", "--lockfile-only"]);
 }
 
 const notes = commits.map((c) => `- ${c.subject}`).join("\n");
