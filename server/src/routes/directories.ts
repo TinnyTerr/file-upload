@@ -529,7 +529,7 @@ function directoryPageMeta(
 	);
 	if (poster) {
 		const thumbnailUrl = escapeHtml(
-			`${origin}/file/${poster.link.slug}/thumbnail`,
+			`${origin}/api/file/${poster.link.slug}/thumbnail`,
 		);
 		tags.push(`<meta property="og:image" content="${thumbnailUrl}">`);
 	}

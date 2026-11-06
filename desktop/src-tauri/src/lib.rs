@@ -194,7 +194,7 @@ async fn download_file(
     let final_path = dir.join(&safe_name);
     let part_path = dir.join(format!("{safe_name}.part"));
 
-    let url = format!("{base}/file/{slug}/raw");
+    let url = format!("{base}/api/file/{slug}/raw");
     let mut req_base = state.http.get(&url);
     if let Some(key) = &access_key {
         if encryption_mode == "server" {
@@ -231,6 +231,11 @@ async fn download_file(
         }
 
         let ranged = resp.status().as_u16() == 206;
+        if !ranged && downloaded > 0 {
+            file.set_len(0).map_err(|e| e.to_string())?;
+            file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+            downloaded = 0;
+        }
         if let Some(cr) = resp
             .headers()
             .get("content-range")

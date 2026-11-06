@@ -60,7 +60,9 @@ required<HTMLButtonElement>("#refresh-files").addEventListener(
 			const res = await invoke<{ files: RemoteFile[] }>("list_files");
 			renderFiles(res.files);
 		} catch (err) {
-			fileList.innerHTML = `<li>Failed to list files: ${err}</li>`;
+			const li = document.createElement("li");
+			li.textContent = `Failed to list files: ${err}`;
+			fileList.replaceChildren(li);
 		}
 	},
 );

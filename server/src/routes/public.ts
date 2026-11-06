@@ -182,11 +182,11 @@ function fileMetaTags(req: Request, state: AppState, slug: string): string {
 		!f.compressed &&
 		!f.archived;
 	const origin = `${requestProtocol(state.settings, req)}://${req.get("host")}`;
-	const previewUrl = escapeHtml(`${origin}/file/${slug}/preview`);
+	const previewUrl = escapeHtml(`${origin}/api/file/${slug}/preview`);
 	// /thumbnail (not /preview) for og:image: it's the size-capped JPEG built
 	// for exactly this -- a link-preview crawler that caps its own fetch size
 	// must still get something to render, whatever the source file's size is.
-	const thumbnailUrl = escapeHtml(`${origin}/file/${slug}/thumbnail`);
+	const thumbnailUrl = escapeHtml(`${origin}/api/file/${slug}/thumbnail`);
 	let hasImage = false;
 	if (eligible && f.content_type.startsWith("image/")) {
 		tags.push(`<meta property="og:image" content="${thumbnailUrl}">`);
@@ -514,7 +514,10 @@ export function publicRouter(state: AppState): Router {
 				"Content-Type": f.content_type,
 				"Content-Length": String(fileSize),
 			});
-			createReadStream(fullPath, { highWaterMark: CHUNK }).pipe(res);
+			const rawStream = createReadStream(fullPath, { highWaterMark: CHUNK });
+			rawStream.on("error", () => res.destroy());
+			res.on("close", () => rawStream.destroy());
+			rawStream.pipe(res);
 		}),
 	);
 
@@ -687,7 +690,12 @@ export function publicRouter(state: AppState): Router {
 				"Content-Type": f.content_type,
 				"Content-Length": String(fileSize),
 			});
-			createReadStream(fullPath, { highWaterMark: CHUNK }).pipe(res);
+			const previewStream = createReadStream(fullPath, {
+				highWaterMark: CHUNK,
+			});
+			previewStream.on("error", () => res.destroy());
+			res.on("close", () => previewStream.destroy());
+			previewStream.pipe(res);
 		}),
 	);
 

@@ -19,6 +19,7 @@ const log = getLogger("app.thumbnail");
 const MAX_DIMENSION = 1200;
 const JPEG_QUALITY = 78;
 const VIDEO_SEEK_SECONDS = ["00:00:01", "00:00:00"];
+const FFMPEG_TIMEOUT_MS = 15_000;
 
 function playButtonOverlaySvg(width: number, height: number): Buffer {
 	const r = Math.round(Math.min(width, height) * 0.18);
@@ -56,11 +57,22 @@ async function extractVideoFrame(fullPath: string): Promise<Buffer | null> {
 			],
 			{ stdout: "pipe", stderr: "ignore" },
 		);
-		const [buf, exitCode] = await Promise.all([
-			new Response(proc.stdout).arrayBuffer(),
-			proc.exited,
-		]);
-		if (exitCode === 0 && buf.byteLength > 0) return Buffer.from(buf);
+		const timer = setTimeout(() => {
+			try {
+				proc.kill();
+			} catch {
+				// already exited
+			}
+		}, FFMPEG_TIMEOUT_MS);
+		try {
+			const [buf, exitCode] = await Promise.all([
+				new Response(proc.stdout).arrayBuffer(),
+				proc.exited,
+			]);
+			if (exitCode === 0 && buf.byteLength > 0) return Buffer.from(buf);
+		} finally {
+			clearTimeout(timer);
+		}
 	}
 	return null;
 }
@@ -193,7 +205,10 @@ export function serveCachedJpeg(
 		"Content-Type": "image/jpeg",
 		"Content-Length": String(st.size),
 	});
-	createReadStream(path, { highWaterMark: 256 * 1024 }).pipe(res);
+	const stream = createReadStream(path, { highWaterMark: 256 * 1024 });
+	stream.on("error", () => res.destroy());
+	res.on("close", () => stream.destroy());
+	stream.pipe(res);
 }
 
 /** Generates (and caches on disk) a small JPEG thumbnail for a file, resized to
