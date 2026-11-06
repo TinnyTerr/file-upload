@@ -311,6 +311,31 @@ export function authRouter(state: AppState): Router {
 				res.status(401).json({ detail: "unknown passkey" });
 				return;
 			}
+			if (!state.lockout.checkLoginAllowed(db, user.username, ip)) {
+				recordAudit(db, {
+					actor: user.username,
+					action: "login.locked_out",
+					ip,
+				});
+				res.status(429).json({ detail: "too many attempts, try later" });
+				return;
+			}
+			const entry = state.loginChallenges.get(connId);
+			if (
+				entry?.state === "awaiting_second_factor" &&
+				entry.userId !== null &&
+				entry.userId !== user.id
+			) {
+				recordAudit(db, {
+					actor: user.username,
+					action: "login.webauthn_failure",
+					ip,
+				});
+				res.status(401).json({ detail: "passkey does not match login user" });
+				return;
+			}
+			const isMatchingSecondFactor =
+				entry?.state === "awaiting_second_factor" && entry.userId === user.id;
 			let rpContext: { rpID: string; origin: string };
 			try {
 				rpContext = resolveRpContext(state.settings, req);
@@ -335,7 +360,7 @@ export function authRouter(state: AppState): Router {
 						counter: credRow.sign_count,
 						transports,
 					},
-					!isSecondFactor(connId),
+					!isMatchingSecondFactor,
 				);
 			} catch (err) {
 				recordAudit(db, {

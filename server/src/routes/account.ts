@@ -228,113 +228,125 @@ export function accountRouter(state: AppState): Router {
 		});
 	});
 
-	router.post("/avatar", requireSession(state), requireCsrf, (req, res) => {
-		const bb = busboy({
-			headers: req.headers,
-			limits: { fileSize: AVATAR_MAX_BYTES + 1, files: 1 },
-		});
-		let handled = false;
-		let sawFile = false;
+	router.post(
+		"/avatar",
+		requireSession(state),
+		requireCsrf,
+		requireActiveUser(state),
+		(req, res) => {
+			const bb = busboy({
+				headers: req.headers,
+				limits: { fileSize: AVATAR_MAX_BYTES + 1, files: 1 },
+			});
+			let handled = false;
+			let sawFile = false;
 
-		bb.on("file", (_name, stream, info) => {
-			sawFile = true;
-			const ct = present(
-				(info.mimeType || "").toLowerCase().split(";")[0],
-			).trim();
-			if (!ALLOWED_AVATAR_TYPES.has(ct)) {
-				handled = true;
-				res.status(415).json({
-					detail: `unsupported image type: ${ct}. Allowed: jpeg, png, gif, webp`,
+			bb.on("file", (_name, stream, info) => {
+				sawFile = true;
+				const ct = present(
+					(info.mimeType || "").toLowerCase().split(";")[0],
+				).trim();
+				if (!ALLOWED_AVATAR_TYPES.has(ct)) {
+					handled = true;
+					res.status(415).json({
+						detail: `unsupported image type: ${ct}. Allowed: jpeg, png, gif, webp`,
+					});
+					stream.resume();
+					req.unpipe(bb);
+					return;
+				}
+				const chunks: Buffer[] = [];
+				let truncated = false;
+				stream.on("data", (chunk: Buffer) => {
+					chunks.push(chunk);
 				});
-				stream.resume();
-				req.unpipe(bb);
+				stream.on("limit", () => {
+					truncated = true;
+				});
+				stream.on("end", () => {
+					if (handled) return;
+					if (truncated) {
+						handled = true;
+						res.status(413).json({ detail: "avatar must be ≤ 2 MiB" });
+						return;
+					}
+					const data = Buffer.concat(chunks);
+					if (data.length === 0) {
+						handled = true;
+						res.status(400).json({ detail: "empty file" });
+						return;
+					}
+					const detected = sniffImageType(data);
+					if (!ALLOWED_AVATAR_TYPES.has(detected)) {
+						handled = true;
+						res
+							.status(415)
+							.json({ detail: "file does not match a supported image format" });
+						return;
+					}
+					const sessionRow = present(req.sessionRow);
+					const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
+						$id: sessionRow.user_id,
+					});
+					if (!user) {
+						handled = true;
+						res.status(401).json({ detail: "not authenticated" });
+						return;
+					}
+					db.run(
+						"UPDATE users SET avatar_data = $data, avatar_content_type = $ct WHERE id = $id",
+						{
+							$data: data,
+							$ct: detected,
+							$id: user.id,
+						},
+					);
+					recordAudit(db, {
+						actor: user.username,
+						action: "account.avatar_updated",
+						target: `user:${user.id}`,
+						ip: clientIp(state, req),
+					});
+					handled = true;
+					res.json({ status: "updated" });
+				});
+			});
+			bb.on("close", () => {
+				if (!handled && !sawFile) {
+					res.status(400).json({ detail: "no file uploaded" });
+				}
+			});
+			req.pipe(bb);
+		},
+	);
+
+	router.delete(
+		"/avatar",
+		requireSession(state),
+		requireCsrf,
+		requireActiveUser(state),
+		(req, res) => {
+			const sessionRow = present(req.sessionRow);
+			const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
+				$id: sessionRow.user_id,
+			});
+			if (!user) {
+				res.status(401).json({ detail: "not authenticated" });
 				return;
 			}
-			const chunks: Buffer[] = [];
-			let truncated = false;
-			stream.on("data", (chunk: Buffer) => {
-				chunks.push(chunk);
+			db.run(
+				"UPDATE users SET avatar_data = NULL, avatar_content_type = NULL WHERE id = $id",
+				{ $id: user.id },
+			);
+			recordAudit(db, {
+				actor: user.username,
+				action: "account.avatar_removed",
+				target: `user:${user.id}`,
+				ip: clientIp(state, req),
 			});
-			stream.on("limit", () => {
-				truncated = true;
-			});
-			stream.on("end", () => {
-				if (handled) return;
-				if (truncated) {
-					handled = true;
-					res.status(413).json({ detail: "avatar must be ≤ 2 MiB" });
-					return;
-				}
-				const data = Buffer.concat(chunks);
-				if (data.length === 0) {
-					handled = true;
-					res.status(400).json({ detail: "empty file" });
-					return;
-				}
-				const detected = sniffImageType(data);
-				if (!ALLOWED_AVATAR_TYPES.has(detected)) {
-					handled = true;
-					res
-						.status(415)
-						.json({ detail: "file does not match a supported image format" });
-					return;
-				}
-				const sessionRow = present(req.sessionRow);
-				const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
-					$id: sessionRow.user_id,
-				});
-				if (!user) {
-					handled = true;
-					res.status(401).json({ detail: "not authenticated" });
-					return;
-				}
-				db.run(
-					"UPDATE users SET avatar_data = $data, avatar_content_type = $ct WHERE id = $id",
-					{
-						$data: data,
-						$ct: detected,
-						$id: user.id,
-					},
-				);
-				recordAudit(db, {
-					actor: user.username,
-					action: "account.avatar_updated",
-					target: `user:${user.id}`,
-					ip: clientIp(state, req),
-				});
-				handled = true;
-				res.json({ status: "updated" });
-			});
-		});
-		bb.on("close", () => {
-			if (!handled && !sawFile) {
-				res.status(400).json({ detail: "no file uploaded" });
-			}
-		});
-		req.pipe(bb);
-	});
-
-	router.delete("/avatar", requireSession(state), requireCsrf, (req, res) => {
-		const sessionRow = present(req.sessionRow);
-		const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
-			$id: sessionRow.user_id,
-		});
-		if (!user) {
-			res.status(401).json({ detail: "not authenticated" });
-			return;
-		}
-		db.run(
-			"UPDATE users SET avatar_data = NULL, avatar_content_type = NULL WHERE id = $id",
-			{ $id: user.id },
-		);
-		recordAudit(db, {
-			actor: user.username,
-			action: "account.avatar_removed",
-			target: `user:${user.id}`,
-			ip: clientIp(state, req),
-		});
-		res.json({ status: "removed" });
-	});
+			res.json({ status: "removed" });
+		},
+	);
 
 	router.get("/avatar/:userId", (req, res) => {
 		const user = db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
@@ -353,6 +365,7 @@ export function accountRouter(state: AppState): Router {
 		"/reset",
 		requireSession(state),
 		requireCsrf,
+		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
 			const { current_password: currentPassword } = req.body ?? {};
 			const sessionRow = present(req.sessionRow);
@@ -386,6 +399,7 @@ export function accountRouter(state: AppState): Router {
 		"/",
 		requireSession(state),
 		requireCsrf,
+		requireActiveUser(state),
 		asyncHandler(async (req, res) => {
 			const { current_password: currentPassword } = req.body ?? {};
 			const sessionRow = present(req.sessionRow);

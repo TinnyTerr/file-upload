@@ -84,6 +84,12 @@ export function mfaRouter(state: AppState): Router {
 		return user;
 	}
 
+	const pendingTotpSetups = new Map<
+		string,
+		{ secret: string; expiresAt: number }
+	>();
+	const TOTP_SETUP_TTL_MS = 10 * 60 * 1000;
+
 	router.post(
 		"/totp/setup",
 		requireSession(state),
@@ -92,6 +98,14 @@ export function mfaRouter(state: AppState): Router {
 			const user = await reauthenticated(req, res);
 			if (!user) return;
 			const secret = authenticator.generateSecret();
+			const now = Date.now();
+			for (const [k, v] of pendingTotpSetups) {
+				if (v.expiresAt <= now) pendingTotpSetups.delete(k);
+			}
+			pendingTotpSetups.set(present(req.sessionRow).id, {
+				secret,
+				expiresAt: now + TOTP_SETUP_TTL_MS,
+			});
 			const otpauthUrl = authenticator.keyuri(
 				user.username,
 				"FileUpload",
@@ -111,7 +125,19 @@ export function mfaRouter(state: AppState): Router {
 				res.status(422).json({ detail: "secret and code required" });
 				return;
 			}
-			const sessionKey = `mfa-setup:${present(req.sessionRow).id}`;
+			const sid = present(req.sessionRow).id;
+			const pendingSetup = pendingTotpSetups.get(sid);
+			if (
+				!pendingSetup ||
+				pendingSetup.expiresAt <= Date.now() ||
+				pendingSetup.secret !== secret
+			) {
+				res
+					.status(400)
+					.json({ detail: "totp setup not initiated or expired, start again" });
+				return;
+			}
+			const sessionKey = `mfa-setup:${sid}`;
 			if (!state.lockout.checkLoginAllowed(db, sessionKey, sessionKey)) {
 				res.status(429).json({ detail: "too many attempts, try again later" });
 				return;
@@ -121,6 +147,7 @@ export function mfaRouter(state: AppState): Router {
 				res.status(401).json({ detail: "invalid code" });
 				return;
 			}
+			pendingTotpSetups.delete(sid);
 			state.lockout.resetSuccess(db, sessionKey);
 			const userId = present(req.sessionRow).user_id;
 			const encrypted = sealSecret(

@@ -306,6 +306,11 @@ function resolveOauthBearer(
 		);
 		return null;
 	}
+	const missing = missingRequiredCredential(db, user);
+	if (missing) {
+		enrollmentBlock(state, req, res, missing);
+		return null;
+	}
 	const flag = SCOPES[scope] ?? null;
 	if (flag && user.role !== "master") {
 		const perm = ensurePermissions(db, user.id, {
@@ -377,7 +382,12 @@ export function optionalOauthViewer(
 	const user = state.db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 		$id: token.user_id,
 	});
-	if (!user || user.must_change_credentials) return null;
+	if (
+		!user ||
+		user.must_change_credentials ||
+		missingRequiredCredential(state.db, user)
+	)
+		return null;
 	touchToken(state.db, token);
 	req.oauthToken = token;
 	return user;

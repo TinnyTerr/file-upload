@@ -8,7 +8,11 @@ import type { ClusterEvent, EventPredicate } from "./cluster/eventBus.ts";
 import type { UserRow } from "./db/rows.ts";
 import { getLogger } from "./logging.ts";
 import { clientIp } from "./middleware/auth.ts";
-import { ensurePermissions, hasPermission } from "./permissions.ts";
+import {
+	ensurePermissions,
+	hasPermission,
+	missingRequiredCredential,
+} from "./permissions.ts";
 import { COOKIE_NAME } from "./security/sessions.ts";
 
 /** Realtime event firehose. Mirrors app/routes/ws.py, adapted from FastAPI's
@@ -177,7 +181,11 @@ export function setupWebSockets(server: HttpServer, state: AppState): void {
 			const user = state.db.get<UserRow>("SELECT * FROM users WHERE id = $id", {
 				$id: sessionRow.user_id,
 			});
-			if (!user || user.must_change_credentials) {
+			if (
+				!user ||
+				user.must_change_credentials ||
+				missingRequiredCredential(state.db, user)
+			) {
 				rejectUpgrade(
 					socket,
 					path,
@@ -218,7 +226,11 @@ export function setupWebSockets(server: HttpServer, state: AppState): void {
 						$id: sessionRow.user_id,
 					})
 				: undefined;
-			if (!user || user.must_change_credentials) {
+			if (
+				!user ||
+				user.must_change_credentials ||
+				missingRequiredCredential(state.db, user)
+			) {
 				rejectUpgrade(socket, path, ip, "no valid session");
 				return;
 			}

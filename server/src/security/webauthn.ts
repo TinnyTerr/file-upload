@@ -28,7 +28,12 @@ export function resolveRpContext(
 	const host = req.header("host") ?? "localhost";
 	const proto = req.protocol;
 	const origin = originHeader || `${proto}://${host}`;
-	const rpID = new URL(origin).hostname;
+	let rpID: string;
+	try {
+		rpID = new URL(origin).hostname;
+	} catch {
+		throw new Error("invalid origin");
+	}
 
 	const allowedHosts = settings.allowedHosts
 		.split(",")

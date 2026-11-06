@@ -109,6 +109,33 @@ describe("MFA enrolment re-authentication", () => {
 		expect((await post({ current_password: "nope" })).status).toBe(401);
 		const ok = await post({ current_password: PASSWORD });
 		expect(ok.status).toBe(200);
-		expect((await ok.json()) as { secret: string }).toHaveProperty("secret");
+		const { secret } = (await ok.json()) as { secret: string };
+		expect(secret).toBeString();
+
+		// Confirming with an attacker-supplied secret that was not issued by /totp/setup is refused.
+		const rogueSecret = authenticator.generateSecret();
+		const rogueConfirm = await h.request("/api/account/mfa/totp/confirm", {
+			method: "POST",
+			cookie,
+			csrf,
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				secret: rogueSecret,
+				code: authenticator.generate(rogueSecret),
+			}),
+		});
+		expect(rogueConfirm.status).toBe(400);
+
+		const validConfirm = await h.request("/api/account/mfa/totp/confirm", {
+			method: "POST",
+			cookie,
+			csrf,
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				secret,
+				code: authenticator.generate(secret),
+			}),
+		});
+		expect(validConfirm.status).toBe(200);
 	});
 });
