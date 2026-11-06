@@ -178,6 +178,7 @@ async function deliverToHook(
 				method: "POST",
 				headers,
 				body,
+				redirect: "error",
 				signal: AbortSignal.timeout(10_000),
 			},
 			{ redact: "origin" },

@@ -4,7 +4,7 @@
  * has to survive being split at any byte.
  */
 import { describe, expect, test } from "bun:test";
-import { ChunkedDecoder } from "../src/routes/remoteUpload.ts";
+import { ChunkedDecoder, isPublicIp } from "../src/routes/remoteUpload.ts";
 
 function encode(pieces: string[], trailers = ""): Buffer {
 	const body = pieces
@@ -51,5 +51,21 @@ describe("ChunkedDecoder", () => {
 	test("rejects a chunk not followed by CRLF", () => {
 		const dec = new ChunkedDecoder();
 		expect(() => dec.push(Buffer.from("3\r\nabcXX"))).toThrow();
+	});
+});
+
+describe("isPublicIp", () => {
+	test("rejects 0.0.0.0/8, CGNAT, loopback, link-local, and hex IPv4-mapped IPv6", () => {
+		expect(isPublicIp("0.0.0.0")).toBe(false);
+		expect(isPublicIp("0.0.0.1")).toBe(false);
+		expect(isPublicIp("100.64.0.1")).toBe(false);
+		expect(isPublicIp("127.0.0.1")).toBe(false);
+		expect(isPublicIp("169.254.169.254")).toBe(false);
+		expect(isPublicIp("::ffff:127.0.0.1")).toBe(false);
+		expect(isPublicIp("::ffff:7f00:1")).toBe(false);
+		expect(isPublicIp("0:0:0:0:0:ffff:127.0.0.1")).toBe(false);
+		expect(isPublicIp("64:ff9b::1")).toBe(false);
+		expect(isPublicIp("93.184.216.34")).toBe(true);
+		expect(isPublicIp("2606:2800:220:1:248:1893:25c8:1946")).toBe(true);
 	});
 });

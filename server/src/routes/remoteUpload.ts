@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { createWriteStream, mkdirSync, unlinkSync } from "node:fs";
-import { isIPv4, isIPv6 } from "node:net";
+import { createConnection, isIPv4, isIPv6 } from "node:net";
 import { join } from "node:path";
+import { connect as tlsConnect } from "node:tls";
 import { URL } from "node:url";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
@@ -32,17 +33,20 @@ const _CHUNK = 256 * 1024;
 const HEADER_ALLOWANCE = 64 * 1024;
 
 /** Mirrors app/routes/remote_upload.py::_is_public_ip. */
-function isPublicIp(value: string): boolean {
+export function isPublicIp(value: string): boolean {
 	if (isIPv4(value)) {
 		const parts = value.split(".").map(Number);
-		const [a, b] = parts;
+		const [a, b, c] = parts;
+		if (a === 0) return false; // 0.0.0.0/8 ("this network")
 		if (a === 10) return false;
-		if (a === 172 && present(b) >= 16 && present(b) <= 31) return false;
-		if (a === 192 && b === 168) return false;
+		if (a === 100 && present(b) >= 64 && present(b) <= 127) return false; // RFC 6598 CGNAT
 		if (a === 127) return false;
 		if (a === 169 && b === 254) return false;
+		if (a === 172 && present(b) >= 16 && present(b) <= 31) return false;
+		if (a === 192 && b === 0 && c === 0) return false;
+		if (a === 192 && b === 168) return false;
+		if (a === 198 && (b === 18 || b === 19)) return false;
 		if (present(a) >= 224) return false; // multicast/reserved
-		if (value === "0.0.0.0") return false;
 		return true;
 	}
 	if (isIPv6(value)) {
@@ -51,10 +55,31 @@ function isPublicIp(value: string): boolean {
 		if (
 			lower.startsWith("fe80:") ||
 			lower.startsWith("fc") ||
-			lower.startsWith("fd")
+			lower.startsWith("fd") ||
+			lower.startsWith("64:ff9b:") ||
+			lower.startsWith("2002:")
 		)
 			return false;
 		if (lower.startsWith("ff")) return false; // multicast
+		try {
+			const norm = new URL(`http://[${lower}]/`).hostname.slice(1, -1);
+			if (norm === "::1" || norm === "::") return false;
+			if (norm.startsWith("::ffff:")) {
+				const tail = norm.slice(7);
+				if (isIPv4(tail)) return isPublicIp(tail);
+				const hexMatch = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
+				if (hexMatch) {
+					const hi = Number.parseInt(present(hexMatch[1]), 16);
+					const lo = Number.parseInt(present(hexMatch[2]), 16);
+					return isPublicIp(
+						`${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`,
+					);
+				}
+				return false;
+			}
+		} catch {
+			return false;
+		}
 		if (lower.startsWith("::ffff:")) return isPublicIp(lower.slice(7));
 		return true;
 	}
@@ -203,10 +228,10 @@ async function downloadRemoteUrl(
 	for (let redirect = 0; redirect < 6; redirect++) {
 		const parsed = validatePublicHttpUrl(current);
 		const host = parsed.hostname;
-		const _port = Number(
+		const port = Number(
 			parsed.port || (parsed.protocol === "https:" ? 443 : 80),
 		);
-		const _ip = await resolvePublicAddress(host);
+		const ip = await resolvePublicAddress(host);
 
 		const target = parsed.pathname + parsed.search;
 		const call = beginOutbound("remote-upload", "GET", current);
@@ -215,7 +240,7 @@ async function downloadRemoteUrl(
 			| { redirect: string; status: number }
 		>((resolve, reject) => {
 			const requestLine = `GET ${target} HTTP/1.1\r\nHost: ${host}\r\nUser-Agent: fileupload-remote-fetch/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n`;
-			const _onSocket = (
+			const onSocket = (
 				socket: import("node:net").Socket | import("node:tls").TLSSocket,
 			) => {
 				// Phase 1 accumulates only the response head; phase 2 streams the
@@ -369,6 +394,24 @@ async function downloadRemoteUrl(
 					finished.end(() => succeed({ status, headers, sizeBytes: written }));
 				});
 			};
+			const onPreConnectError = (err: Error) => {
+				reject(new HttpError(400, `remote download failed: ${err.message}`));
+			};
+			if (parsed.protocol === "https:") {
+				const socket = tlsConnect({ host: ip, port, servername: host });
+				socket.once("error", onPreConnectError);
+				socket.once("secureConnect", () => {
+					socket.removeListener("error", onPreConnectError);
+					onSocket(socket);
+				});
+			} else {
+				const socket = createConnection({ host: ip, port });
+				socket.once("error", onPreConnectError);
+				socket.once("connect", () => {
+					socket.removeListener("error", onPreConnectError);
+					onSocket(socket);
+				});
+			}
 		}).then(
 			(resolved) => {
 				call.ok(resolved.status);
