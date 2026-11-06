@@ -73,8 +73,13 @@ export class ClusterFirehoseConsumer {
 					n.token,
 			);
 
-		const desired = new Map<string, string>();
-		for (const n of nodes) desired.set(n.base_url.replace(/\/$/, ""), n.token);
+		const desired = new Map<string, { token: string; nodeId: string }>();
+		for (const n of nodes) {
+			desired.set(n.base_url.replace(/\/$/, ""), {
+				token: n.token,
+				nodeId: n.node_id as string,
+			});
+		}
 
 		for (const [baseUrl, poller] of this.pollers) {
 			if (!desired.has(baseUrl)) {
@@ -84,16 +89,21 @@ export class ClusterFirehoseConsumer {
 			}
 		}
 
-		for (const [baseUrl, token] of desired) {
+		for (const [baseUrl, { token, nodeId }] of desired) {
 			const existing = this.pollers.get(baseUrl);
 			if (existing) {
 				if (existing.token === token) continue;
 				existing.stopped = true; // token rotated -- restart with the new one
 				if (existing.timer) clearTimeout(existing.timer);
 			}
+			const storedSeq =
+				this.state.db.get<{ max_seq: number | null }>(
+					"SELECT MAX(origin_seq) AS max_seq FROM cluster_events WHERE origin_node_id = $nodeId",
+					{ $nodeId: nodeId },
+				)?.max_seq ?? 0;
 			const handle: PollerHandle = {
 				token,
-				cursor: 0,
+				cursor: Math.max(existing?.cursor ?? 0, storedSeq),
 				timer: null,
 				stopped: false,
 			};

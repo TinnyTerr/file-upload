@@ -306,19 +306,30 @@ export function handleVoteRequest(
 	if (
 		!candidateId ||
 		!Number.isFinite(candidateEpoch) ||
-		candidateEpoch <= self.epoch
+		candidateEpoch < self.epoch
 	) {
 		return { granted: false, epoch: self.epoch, reason: "stale_epoch" };
 	}
+
+	// Already voted this epoch: idempotent for the same candidate (retried
+	// request), refused for a different one. Checked before vectorAtLeast
+	// because granting the vote on a former master emits cluster.master_demoted,
+	// advancing this node's own local seq after the candidate built its vector.
+	if (self.voted_epoch === candidateEpoch) {
+		const sameCandidate = self.voted_for === candidateId;
+		return {
+			granted: sameCandidate,
+			epoch: self.epoch,
+			...(sameCandidate ? {} : { reason: "already_voted" }),
+		};
+	}
+	if (candidateEpoch <= self.epoch) {
+		return { granted: false, epoch: self.epoch, reason: "stale_epoch" };
+	}
+
 	const local = lastAppliedVector(state);
 	if (!vectorAtLeast(body.vector ?? {}, local)) {
 		return { granted: false, epoch: self.epoch, reason: "candidate_behind" };
-	}
-
-	// Already voted this epoch: idempotent for the same candidate (retried
-	// request), refused for a different one.
-	if (self.voted_epoch === candidateEpoch) {
-		return { granted: self.voted_for === candidateId, epoch: self.epoch };
 	}
 
 	const wasMaster = self.role === "master";
@@ -333,7 +344,12 @@ export function handleVoteRequest(
 	// Seeing a higher epoch in play means any belief we still hold about
 	// being (or knowing) master at the old epoch is stale -- fence it now
 	// rather than waiting for master-assumed to arrive.
-	persistRoleChange(db, { role: "follower", epoch: candidateEpoch });
+	persistRoleChange(db, {
+		role: "follower",
+		epoch: candidateEpoch,
+		currentMasterId: null,
+		currentMasterUrl: null,
+	});
 	if (wasMaster) {
 		try {
 			state.eventBus.publish({
@@ -363,6 +379,13 @@ export function handleMasterAssumed(
 	const epoch = Number(body.epoch ?? -1);
 	const nodeId = body.node_id ?? "";
 	if (!nodeId || !Number.isFinite(epoch) || epoch < self.epoch) {
+		return { accepted: false, epoch: self.epoch };
+	}
+	if (
+		epoch === self.epoch &&
+		((self.role === "master" && nodeId !== state.settings.nodeId) ||
+			(self.current_master_id !== null && self.current_master_id !== nodeId))
+	) {
 		return { accepted: false, epoch: self.epoch };
 	}
 	const wasMaster = self.role === "master" && nodeId !== state.settings.nodeId;
@@ -468,6 +491,14 @@ export async function runElection(state: AppState): Promise<void> {
 			}
 		}),
 	);
+
+	const postVoteSelf = selfRow(db);
+	if (postVoteSelf.epoch > newEpoch) {
+		log.info(
+			`election epoch=${newEpoch} superseded by higher epoch=${postVoteSelf.epoch}`,
+		);
+		return;
+	}
 
 	const majority = Math.floor((peers.length + 1) / 2) + 1;
 	if (grants >= majority) {

@@ -11,6 +11,11 @@ import { present } from "../src/present.ts";
 
 import { describe, expect, test } from "bun:test";
 import { createAppState } from "../src/appState.ts";
+import {
+	handleMasterAssumed,
+	handleVoteRequest,
+	initSelfState,
+} from "../src/cluster/election.ts";
 import { EventBus } from "../src/cluster/eventBus.ts";
 import { makeCluster } from "./clusterHarness.ts";
 import { makeHarness, testSettings } from "./harness.ts";
@@ -246,6 +251,55 @@ describe("cluster harness (Phase 0)", () => {
 			);
 		} finally {
 			cluster.close();
+		}
+	});
+
+	test("election vote-request is idempotent for same candidate and fences conflicting master-assumed at same epoch", async () => {
+		const h = await makeHarness();
+		try {
+			initSelfState(h.db, h.state.settings);
+			const vector = { [h.state.settings.nodeId]: 0 };
+
+			const first = handleVoteRequest(h.state, {
+				candidate_id: "node-b",
+				epoch: 1,
+				vector,
+			});
+			expect(first.granted).toBe(true);
+
+			// Retried vote request from the same candidate at the same epoch succeeds.
+			const retry = handleVoteRequest(h.state, {
+				candidate_id: "node-b",
+				epoch: 1,
+				vector,
+			});
+			expect(retry.granted).toBe(true);
+
+			// Competing candidate at the same epoch is refused.
+			const competing = handleVoteRequest(h.state, {
+				candidate_id: "node-c",
+				epoch: 1,
+				vector,
+			});
+			expect(competing.granted).toBe(false);
+
+			// Winner assumes master at epoch 1; conflicting node at epoch 1 is ignored.
+			expect(
+				handleMasterAssumed(h.state, {
+					node_id: "node-b",
+					node_url: "http://127.0.0.1:9001",
+					epoch: 1,
+				}).accepted,
+			).toBe(true);
+			expect(
+				handleMasterAssumed(h.state, {
+					node_id: "node-c",
+					node_url: "http://127.0.0.1:9002",
+					epoch: 1,
+				}).accepted,
+			).toBe(false);
+		} finally {
+			h.close();
 		}
 	});
 });

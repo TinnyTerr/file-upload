@@ -296,7 +296,12 @@ export async function heartbeatJob(state: AppState): Promise<number> {
 	const { db } = state;
 	const targets = db
 		.all<ClusterNodeRow>("SELECT * FROM cluster_nodes")
-		.filter((n) => n.base_url && n.token);
+		.filter(
+			(n) =>
+				n.base_url &&
+				n.token &&
+				(!n.node_id || n.node_id !== state.settings.nodeId),
+		);
 
 	let reached = 0;
 	for (const node of targets) {
