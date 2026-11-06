@@ -55,6 +55,12 @@ function blobRow(db: Db, blobId: number | null): ContentBlobRow | undefined {
  * directory total_bytes, matching the Python job's behavior. Returns the
  * physical path to unlink once the caller's batch has committed. */
 function deleteFileForJob(db: Db, f: FileRow): string | null {
+	if (f.directory_id !== null) {
+		db.run(
+			"UPDATE directories SET total_bytes = MAX(0, total_bytes - $sz) WHERE id = $id",
+			{ $sz: f.size_bytes, $id: f.directory_id },
+		);
+	}
 	db.run("DELETE FROM links WHERE file_id = $id", { $id: f.id });
 	const path = releaseBlob(db, f);
 	db.run("DELETE FROM files WHERE id = $id", { $id: f.id });
@@ -143,6 +149,22 @@ export async function archiveIdleJob(db: Db): Promise<number> {
 				});
 				log.info(
 					`archive idle job marked archived file_id=${f.id} reason=compression_not_worthwhile`,
+				);
+				continue;
+			}
+			// Re-check blob ref_count after async compression: a concurrent upload may
+			// have deduplicated against this unarchived blob while zstd was running.
+			if (!fileRow(db, f.id) || sharedBlob(db, f)) {
+				try {
+					if (existsSync(tmp)) unlinkSync(tmp);
+				} catch {
+					// best-effort
+				}
+				db.run("UPDATE files SET lifecycle_state = 'archived' WHERE id = $id", {
+					$id: f.id,
+				});
+				log.info(
+					`archive idle job aborted in-place swap for shared/deleted blob file_id=${f.id}`,
 				);
 				continue;
 			}
@@ -343,6 +365,20 @@ export async function archiveFileCore(
 			});
 			log.info(
 				`archive marked file archived without recompressing file_id=${f.id} reason=compression_not_worthwhile`,
+			);
+			return serializeFileLifecycle(present(fileRow(db, f.id)));
+		}
+		if (sharedBlob(db, f)) {
+			try {
+				if (existsSync(tmp)) unlinkSync(tmp);
+			} catch {
+				// best-effort
+			}
+			db.run("UPDATE files SET lifecycle_state = 'archived' WHERE id = $id", {
+				$id: f.id,
+			});
+			log.info(
+				`archive marked file archived without recompressing file_id=${f.id} reason=became_shared_during_compression`,
 			);
 			return serializeFileLifecycle(present(fileRow(db, f.id)));
 		}
