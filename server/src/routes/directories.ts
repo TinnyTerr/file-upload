@@ -83,10 +83,13 @@ import {
 	safeArcsegment,
 	storedZipSize,
 } from "../storage/zip.ts";
-import { serializeFiles } from "./files.ts";
+import { purgeFile, serializeFiles } from "./files.ts";
 import { previewEligible } from "./public.ts";
 
 const log = getLogger("app.routes.directories");
+
+/** Guards concurrent encryption rewrites on overlapping directory subtrees. */
+const rekeyingDirectories = new Set<number>();
 
 const MAX_EPOCH_MS = 8640000000000000; // Date's max representable instant.
 
@@ -1642,69 +1645,81 @@ export function directoriesRouter(state: AppState): Router {
 				? filesFollowingDirectory(db, d, current)
 				: [];
 			const inheritors = directoriesFollowingDirectory(db, d);
+			const lockIds = [d.id, ...inheritors.map((c) => c.id)];
+			if (lockIds.some((id) => rekeyingDirectories.has(id))) {
+				res.status(409).json({
+					detail: "directory encryption change already in progress",
+				});
+				return;
+			}
+			for (const id of lockIds) rekeyingDirectories.add(id);
 
-			// Pin first: from here on nothing underneath depends on this folder's
-			// columns, so a failure part-way through leaves every file readable with
-			// the key it already had (see storage/rekey.ts).
-			for (const f of affected) pinFileEncryption(db, f);
+			try {
+				// Pin first: from here on nothing underneath depends on this folder's
+				// columns, so a failure part-way through leaves every file readable with
+				// the key it already had (see storage/rekey.ts).
+				for (const f of affected) pinFileEncryption(db, f);
 
-			db.run(
-				`UPDATE directories SET encryption_mode = $mode, enc_key_blob = $key,
+				db.run(
+					`UPDATE directories SET encryption_mode = $mode, enc_key_blob = $key,
            enc_access_blob = $access, access_is_password = $isPassword,
            encryption_overridden = $overridden, key_check_blob = NULL
          WHERE id = $id`,
-				{
-					$mode: next.mode,
-					$key: rowKeyBlob,
-					$access: rowAccessBlob,
-					$isPassword: isPassword,
-					$overridden: overridden,
-					$id: d.id,
-				},
-			);
-			// Keep the denormalized mode mirror on inheriting subfolders in step.
-			for (const child of inheritors) {
-				db.run(
-					"UPDATE directories SET encryption_mode = $mode WHERE id = $id",
 					{
 						$mode: next.mode,
-						$id: child.id,
+						$key: rowKeyBlob,
+						$access: rowAccessBlob,
+						$isPassword: isPassword,
+						$overridden: overridden,
+						$id: d.id,
 					},
 				);
-			}
+				// Keep the denormalized mode mirror on inheriting subfolders in step.
+				for (const child of inheritors) {
+					db.run(
+						"UPDATE directories SET encryption_mode = $mode WHERE id = $id",
+						{
+							$mode: next.mode,
+							$id: child.id,
+						},
+					);
+				}
 
-			let rewritten = 0;
-			for (const f of affected) {
-				const fresh = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
-					$id: f.id,
-				});
-				if (!fresh) continue;
-				await rewriteFileEncryption(state, fresh, {
-					mode: next.mode,
-					key: fileKey,
-					keyBlob: null,
-					accessBlob: null,
-					accessIsPassword: 0,
-					overridden: 0,
-				});
-				rewritten += 1;
-			}
+				let rewritten = 0;
+				for (const f of affected) {
+					const fresh = db.get<FileRow>("SELECT * FROM files WHERE id = $id", {
+						$id: f.id,
+					});
+					if (!fresh) continue;
+					await rewriteFileEncryption(state, fresh, {
+						mode: next.mode,
+						key: fileKey,
+						keyBlob: null,
+						accessBlob: null,
+						accessIsPassword: 0,
+						overridden: 0,
+					});
+					rewritten += 1;
+				}
 
-			recordAudit(db, {
-				actor: user.username,
-				action: "directory.encryption_changed",
-				target: `directory:${d.id}`,
-				ip: clientIp(state, req),
-			});
-			log.info(
-				`directory encryption changed directory_id=${d.id} mode=${next.mode} inherited=${overridden === 0} files_reencrypted=${rewritten}`,
-			);
-			const updated = present(getDirectory(db, d.id));
-			res.json({
-				...present(serializeDirectories(state, req, [updated], user)[0]),
-				access_key: accessKey,
-				files_reencrypted: rewritten,
-			});
+				recordAudit(db, {
+					actor: user.username,
+					action: "directory.encryption_changed",
+					target: `directory:${d.id}`,
+					ip: clientIp(state, req),
+				});
+				log.info(
+					`directory encryption changed directory_id=${d.id} mode=${next.mode} inherited=${overridden === 0} files_reencrypted=${rewritten}`,
+				);
+				const updated = present(getDirectory(db, d.id));
+				res.json({
+					...present(serializeDirectories(state, req, [updated], user)[0]),
+					access_key: accessKey,
+					files_reencrypted: rewritten,
+				});
+			} finally {
+				for (const id of lockIds) rekeyingDirectories.delete(id);
+			}
 		}),
 	);
 
@@ -1877,24 +1892,13 @@ export function directoriesRouter(state: AppState): Router {
 				res.status(404).json({ detail: "not found" });
 				return;
 			}
-			db.run("DELETE FROM links WHERE file_id = $id", { $id: fileObj.id });
-			db.run(
-				"UPDATE directories SET total_bytes = MAX(0, COALESCE(total_bytes, 0) - $dec) WHERE id = $id",
-				{
-					$dec: fileObj.size_bytes ?? 0,
-					$id: d.id,
-				},
-			);
-			const unlinkAfterCommit = [releaseBlob(db, fileObj)];
-			db.run("DELETE FROM files WHERE id = $id", { $id: fileObj.id });
-			deleteThumbnail(fileObj.id);
+			purgeFile(state, fileObj);
 			recordAudit(db, {
 				actor: user.username,
 				action: "directory.file_deleted",
 				target: `file:${fileObj.id}`,
 				ip: clientIp(state, req),
 			});
-			unlinkQueued(unlinkAfterCommit);
 			res.json({ status: "deleted" });
 		},
 	);
@@ -2054,6 +2058,14 @@ export function directoriesRouter(state: AppState): Router {
 					{ $id: node.id },
 				);
 				for (const f of members) {
+					db.run(
+						"UPDATE files SET saved_from_file_id = NULL WHERE saved_from_file_id = $id",
+						{ $id: f.id },
+					);
+					db.run(
+						"DELETE FROM link_hits WHERE link_kind = 'file' AND link_id IN (SELECT id FROM links WHERE file_id = $id)",
+						{ $id: f.id },
+					);
 					db.run("DELETE FROM links WHERE file_id = $id", { $id: f.id });
 					unlinkAfterCommit.push(releaseBlob(db, f));
 					db.run("DELETE FROM files WHERE id = $id", { $id: f.id });
@@ -2067,6 +2079,10 @@ export function directoriesRouter(state: AppState): Router {
 				db.run("DELETE FROM directory_collaborators WHERE directory_id = $id", {
 					$id: node.id,
 				});
+				db.run(
+					"DELETE FROM link_hits WHERE link_kind = 'dir' AND link_id IN (SELECT id FROM directory_links WHERE directory_id = $id)",
+					{ $id: node.id },
+				);
 				db.run("DELETE FROM directory_links WHERE directory_id = $id", {
 					$id: node.id,
 				});

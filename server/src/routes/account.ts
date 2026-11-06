@@ -12,6 +12,7 @@ import { requireCsrf } from "../security/csrf.ts";
 import { hashPassword, verifyPassword } from "../security/passwords.ts";
 import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
 import { deleteThumbnail } from "../storage/thumbnail.ts";
+import { purgeOauthForUser } from "./oauth.ts";
 
 interface SumRow {
 	total: number | null;
@@ -80,7 +81,17 @@ function purgeUserData(state: AppState, userId: number): Array<string | null> {
 		db.run("UPDATE remote_upload_jobs SET file_id = NULL WHERE file_id = $id", {
 			$id: f.id,
 		});
+		db.run(
+			"DELETE FROM link_hits WHERE link_kind = 'file' AND link_id IN (SELECT id FROM links WHERE file_id = $id)",
+			{ $id: f.id },
+		);
 		db.run("DELETE FROM links WHERE file_id = $id", { $id: f.id });
+		if (f.directory_id !== null) {
+			db.run(
+				"UPDATE directories SET total_bytes = MAX(0, COALESCE(total_bytes, 0) - $dec) WHERE id = $id",
+				{ $dec: f.size_bytes ?? 0, $id: f.directory_id },
+			);
+		}
 	}
 	for (const f of uniqueFiles) {
 		paths.push(releaseBlob(db, f));
@@ -89,6 +100,19 @@ function purgeUserData(state: AppState, userId: number): Array<string | null> {
 	}
 
 	for (const dirId of dirIds) {
+		db.run(
+			"UPDATE directories SET parent_directory_id = NULL WHERE parent_directory_id = $id",
+			{ $id: dirId },
+		);
+	}
+	for (const dirId of dirIds) {
+		db.run(
+			"DELETE FROM link_hits WHERE link_kind = 'dir' AND link_id IN (SELECT id FROM directory_links WHERE directory_id = $id)",
+			{ $id: dirId },
+		);
+		db.run("DELETE FROM directory_links WHERE directory_id = $id", {
+			$id: dirId,
+		});
 		db.run("DELETE FROM dropbox_upload_links WHERE target_directory_id = $id", {
 			$id: dirId,
 		});
@@ -98,6 +122,10 @@ function purgeUserData(state: AppState, userId: number): Array<string | null> {
 		db.run("DELETE FROM directories WHERE id = $id", { $id: dirId });
 	}
 
+	db.run(
+		"UPDATE directory_collaborators SET invited_by_id = NULL WHERE invited_by_id = $id",
+		{ $id: userId },
+	);
 	db.run("DELETE FROM dropbox_upload_links WHERE owner_id = $id", {
 		$id: userId,
 	});
@@ -115,6 +143,7 @@ function purgeUserData(state: AppState, userId: number): Array<string | null> {
 	// Play keys point at files that no longer exist after this, and they FK to
 	// users, so they have to go before the account row can be deleted.
 	db.run("DELETE FROM media_play_keys WHERE user_id = $id", { $id: userId });
+	purgeOauthForUser(state, userId);
 
 	return paths;
 }

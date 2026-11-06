@@ -450,7 +450,17 @@ export function usersRouter(state: AppState): Router {
 				);
 
 				for (const f of uniqueFiles) {
+					db.run(
+						"DELETE FROM link_hits WHERE link_kind = 'file' AND link_id IN (SELECT id FROM links WHERE file_id = $id)",
+						{ $id: f.id },
+					);
 					db.run("DELETE FROM links WHERE file_id = $id", { $id: f.id });
+					if (f.directory_id !== null) {
+						db.run(
+							"UPDATE directories SET total_bytes = MAX(0, COALESCE(total_bytes, 0) - $dec) WHERE id = $id",
+							{ $dec: f.size_bytes ?? 0, $id: f.directory_id },
+						);
+					}
 					unlinkAfterCommit.push(releaseBlob(db, f));
 					deleteThumbnail(f.id);
 					db.run("DELETE FROM files WHERE id = $id", { $id: f.id });
@@ -458,6 +468,17 @@ export function usersRouter(state: AppState): Router {
 
 				if (dirIds.length) {
 					for (const dirId of dirIds) {
+						db.run(
+							"UPDATE directories SET parent_directory_id = NULL WHERE parent_directory_id = $id",
+							{ $id: dirId },
+						);
+						db.run(
+							"DELETE FROM link_hits WHERE link_kind = 'dir' AND link_id IN (SELECT id FROM directory_links WHERE directory_id = $id)",
+							{ $id: dirId },
+						);
+						db.run("DELETE FROM directory_links WHERE directory_id = $id", {
+							$id: dirId,
+						});
 						db.run(
 							"DELETE FROM dropbox_upload_links WHERE target_directory_id = $id",
 							{ $id: dirId },

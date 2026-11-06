@@ -441,6 +441,7 @@ export async function finalizeStoredFile(
 		`${basePath}.fupl.work`,
 		basePath,
 	];
+	let unattachedFileId: number | null = null;
 
 	try {
 		let ct = (opts.contentType || "application/octet-stream")
@@ -511,6 +512,7 @@ export async function finalizeStoredFile(
 		const fileObj = present(
 			db.get<FileRow>("SELECT * FROM files WHERE id = last_insert_rowid()"),
 		);
+		unattachedFileId = fileObj.id;
 
 		let encKeyBlobVal: Buffer | null = null;
 		let encAccessBlobVal: Buffer | null = null;
@@ -586,6 +588,7 @@ export async function finalizeStoredFile(
 				$id: fileObj.id,
 			},
 		);
+		unattachedFileId = null;
 		db.run(
 			`INSERT INTO links (file_id, slug, max_uses, use_count, expires_at, active, created_at)
        VALUES ($fileId, $slug, $maxUses, 0, $expiresAt, 1, $now)`,
@@ -643,6 +646,15 @@ export async function finalizeStoredFile(
 			saved_from_file_id: opts.savedFromFileId ?? null,
 		};
 	} catch (err) {
+		if (unattachedFileId !== null) {
+			try {
+				db.run("DELETE FROM files WHERE id = $id AND blob_id IS NULL", {
+					$id: unattachedFileId,
+				});
+			} catch {
+				// best-effort
+			}
+		}
 		for (const p of cleanupPaths) {
 			try {
 				if (existsSync(p)) unlinkSync(p);
@@ -863,6 +875,10 @@ export function receiveChunkAt(
 	onDone: () => void,
 ): void {
 	const { parts, relPath, index, expected } = opts;
+	if (uploadLocks.has(relPath)) {
+		res.status(409).json({ detail: "upload busy, retry shortly" });
+		return;
+	}
 	const marker = join(parts, String(index));
 	const assembly = assemblyPath(relPath);
 	// A session that predates positional writes has no assembly file; so does
@@ -1155,6 +1171,17 @@ export function sweepStaleParts(): void {
 
 	walk(root, (p, isDir) => {
 		try {
+			if (uploadLocks.size > 0) {
+				const rel = p
+					.slice(root.length)
+					.replace(/^[/\\]+/, "")
+					.replace(/\\/g, "/")
+					.replace(
+						/\.(?:parts|part|dropbox\.work|zst\.work|fupl\.work|work)$/,
+						"",
+					);
+				if (uploadLocks.has(rel)) return;
+			}
 			const st = statSync(p);
 			if (st.mtimeMs / 1000 < cutoff) {
 				if (isDir) rmSync(p, { recursive: true, force: true });
@@ -1271,6 +1298,14 @@ export function serializeFiles(
  * row. Returns nothing; the physical unlink is queued internally. */
 export function purgeFile(state: AppState, fileObj: FileRow): void {
 	const { db } = state;
+	db.run(
+		"UPDATE files SET saved_from_file_id = NULL WHERE saved_from_file_id = $id",
+		{ $id: fileObj.id },
+	);
+	db.run(
+		"DELETE FROM link_hits WHERE link_kind = 'file' AND link_id IN (SELECT id FROM links WHERE file_id = $id)",
+		{ $id: fileObj.id },
+	);
 	db.run("DELETE FROM links WHERE file_id = $id", { $id: fileObj.id });
 	if (fileObj.directory_id !== null) {
 		db.run(

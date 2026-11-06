@@ -11,6 +11,7 @@ import {
 	type UserRow,
 } from "../db/rows.ts";
 import type { Db, SqlParams } from "../db/types.ts";
+import { subtree } from "../directoryTree.ts";
 import { HttpError } from "../httpError.ts";
 import {
 	archiveFileCore,
@@ -585,6 +586,10 @@ function bulkPreviewPayload(action: string, candidates: BulkCandidate[]) {
  * this adjusts the parent directory's total_bytes. Mirrors
  * app/routes/admin.py::_queue_file_delete. */
 function queueFileDelete(db: Db, f: FileRow): string | null {
+	db.run(
+		"DELETE FROM link_hits WHERE link_kind = 'file' AND link_id IN (SELECT id FROM links WHERE file_id = $id)",
+		{ $id: f.id },
+	);
 	db.run("DELETE FROM links WHERE file_id = $id", { $id: f.id });
 	if (f.directory_id !== null) {
 		db.run(
@@ -940,23 +945,44 @@ export function adminRouter(state: AppState): Router {
 					}
 					unlinkQueued(unlinkAfterCommit);
 				} else if (action === "delete_directories") {
+					const allDirs = new Map<number, DirectoryRow>();
 					for (const c of candidates) {
 						if (c.kind !== "directory") continue;
+						for (const node of subtree(db, c.row.id)) {
+							if (ownerId !== null && node.owner_id !== ownerId) continue;
+							allDirs.set(node.id, node);
+						}
+					}
+					const orderedDirs = [...allDirs.values()].reverse();
+					for (const d of orderedDirs) {
+						db.run(
+							"UPDATE directories SET parent_directory_id = NULL WHERE parent_directory_id = $id",
+							{ $id: d.id },
+						);
+					}
+					for (const d of orderedDirs) {
 						const members = db.all<FileRow>(
 							"SELECT * FROM files WHERE directory_id = $id",
-							{ $id: c.row.id },
+							{ $id: d.id },
 						);
 						for (const member of members)
 							unlinkAfterCommit.push(queueFileDelete(db, member));
 						db.run(
+							"DELETE FROM link_hits WHERE link_kind = 'dir' AND link_id IN (SELECT id FROM directory_links WHERE directory_id = $id)",
+							{ $id: d.id },
+						);
+						db.run("DELETE FROM directory_links WHERE directory_id = $id", {
+							$id: d.id,
+						});
+						db.run(
 							"DELETE FROM dropbox_upload_links WHERE target_directory_id = $id",
-							{ $id: c.row.id },
+							{ $id: d.id },
 						);
 						db.run(
 							"DELETE FROM directory_collaborators WHERE directory_id = $id",
-							{ $id: c.row.id },
+							{ $id: d.id },
 						);
-						db.run("DELETE FROM directories WHERE id = $id", { $id: c.row.id });
+						db.run("DELETE FROM directories WHERE id = $id", { $id: d.id });
 						processed++;
 					}
 					if (processed) {
