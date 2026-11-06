@@ -14,6 +14,8 @@ import { Label } from "@/components/ui/label";
 import { errorMessage } from "@/config/api";
 import { verifyFolderKey } from "@/features/directories/lib/folderKey";
 import type { Directory } from "@/features/directories/types";
+import { bytesToBase64Url } from "@/lib/base64url";
+import { useRevealedKeys } from "../hooks/useRevealedKeys";
 
 /** Pull the key out of a pasted share URL, or accept a bare key. */
 function extractClientKey(value: string): string {
@@ -43,6 +45,7 @@ export function UnlockFolderDialog({
 	const [value, setValue] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
+	const { remember } = useRevealedKeys();
 
 	const submit = async () => {
 		setError(null);
@@ -56,9 +59,12 @@ export function UnlockFolderDialog({
 				extractClientKey(value),
 				dir.key_check_blob,
 			);
+			const b64 = bytesToBase64Url(key);
+			remember("folder", dir.inherited_from_directory_id ?? dir.id, b64);
+			remember("folder", dir.id, b64);
 			setValue("");
-			onOpenChange(false);
 			onUnlocked(key);
+			onOpenChange(false);
 		} catch (err) {
 			// AES-GCM auth-tag failure (the common case: a wrong key) throws with
 			// no useful message in most browsers, so this fallback is the message

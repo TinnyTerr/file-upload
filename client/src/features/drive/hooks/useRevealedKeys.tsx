@@ -92,15 +92,35 @@ const RevealedKeyContext = createContext<RevealedKeyState | null>(null);
  * was shown. Nothing routed can own this state.
  */
 export function RevealedKeyProvider({ children }: { children: ReactNode }) {
-	const [pending, setPending] = useState<RevealedKey[]>(() =>
-		loadJson<RevealedKey[]>(PENDING_STORAGE, []),
-	);
+	const [pending, setPending] = useState<RevealedKey[]>(() => {
+		const initial = loadJson<RevealedKey[]>(PENDING_STORAGE, []);
+		for (const item of initial) {
+			const n = Number(item.id.replace(/^rk/, ""));
+			if (Number.isFinite(n) && n > seq) seq = n;
+		}
+		return initial;
+	});
 	const [held, setHeld] = useState<Record<string, string>>(() =>
 		loadJson<Record<string, string>>(HELD_STORAGE, {}),
 	);
 
 	useEffect(() => saveJson(PENDING_STORAGE, pending), [pending]);
 	useEffect(() => saveJson(HELD_STORAGE, held), [held]);
+
+	useEffect(() => {
+		const onLogout = () => {
+			setPending([]);
+			setHeld({});
+			try {
+				sessionStorage.removeItem(PENDING_STORAGE);
+				sessionStorage.removeItem(HELD_STORAGE);
+			} catch {
+				// ignore storage errors
+			}
+		};
+		window.addEventListener("fu:logout", onLogout);
+		return () => window.removeEventListener("fu:logout", onLogout);
+	}, []);
 
 	// Closing the tab with a key still on screen loses it permanently, so make
 	// the browser ask. This is the one place in the app where that is warranted.

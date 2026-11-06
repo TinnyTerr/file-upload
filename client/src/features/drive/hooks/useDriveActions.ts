@@ -65,6 +65,20 @@ export function useDriveActions() {
 		[confirm, mutations],
 	);
 
+	const resolveFileKey = useCallback(
+		(file: {
+			id: number;
+			directory_id: number | null;
+			inherited_from_directory_id: number | null;
+		}): string | null =>
+			keyFor("file", file.id) ??
+			(file.inherited_from_directory_id
+				? keyFor("folder", file.inherited_from_directory_id)
+				: null) ??
+			(file.directory_id ? keyFor("folder", file.directory_id) : null),
+		[keyFor],
+	);
+
 	const download = useCallback(
 		(items: DriveItem[]) => {
 			const files = items.filter((i) => i.kind === "file");
@@ -72,12 +86,17 @@ export function useDriveActions() {
 			if (files.length === 1) {
 				const only = present(files[0]);
 				if (only.kind !== "file") return;
-				const link = only.file.links[0];
+				const link =
+					only.file.links.find((l) => l.active) ?? only.file.links[0];
 				if (!link) return;
+				const isE2e =
+					only.file.encryption_mode === "client" ||
+					only.file.encryption_mode === "sealed";
+				const base = isE2e ? fileUrl(link.slug) : rawUrl(link.slug);
 				window.open(
-					shareUrl(rawUrl(link.slug), only.file.encryption_mode, {
+					shareUrl(base, only.file.encryption_mode, {
 						accessKey: only.file.access_key,
-						clientKeyB64: keyFor("file", only.id),
+						clientKeyB64: resolveFileKey(only.file),
 					}),
 					"_blank",
 					"noopener",
@@ -93,12 +112,15 @@ export function useDriveActions() {
 				"noopener",
 			);
 		},
-		[keyFor],
+		[resolveFileKey],
 	);
 
 	const share = useCallback(
 		(item: DriveItem) => {
 			if (item.kind === "folder") {
+				const folderKey =
+					keyFor("folder", item.dir.inherited_from_directory_id ?? item.id) ??
+					keyFor("folder", item.id);
 				setShareEntries([
 					{
 						filename: item.dir.title,
@@ -107,12 +129,12 @@ export function useDriveActions() {
 						accessKey: item.dir.access_key,
 						// Only present if this tab created or unlocked the folder -- the
 						// server never had this key, and it dies with the tab.
-						clientKeyB64: keyFor("folder", item.id),
+						clientKeyB64: folderKey,
 					},
 				]);
 				return;
 			}
-			const link = item.file.links[0];
+			const link = item.file.links.find((l) => l.active) ?? item.file.links[0];
 			if (!link) return;
 			setShareEntries([
 				{
@@ -120,11 +142,11 @@ export function useDriveActions() {
 					mode: item.file.encryption_mode,
 					baseUrl: fileUrl(link.slug),
 					accessKey: item.file.access_key,
-					clientKeyB64: keyFor("file", item.id),
+					clientKeyB64: resolveFileKey(item.file),
 				},
 			]);
 		},
-		[keyFor],
+		[keyFor, resolveFileKey],
 	);
 
 	const actions = useMemo<DriveActions>(

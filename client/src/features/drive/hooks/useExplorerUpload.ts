@@ -10,7 +10,7 @@ import {
 import { useUpload } from "@/features/files/hooks/useUpload";
 import { outcomeToShareEntry } from "@/features/files/lib/shareMapping";
 import { isKeyHeldByUser } from "@/features/files/types";
-import { base64UrlToBytes } from "@/lib/base64url";
+import { base64UrlToBytes, bytesToBase64Url } from "@/lib/base64url";
 import { useDriveTreeUpload } from "./useDriveUpload";
 import { useRevealedKeys } from "./useRevealedKeys";
 
@@ -31,7 +31,7 @@ interface Pending {
 export function useExplorerUpload() {
 	const { start } = useUpload();
 	const tree = useDriveTreeUpload();
-	const { keyFor } = useRevealedKeys();
+	const { keyFor, remember, reveal } = useRevealedKeys();
 	const [form, setForm] = useState<UploadFormState>(defaultFormState);
 	const [shareEntries, setShareEntries] = useState<ShareEntry[]>([]);
 	const [pending, setPending] = useState<Pending | null>(null);
@@ -39,7 +39,8 @@ export function useExplorerUpload() {
 	const keyBytesFor = useCallback(
 		(dir: Directory | null): Uint8Array | undefined => {
 			if (!dir || !isKeyHeldByUser(dir.encryption_mode)) return undefined;
-			const b64 = keyFor("folder", dir.id);
+			const ownerId = dir.inherited_from_directory_id ?? dir.id;
+			const b64 = keyFor("folder", ownerId) ?? keyFor("folder", dir.id);
 			return b64 ? base64UrlToBytes(b64) : undefined;
 		},
 		[keyFor],
@@ -55,7 +56,7 @@ export function useExplorerUpload() {
 	);
 
 	const runFiles = useCallback(
-		async (files: File[], dir: Directory | null) => {
+		async (files: File[], dir: Directory | null, explicitKey?: Uint8Array) => {
 			if (!files.length) return;
 			const results = await start(
 				files,
@@ -64,28 +65,48 @@ export function useExplorerUpload() {
 					encryption_mode: dir ? dir.encryption_mode : form.encryption_mode,
 					directory_id: dir?.id ?? null,
 				},
-				keyBytesFor(dir),
+				explicitKey ?? keyBytesFor(dir),
 			);
+			for (const r of results) {
+				if (r.outcome?.clientKeyB64 && !dir) {
+					remember("file", r.outcome.result.file_id, r.outcome.clientKeyB64);
+				}
+			}
 			const entries = results
 				.map((r) => outcomeToShareEntry(r.filename, r.outcome))
 				.filter((e): e is ShareEntry => e !== null);
 			if (entries.length) setShareEntries(entries);
 		},
-		[start, form, keyBytesFor],
+		[start, form, keyBytesFor, remember],
 	);
 
 	const runTree = useCallback(
-		async (files: File[], dir: Directory | null) => {
+		async (files: File[], dir: Directory | null, explicitKey?: Uint8Array) => {
 			if (!files.length) return;
-			await tree.uploadTree({
+			const { createdRootId, clientKeyB64 } = await tree.uploadTree({
 				files,
 				parent: dir,
 				rootMode: form.encryption_mode,
-				presetKey: keyBytesFor(dir),
+				presetKey: explicitKey ?? keyBytesFor(dir),
 				options: toUploadOptions(form),
 			});
+			if (createdRootId !== null && clientKeyB64 !== null) {
+				remember("folder", createdRootId, clientKeyB64);
+				const rootName =
+					(
+						files[0] as File & { webkitRelativePath?: string }
+					)?.webkitRelativePath?.split("/")[0] || "Uploaded folder";
+				reveal({
+					subject: rootName,
+					key: clientKeyB64,
+					isPassword: false,
+					reason:
+						"This folder was encrypted in your browser before upload. The server never saw this key and cannot recover it.",
+					refs: [{ kind: "folder", id: createdRootId }],
+				});
+			}
 		},
-		[tree, form, keyBytesFor],
+		[tree, form, keyBytesFor, remember, reveal],
 	);
 
 	/** The single entry point. Queues behind the unlock prompt when the
@@ -107,14 +128,26 @@ export function useExplorerUpload() {
 	);
 
 	/** Called once the unlock dialog has stored the key in the app-level map. */
-	const resumePending = useCallback(async () => {
-		const queued = pending;
-		setPending(null);
-		if (!queued) return;
-		await (queued.tree
-			? runTree(queued.files, queued.dir)
-			: runFiles(queued.files, queued.dir));
-	}, [pending, runFiles, runTree]);
+	const resumePending = useCallback(
+		async (unlockedKey?: Uint8Array) => {
+			const queued = pending;
+			setPending(null);
+			if (!queued) return;
+			if (unlockedKey) {
+				const b64 = bytesToBase64Url(unlockedKey);
+				remember(
+					"folder",
+					queued.dir.inherited_from_directory_id ?? queued.dir.id,
+					b64,
+				);
+				remember("folder", queued.dir.id, b64);
+			}
+			await (queued.tree
+				? runTree(queued.files, queued.dir, unlockedKey)
+				: runFiles(queued.files, queued.dir, unlockedKey));
+		},
+		[pending, remember, runFiles, runTree],
+	);
 
 	return {
 		form,

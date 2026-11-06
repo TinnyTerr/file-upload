@@ -423,7 +423,7 @@ export function ExplorerPage() {
 						dir={upload.pending.dir}
 						open
 						onOpenChange={(o) => !o && upload.setPending(null)}
-						onUnlocked={() => void upload.resumePending()}
+						onUnlocked={(key) => void upload.resumePending(key)}
 					/>
 				</Deferred>
 			)}

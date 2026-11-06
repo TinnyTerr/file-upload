@@ -46,6 +46,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
 	const logout = React.useCallback(async () => {
 		await authService.logout();
+		try {
+			sessionStorage.removeItem("fu_pending_keys@v1");
+			sessionStorage.removeItem("fu_held_keys@v1");
+			sessionStorage.removeItem("fu_clipboard@v1");
+			localStorage.removeItem("fu_upload_sessions");
+			localStorage.removeItem("fu_active_dropbox");
+		} catch {
+			// ignore storage errors
+		}
+		window.dispatchEvent(new CustomEvent("fu:logout"));
 		qc.clear();
 		await refetch();
 	}, [qc, refetch]);
