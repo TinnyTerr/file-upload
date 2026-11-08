@@ -1,3 +1,4 @@
+import { randomFillSync } from "node:crypto";
 import type { Response } from "express";
 import { Router } from "express";
 import type { AppState } from "../appState.ts";
@@ -39,6 +40,7 @@ import {
 } from "../storage/accounting.ts";
 import { releaseBlob, unlinkQueued } from "../storage/blobs.ts";
 import { deleteThumbnail } from "../storage/thumbnail.ts";
+import { CHUNK_MAX_SIZE } from "./files.ts";
 
 const log = getLogger("app.routes.admin");
 
@@ -658,6 +660,86 @@ export function adminRouter(state: AppState): Router {
 	// Backend logs live in this process's own ring buffer (never replicated).
 	// Cross-node proxying is part of the deferred cluster runtime -- until
 	// that lands, a `server` param naming a peer 404s instead of proxying.
+	// Connection debug (admin "Connection" tab). Moves real bytes over the same
+	// proxy path a chunked upload or download takes, and stores nothing.
+	router.post(
+		"/connection-test/chunk",
+		requireSession(state),
+		requireCsrf,
+		requireMaster(state),
+		(req, res) => {
+			const declared = Number(req.query.length);
+			if (
+				!Number.isSafeInteger(declared) ||
+				declared <= 0 ||
+				declared > CHUNK_MAX_SIZE
+			) {
+				res.status(400).json({ detail: "invalid length" });
+				return;
+			}
+			let received = 0;
+			req.on("data", (chunk: Buffer) => {
+				received += chunk.length;
+				if (received > declared) {
+					res.status(400).json({ detail: "body exceeds declared length" });
+					req.destroy();
+				}
+			});
+			req.on("end", () => {
+				if (res.headersSent) return;
+				if (received !== declared) {
+					res.status(400).json({ detail: "body shorter than declared length" });
+					return;
+				}
+				res.json({ received });
+			});
+			req.on("error", () => {
+				if (!res.headersSent) res.status(400).json({ detail: "aborted" });
+			});
+		},
+	);
+
+	router.get(
+		"/connection-test/download",
+		requireSession(state),
+		requireMaster(state),
+		(req, res) => {
+			const bytes = Number(req.query.bytes);
+			if (
+				!Number.isSafeInteger(bytes) ||
+				bytes <= 0 ||
+				bytes > CHUNK_MAX_SIZE
+			) {
+				res.status(400).json({ detail: "invalid bytes" });
+				return;
+			}
+			// Random, not zeros: a compressing proxy would otherwise shrink the
+			// transfer and inflate the throughput being measured.
+			const block = Buffer.alloc(64 * 1024);
+			randomFillSync(block);
+			res.set({
+				"Content-Type": "application/octet-stream",
+				"Content-Length": String(bytes),
+				"Cache-Control": "no-store",
+			});
+			let left = bytes;
+			const pump = () => {
+				while (left > 0) {
+					if (res.destroyed) return;
+					const n = Math.min(block.length, left);
+					left -= n;
+					const slice = n === block.length ? block : block.subarray(0, n);
+					if (!res.write(slice)) {
+						res.once("drain", pump);
+						return;
+					}
+				}
+				res.end();
+			};
+			pump();
+		},
+	);
+
 	router.get("/backend/logs", requireMaster(state), (req, res) => {
 		const q =
 			typeof req.query.q === "string" ? req.query.q.slice(0, 200) : undefined;
