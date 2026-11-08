@@ -107,6 +107,12 @@ const log = getLogger("app.routes.files");
 const _CHUNK = 256 * 1024;
 const REQUEST_OVERHEAD_ALLOWANCE = 1024 * 1024;
 const CHUNK_UPLOAD_SIZE = 16 * 1024 * 1024;
+/** Protocol 2: offset-addressed chunks whose length the client picks from the
+ * link it measures. Bounds are advertised at init and enforced per chunk. */
+const CHUNK_PROTOCOL_V2 = 2;
+export const CHUNK_MIN_SIZE = 50 * 1024;
+export const CHUNK_MAX_SIZE = 70 * 1024 * 1024;
+const CHUNK_INITIAL_SIZE = 1024 * 1024;
 const CHUNK_SESSION_TTL = 12 * 3600;
 const CHUNK_TOKEN_AAD = Buffer.from("chunked-upload-v1");
 
@@ -813,6 +819,53 @@ export function receivedIndices(parts: string, n: number): number[] {
 	return out.sort((a, b) => a - b);
 }
 
+/** Byte ranges a protocol-2 session holds, as merged `[start, end)` pairs.
+ * Markers are named `<offset>-<length>`; overlaps (a retry that picked a
+ * different length) merge, which is harmless because the bytes are identical.
+ *
+ * Exported for reuse by dropbox.ts. */
+export function receivedRanges(parts: string): Array<[number, number]> {
+	const raw: Array<[number, number]> = [];
+	try {
+		for (const entry of readdirSync(parts)) {
+			const m = /^(\d+)-(\d+)$/.exec(entry);
+			if (m) raw.push([Number(m[1]), Number(m[1]) + Number(m[2])]);
+		}
+	} catch {
+		// best-effort
+	}
+	return mergeRanges(raw);
+}
+
+/** Sorts and merges `[start, end)` pairs, joining overlapping or touching ones. */
+export function mergeRanges(
+	ranges: Array<[number, number]>,
+): Array<[number, number]> {
+	const sorted = [...ranges].sort((a, b) => a[0] - b[0]);
+	const out: Array<[number, number]> = [];
+	for (const [s, e] of sorted) {
+		const last = out[out.length - 1];
+		if (last && s <= last[1]) last[1] = Math.max(last[1], e);
+		else out.push([s, e]);
+	}
+	return out;
+}
+
+/** The parts of `[0, total)` that `covered` (merged) does not reach. */
+export function uncoveredRanges(
+	covered: Array<[number, number]>,
+	total: number,
+): Array<[number, number]> {
+	const gaps: Array<[number, number]> = [];
+	let cursor = 0;
+	for (const [s, e] of covered) {
+		if (s > cursor) gaps.push([cursor, Math.min(s, total)]);
+		cursor = Math.max(cursor, e);
+	}
+	if (cursor < total) gaps.push([cursor, total]);
+	return gaps;
+}
+
 /** The file an upload's chunks are written into, at their final offsets.
  *
  * Exported for reuse by dropbox.ts. */
@@ -859,11 +912,18 @@ export function receiveChunkAt(
 		expected: number;
 		/** The session's uniform chunk size, which is what sets the offset. */
 		chunkSize: number;
+		/** Protocol 2: an explicit offset and length, overriding `index`/`chunkSize`. */
+		range?: { offset: number; length: number };
 	},
 	onDone: () => void,
 ): void {
-	const { parts, relPath, index, expected } = opts;
-	const marker = join(parts, String(index));
+	const { parts, relPath, index } = opts;
+	const offset = opts.range ? opts.range.offset : index * opts.chunkSize;
+	const expected = opts.range ? opts.range.length : opts.expected;
+	const marker = join(
+		parts,
+		opts.range ? `${offset}-${expected}` : String(index),
+	);
 	const assembly = assemblyPath(relPath);
 	// A session that predates positional writes has no assembly file; so does
 	// one whose `.part` was swept. Recreating it beats 410ing an upload that is
@@ -872,7 +932,7 @@ export function receiveChunkAt(
 
 	const out = createWriteStream(assembly, {
 		flags: "r+",
-		start: index * opts.chunkSize,
+		start: offset,
 	});
 	let written = 0;
 	let handled = false;
@@ -1492,7 +1552,8 @@ export function filesRouter(state: AppState): Router {
 			const totalSize = Number(body.total_size ?? 0);
 			precheckDeclaredSize(state, user, prepared.perm, totalSize);
 
-			const chunkSize = chunkUploadSize();
+			const v2 = Number(body.chunk_protocol) === CHUNK_PROTOCOL_V2;
+			const chunkSize = v2 ? CHUNK_INITIAL_SIZE : chunkUploadSize();
 			const n = numChunks(totalSize, chunkSize);
 			const rand = randomBytes(32).toString("hex");
 			const relPath = `${rand.slice(0, 2)}/${rand.slice(2, 4)}/${rand.slice(4)}`;
@@ -1503,7 +1564,7 @@ export function filesRouter(state: AppState): Router {
 			prepareAssembly(relPath);
 
 			const meta: ChunkMeta = {
-				v: 1,
+				v: v2 ? CHUNK_PROTOCOL_V2 : 1,
 				uid: user.id,
 				rel: relPath,
 				total: totalSize,
@@ -1532,6 +1593,13 @@ export function filesRouter(state: AppState): Router {
 				chunk_size: chunkSize,
 				num_chunks: n,
 				total: totalSize,
+				...(v2
+					? {
+							protocol: CHUNK_PROTOCOL_V2,
+							chunk_min: CHUNK_MIN_SIZE,
+							chunk_max: CHUNK_MAX_SIZE,
+						}
+					: {}),
 				received: [],
 			});
 		} catch (err) {
@@ -1550,6 +1618,17 @@ export function filesRouter(state: AppState): Router {
 			const parts = partsDir(meta.rel);
 			if (!existsSync(parts)) {
 				res.status(410).json({ detail: "upload session gone" });
+				return;
+			}
+			if (meta.v === CHUNK_PROTOCOL_V2) {
+				res.json({
+					upload_id: req.query.upload_id,
+					total: meta.total,
+					protocol: CHUNK_PROTOCOL_V2,
+					chunk_min: CHUNK_MIN_SIZE,
+					chunk_max: CHUNK_MAX_SIZE,
+					ranges: receivedRanges(parts),
+				});
 				return;
 			}
 			res.json({
@@ -1576,6 +1655,39 @@ export function filesRouter(state: AppState): Router {
 		const parts = partsDir(meta.rel);
 		if (!existsSync(parts)) {
 			res.status(410).json({ detail: "upload session gone" });
+			return;
+		}
+		if (meta.v === CHUNK_PROTOCOL_V2) {
+			// Any length in [min, max] at any offset, provided it stays inside the
+			// file. Only the tail may be shorter than the minimum.
+			const offset = Number(req.query.offset);
+			const length = Number(req.query.length);
+			const ok =
+				Number.isSafeInteger(offset) &&
+				Number.isSafeInteger(length) &&
+				offset >= 0 &&
+				length > 0 &&
+				length <= CHUNK_MAX_SIZE &&
+				offset + length <= meta.total &&
+				(length >= CHUNK_MIN_SIZE || offset + length === meta.total);
+			if (!ok) {
+				res.status(400).json({ detail: "invalid chunk range" });
+				return;
+			}
+			receiveChunkAt(
+				req,
+				res,
+				next,
+				{
+					parts,
+					relPath: meta.rel,
+					index: -1,
+					expected: length,
+					chunkSize: meta.cs,
+					range: { offset, length },
+				},
+				() => res.json({ offset, length }),
+			);
 			return;
 		}
 		const index = Number(req.query.index);
@@ -1616,20 +1728,37 @@ export function filesRouter(state: AppState): Router {
 					return;
 				}
 
-				const received = new Set(receivedIndices(parts, meta.n));
-				const missing: number[] = [];
-				for (let i = 0; i < meta.n; i++) if (!received.has(i)) missing.push(i);
-				if (missing.length) {
-					log.info(
-						`chunked upload finalize incomplete user_id=${user.id} missing_count=${missing.length}`,
-					);
-					res.status(409).json({
-						detail: {
-							error: "upload incomplete",
-							missing: missing.slice(0, 512),
-						},
-					});
-					return;
+				if (meta.v === CHUNK_PROTOCOL_V2) {
+					const gaps = uncoveredRanges(receivedRanges(parts), meta.total);
+					if (gaps.length) {
+						log.info(
+							`chunked upload finalize incomplete user_id=${user.id} gap_count=${gaps.length}`,
+						);
+						res.status(409).json({
+							detail: {
+								error: "upload incomplete",
+								missing_ranges: gaps.slice(0, 512),
+							},
+						});
+						return;
+					}
+				} else {
+					const received = new Set(receivedIndices(parts, meta.n));
+					const missing: number[] = [];
+					for (let i = 0; i < meta.n; i++)
+						if (!received.has(i)) missing.push(i);
+					if (missing.length) {
+						log.info(
+							`chunked upload finalize incomplete user_id=${user.id} missing_count=${missing.length}`,
+						);
+						res.status(409).json({
+							detail: {
+								error: "upload incomplete",
+								missing: missing.slice(0, 512),
+							},
+						});
+						return;
+					}
 				}
 
 				// Chunks were written straight to their offsets, so the assembly is
@@ -1637,7 +1766,10 @@ export function filesRouter(state: AppState): Router {
 				// before that change still needs concatenating first.
 				const work = assemblyPath(relPath);
 				let plainHashes: FileHashes | undefined;
-				if (isLegacyPartsLayout(parts, meta.n)) {
+				if (
+					meta.v !== CHUNK_PROTOCOL_V2 &&
+					isLegacyPartsLayout(parts, meta.n)
+				) {
 					plainHashes = await assembleChunks(parts, work, meta.n);
 				}
 				const stored = existsSync(work) ? statSync(work).size : -1;
