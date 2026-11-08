@@ -1,8 +1,16 @@
 import { bytesToBase64Url, randomKey } from "@/lib/base64url";
 import { pollFinalize } from "@/lib/finalizePoll";
 import { encryptBlob } from "@/workers/aeadClient";
+import type { ByteRange } from "../services/filesService";
 import { filesService } from "../services/filesService";
 import type { UploadOptions, UploadResult } from "../types";
+import {
+	coveredBytes,
+	foldRate,
+	mergeRanges,
+	nextChunkLength,
+	RangeQueue,
+} from "./chunkPlanner";
 import {
 	forgetSession,
 	isResumable,
@@ -79,6 +87,12 @@ export async function performUpload({
 	return { result, clientKeyB64 };
 }
 
+/**
+ * Protocol 2: every chunk is an arbitrary `[offset, offset + length)` range,
+ * sized per request from the rate the link has actually delivered (see
+ * chunkPlanner.ts). Resume asks the server which ranges it holds and only sends
+ * the gaps.
+ */
 async function chunkedUpload(
 	payload: Blob,
 	file: File,
@@ -86,33 +100,34 @@ async function chunkedUpload(
 	onProgress?: (p: UploadProgress) => void,
 	signal?: AbortSignal,
 ): Promise<UploadResult> {
+	const total = payload.size;
 	const resumeId = isResumable(options)
-		? resumeKey(file, payload.size, options)
+		? resumeKey(file, total, options)
 		: null;
-	const init = await openSession(file, payload.size, options, resumeId);
-	const { upload_id, chunk_size, num_chunks } = init;
-	const done = new Set<number>(init.received ?? []);
+	const session = await openSession(file, total, options, resumeId);
+	const { upload_id } = session;
+	let covered: ByteRange[] = mergeRanges(session.ranges);
+	const queue = new RangeQueue(total, covered);
 
 	const report = () =>
 		onProgress?.({
 			phase: "uploading",
-			percent: Math.round((done.size / num_chunks) * 100),
+			percent: Math.round((coveredBytes(covered) / total) * 100),
 		});
 	report();
-
-	const pending = Array.from({ length: num_chunks }, (_, i) => i).filter(
-		(i) => !done.has(i),
-	);
-	let cursor = 0;
 
 	// Adaptive concurrency: start conservative, then step the number of
 	// simultaneously-in-flight chunks up or down based on measured throughput
 	// (AIMD-style -- additive step up, halve on a transient failure).
-	let concurrency = Math.min(INITIAL_CONCURRENT_CHUNKS, pending.length || 1);
+	let concurrency = INITIAL_CONCURRENT_CHUNKS;
 	let windowBytes = 0;
 	let windowChunks = 0;
 	let windowStart = performance.now();
 	let lastThroughput = 0;
+	// Per-chunk rate (bytes/s) the next chunk length is sized from. Each chunk
+	// is measured on its own, so the rate already reflects how many slots share
+	// the link: sizing to it keeps every chunk near TARGET_CHUNK_SECONDS.
+	let rate: number | null = null;
 
 	function sampleThroughput(bytes: number) {
 		windowBytes += bytes;
@@ -136,6 +151,9 @@ async function chunkedUpload(
 
 	function backOff() {
 		concurrency = Math.max(MIN_CONCURRENT_CHUNKS, Math.floor(concurrency / 2));
+		// A failure is read as the link being slower than measured, so the next
+		// chunks shrink too: a timeout is most often a chunk that took too long.
+		if (rate !== null) rate /= 2;
 	}
 
 	// Fixed pool of MAX_CONCURRENT_CHUNKS worker slots; a slot only pulls work
@@ -143,23 +161,34 @@ async function chunkedUpload(
 	// raising/lowering `concurrency` takes effect immediately without having to
 	// spawn or cancel promises.
 	async function worker(slot: number) {
-		while (cursor < pending.length) {
+		for (;;) {
 			if (signal?.aborted) throw new DOMException("aborted", "AbortError");
 			if (slot >= concurrency) {
+				if (queue.exhausted) return;
 				await delay(150);
 				continue;
 			}
-			const index = pending[cursor++];
-			if (index === undefined) break;
-			const start = index * chunk_size;
-			const chunk = payload.slice(
-				start,
-				Math.min(start + chunk_size, payload.size),
-			);
+			const next = queue.take(nextChunkLength(rate));
+			if (!next) return;
+			const { offset, length } = next;
+			const body = payload.slice(offset, offset + length);
+
 			let attempt = 0;
 			for (;;) {
+				const started = performance.now();
 				try {
-					await filesService.chunkedSend(upload_id, index, chunk, signal);
+					await filesService.chunkedSend(
+						upload_id,
+						offset,
+						length,
+						body,
+						signal,
+					);
+					// Only the attempt that landed is timed; a retry's backoff is not.
+					rate = foldRate(rate, {
+						bytes: length,
+						seconds: (performance.now() - started) / 1000,
+					});
 					break;
 				} catch (err) {
 					if (signal?.aborted) throw err;
@@ -168,22 +197,19 @@ async function chunkedUpload(
 					await delay(300 * attempt);
 				}
 			}
-			sampleThroughput(chunk.size);
-			done.add(index);
+			sampleThroughput(length);
+			covered = mergeRanges([...covered, [offset, offset + length]]);
 			report();
 		}
 	}
 
 	try {
 		await Promise.all(
-			Array.from(
-				{ length: Math.min(MAX_CONCURRENT_CHUNKS, pending.length) },
-				(_, i) => worker(i),
-			),
+			Array.from({ length: MAX_CONCURRENT_CHUNKS }, (_, i) => worker(i)),
 		);
 	} catch (err) {
 		// A cancel throws the session away. Any other failure (a dropped
-		// connection, a reload mid-transfer) keeps it: the chunks that landed are
+		// connection, a reload mid-transfer) keeps it: the ranges that landed are
 		// what a re-picked file resumes from, and the server sweeps abandoned
 		// sessions after 12 h. Only the *transfer* is cleaned up here: once
 		// finalize has been asked for, the server may be minutes into assembling a
@@ -214,19 +240,16 @@ async function openSession(
 	payloadSize: number,
 	options: UploadOptions,
 	resumeId: string | null,
-) {
+): Promise<{ upload_id: string; ranges: ByteRange[] }> {
 	if (resumeId) {
 		const remembered = loadSession(resumeId);
 		if (remembered) {
 			try {
 				const status = await filesService.chunkedStatus(remembered);
-				if (status.total === payloadSize) {
-					return {
-						upload_id: remembered,
-						chunk_size: status.chunk_size,
-						num_chunks: status.num_chunks,
-						received: status.received,
-					};
+				// A session from the index protocol (older tab) has no ranges to
+				// resume from, so it starts over like any other mismatch.
+				if (status.total === payloadSize && status.ranges) {
+					return { upload_id: remembered, ranges: status.ranges };
 				}
 			} catch {
 				// 410 gone, 403 other user, token expired: all mean start over.
@@ -241,7 +264,7 @@ async function openSession(
 		options,
 	);
 	if (resumeId) saveSession(resumeId, init.upload_id);
-	return init;
+	return { upload_id: init.upload_id, ranges: [] };
 }
 
 function delay(ms: number) {

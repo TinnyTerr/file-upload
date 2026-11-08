@@ -7,12 +7,18 @@ import type {
 	Usage,
 } from "../types";
 
+/** Half-open `[start, end)` byte range. */
+export type ByteRange = [number, number];
+
 interface ChunkedInit {
 	upload_id: string;
 	chunk_size: number;
 	num_chunks: number;
 	total: number;
-	received: number[];
+	/** Protocol 2 only: the allowed chunk bounds. */
+	protocol?: number;
+	chunk_min?: number;
+	chunk_max?: number;
 }
 
 /** Options serialized into the chunked-init JSON / form fields. */
@@ -87,28 +93,30 @@ export const filesService = {
 				original_filename: filename,
 				total_size: totalSize,
 				content_type: contentType,
+				chunk_protocol: 2,
 				...optionFields(opts),
 			},
 		}),
 
 	chunkedStatus: (uploadId: string) =>
 		api.get<{
-			received: number[];
 			total: number;
-			chunk_size: number;
-			num_chunks: number;
+			protocol?: number;
+			ranges?: ByteRange[];
+			received?: number[];
 		}>("/files/upload/status", {
 			query: { upload_id: uploadId },
 		}),
 
 	chunkedSend: (
 		uploadId: string,
-		index: number,
+		offset: number,
+		length: number,
 		chunk: Blob,
 		signal?: AbortSignal,
 	) =>
-		api.post<{ index: number; num_chunks: number }>("/files/upload/chunk", {
-			query: { upload_id: uploadId, index },
+		api.post<{ offset: number; length: number }>("/files/upload/chunk", {
+			query: { upload_id: uploadId, offset, length },
 			body: chunk,
 			headers: { "Content-Type": "application/octet-stream" },
 			signal,
