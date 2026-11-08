@@ -8,7 +8,27 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv, type Plugin } from "vite";
 
-const BACKEND = process.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8000";
+/** The same `PORT` the server listens on. Resolution mirrors server/src/config.ts:
+ * environment first, then the app.env the server reads (FILEUPLOAD_CONFIG, else
+ * the repo-root data/app.env that the root `dev` script points both sides at),
+ * then the 8000 default. Without this the proxy silently targets 8000 even when
+ * app.env sets another PORT, and every /api call 502s. */
+function serverPort(): string {
+	if (process.env.PORT) return process.env.PORT.trim();
+	const configPath =
+		process.env.FILEUPLOAD_CONFIG ??
+		fileURLToPath(new URL("../data/app.env", import.meta.url));
+	if (existsSync(configPath)) {
+		for (const line of readFileSync(configPath, "utf-8").split("\n")) {
+			const m = /^\s*PORT\s*=\s*(.*?)\s*$/.exec(line);
+			if (m?.[1]) return m[1];
+		}
+	}
+	return "8000";
+}
+
+const BACKEND =
+	process.env.VITE_BACKEND_URL ?? `http://127.0.0.1:${serverPort()}`;
 
 // DSNs live in the repo-root .env, one per surface. Only the web one is baked
 // into this bundle; the server and desktop keys never reach the browser.
