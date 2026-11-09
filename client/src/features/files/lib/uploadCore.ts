@@ -1,3 +1,4 @@
+import { ApiError } from "@/config/api";
 import { bytesToBase64Url, randomKey } from "@/lib/base64url";
 import { pollFinalize } from "@/lib/finalizePoll";
 import { encryptBlob } from "@/workers/aeadClient";
@@ -192,6 +193,14 @@ async function chunkedUpload(
 					break;
 				} catch (err) {
 					if (signal?.aborted) throw err;
+					logChunkFailure(err, {
+						offset,
+						length,
+						attempt: attempt + 1,
+						elapsedMs: Math.round(performance.now() - started),
+						concurrency,
+						rate,
+					});
 					backOff();
 					if (++attempt >= CHUNK_RETRIES) throw err;
 					await delay(300 * attempt);
@@ -269,4 +278,38 @@ async function openSession(
 
 function delay(ms: number) {
 	return new Promise((r) => setTimeout(r, ms));
+}
+
+/** A failed chunk attempt, with what's needed to tell Cloudflare from the app:
+ * a proxy-generated error carries a cf-ray and a non-app `server` header, a
+ * dropped connection has no status at all (a bare TypeError). */
+function logChunkFailure(
+	err: unknown,
+	ctx: {
+		offset: number;
+		length: number;
+		attempt: number;
+		elapsedMs: number;
+		concurrency: number;
+		rate: number | null;
+	},
+) {
+	const h = err instanceof ApiError ? err.headers : undefined;
+	const conn = (
+		navigator as Navigator & {
+			connection?: { effectiveType?: string; rtt?: number; downlink?: number };
+		}
+	).connection;
+	console.warn("[upload] chunk failed", {
+		...ctx,
+		kind: err instanceof ApiError ? "http" : "network",
+		status: err instanceof ApiError ? err.status : null,
+		error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+		cfRay: h?.get("cf-ray") ?? null,
+		server: h?.get("server") ?? null,
+		online: navigator.onLine,
+		link: conn
+			? { type: conn.effectiveType, rtt: conn.rtt, downlink: conn.downlink }
+			: null,
+	});
 }

@@ -936,7 +936,23 @@ export function receiveChunkAt(
 	});
 	let written = 0;
 	let handled = false;
+	const startedAt = Date.now();
+	// Everything needed to match a line here to a Cloudflare event.
+	const trace = () =>
+		`ray=${req.get("cf-ray") ?? "-"} ip=${req.get("cf-connecting-ip") ?? req.ip} ` +
+		`rel=${relPath} offset=${offset} got=${written}/${expected} ` +
+		`elapsed_ms=${Date.now() - startedAt} ` +
+		`content_length=${req.get("content-length") ?? "-"}`;
+	// The socket closing before the body finished is what a proxy killing a slow
+	// request looks like from here: nothing errors, the request just stops.
+	req.on("close", () => {
+		if (req.complete || handled) return;
+		log.warning(`chunk upload cut off by client/proxy ${trace()}`);
+	});
 	const fail = (status: number, detail: string) => {
+		log.warning(
+			`chunk upload rejected status=${status} detail=${detail} ${trace()}`,
+		);
 		handled = true;
 		out.destroy();
 		res.status(status).json({ detail });
@@ -967,6 +983,7 @@ export function receiveChunkAt(
 			if (written !== expected) {
 				// No marker: the region is garbage, but nothing counts it as
 				// received, so the client's retry rewrites the same offsets.
+				log.warning(`chunk upload incomplete ${trace()}`);
 				res.status(400).json({ detail: "incomplete chunk" });
 				return;
 			}
@@ -975,6 +992,7 @@ export function receiveChunkAt(
 		});
 	});
 	req.on("error", (err) => {
+		log.warning(`chunk upload request error: ${err.message} ${trace()}`);
 		handled = true;
 		out.destroy();
 		next(err);
