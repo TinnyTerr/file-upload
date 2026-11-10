@@ -49,6 +49,7 @@ export function UserAvatar({
 
 	return (
 		<span
+			data-sentry-mask
 			className={cn(
 				"flex shrink-0 items-center justify-center rounded-full bg-brand-gradient text-white",
 				SIZE_CLASSES[size],

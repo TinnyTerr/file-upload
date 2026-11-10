@@ -240,7 +240,9 @@ function UserSection({
 					onClick={(e) => e.stopPropagation()}
 				/>
 				<User className="size-4 shrink-0 text-muted-foreground" />
-				<span className="flex-1 text-sm font-semibold">{username}</span>
+				<span className="flex-1 text-sm font-semibold" data-sentry-mask>
+					{username}
+				</span>
 				<span className="text-xs text-muted-foreground">
 					{files.length} file{files.length !== 1 ? "s" : ""}
 				</span>

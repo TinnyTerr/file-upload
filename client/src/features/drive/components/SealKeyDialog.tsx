@@ -61,7 +61,7 @@ export function SealKeyDialog({
 				if (!open && canClose) close();
 			}}
 		>
-			<DialogContent className="max-w-md">
+			<DialogContent className="max-w-md" data-sentry-mask>
 				<DialogHeader>
 					<DialogTitle className="flex items-center gap-2">
 						<KeyRound className="size-4" /> Save this key now

@@ -71,7 +71,7 @@ export function UnlockFolderDialog({
 
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
-			<DialogContent className="max-w-sm">
+			<DialogContent className="max-w-sm" data-sentry-mask>
 				<DialogHeader>
 					<DialogTitle className="flex items-center gap-2">
 						<KeyRound className="size-4" /> Unlock “{dir.title}”

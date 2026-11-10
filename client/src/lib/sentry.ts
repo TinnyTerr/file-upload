@@ -1,4 +1,4 @@
-import { isSecretRoute, scrubUrl } from "./scrubUrl";
+import { isPrivateRoute, isSecretRoute, scrubUrl } from "./scrubUrl";
 
 type SentryModule = typeof import("@sentry/react");
 
@@ -36,14 +36,25 @@ export function initSentry(): void {
 						// which for a share page would be the credential.
 						beforeStartSpan: (ctx) => ({ ...ctx, name: scrubUrl(ctx.name) }),
 					}),
-					// This app moves other people's files: mask every character and
-					// frame, and record nothing at all on pages whose URL is a secret.
+					// Replay policy. Only admins can open Sentry, and they can already see
+					// every filename in the admin Files tab, so text (filenames, labels,
+					// errors) is recorded as-is. Hidden:
+					//  - every input value (passwords, codes, search boxes, key fields)
+					//  - all media: file contents, thumbnails, avatars
+					//  - anything tagged `data-sentry-mask`: usernames, IPs, the admin
+					//    users tab, permission/key dialogs, API keys, E2E keys
+					//  - whole pages: login, account/MFA, OAuth consent (isPrivateRoute),
+					//    and share/receive links whose URL is the credential
 					Sentry.replayIntegration({
-						maskAllText: true,
+						maskAllText: false,
 						maskAllInputs: true,
 						blockAllMedia: true,
+						mask: ["[data-sentry-mask]"],
 						beforeAddRecordingEvent: (event) =>
-							isSecretRoute(location.pathname, location.search) ? null : event,
+							isSecretRoute(location.pathname, location.search) ||
+							isPrivateRoute(location.pathname)
+								? null
+								: event,
 					}),
 					// No floating button: opened from the user menu (openFeedback). The sync
 					// variant bundles the modal and screenshot code; the lazy one fetches it

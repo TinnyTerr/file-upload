@@ -66,7 +66,7 @@ export function UsersTab() {
 			: 0;
 
 	return (
-		<div className="space-y-4">
+		<div className="space-y-4" data-sentry-mask>
 			<div className="flex items-center gap-2">
 				<div className="relative flex-1">
 					<Search className="absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />

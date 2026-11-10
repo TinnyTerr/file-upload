@@ -82,7 +82,7 @@ export function PlayKeyDialog({
 
 	return (
 		<Dialog open={open} onOpenChange={close}>
-			<DialogContent className="sm:max-w-lg">
+			<DialogContent className="sm:max-w-lg" data-sentry-mask>
 				<DialogHeader>
 					<DialogTitle className="flex items-center gap-2">
 						<KeyRound className="size-4" />

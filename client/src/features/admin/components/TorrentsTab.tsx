@@ -118,7 +118,7 @@ function DebridCard({
 						) : (
 							<Badge variant="secondary">disabled</Badge>
 						)}
-						<span className="text-muted-foreground">
+						<span className="text-muted-foreground" data-sentry-mask>
 							{status?.connected
 								? [
 										status.username,
@@ -480,7 +480,7 @@ export function TorrentsTab() {
 										<Badge variant="secondary">
 											{t.provider === "debrid" ? "Real-Debrid" : "qBittorrent"}
 										</Badge>
-										<Badge variant="secondary">
+										<Badge variant="secondary" data-sentry-mask>
 											<User /> {t.owner_username}
 										</Badge>
 									</div>

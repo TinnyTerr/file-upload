@@ -90,7 +90,9 @@ export function UserMenu({ collapsed = false }: { collapsed?: boolean }) {
 			aria-label={`User menu for ${user.username}`}
 		>
 			<Avatar user={user} />
-			<span className="truncate text-sm font-medium">{user.username}</span>
+			<span className="truncate text-sm font-medium" data-sentry-mask>
+				{user.username}
+			</span>
 		</Button>
 	);
 
@@ -111,7 +113,8 @@ export function UserMenu({ collapsed = false }: { collapsed?: boolean }) {
 						)}
 					>
 						<span className="flex items-center gap-2 text-sm font-medium text-foreground">
-							<UserIcon className="size-4" /> {user.username}
+							<UserIcon className="size-4" />{" "}
+							<span data-sentry-mask>{user.username}</span>
 						</span>
 						<Badge variant={user.role === "master" ? "accent" : "secondary"}>
 							{user.role}
