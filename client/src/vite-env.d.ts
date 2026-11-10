@@ -9,3 +9,6 @@ declare const __SENTRY_RELEASE__: string;
 declare const __SENTRY_TRACES_RATE__: number;
 /** 0..1, from SENTRY_REPLAY_SAMPLE_RATE (default 0.05). Error replays are always kept. */
 declare const __SENTRY_REPLAY_RATE__: number;
+
+/** Portfolio site URL from PORTFOLIO_URL (repo-root .env); empty hides the link. */
+declare const __PORTFOLIO_URL__: string;

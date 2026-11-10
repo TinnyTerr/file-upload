@@ -32,7 +32,10 @@ const BACKEND =
 
 // DSNs live in the repo-root .env, one per surface. Only the web one is baked
 // into this bundle; the server and desktop keys never reach the browser.
-const rootEnv = loadEnv(process.env.NODE_ENV ?? "development", "..", "SENTRY_");
+const rootEnv = loadEnv(process.env.NODE_ENV ?? "development", "..", [
+	"SENTRY_",
+	"PORTFOLIO_",
+]);
 const sentryEnv = (key: string): string | undefined =>
 	process.env[key] ?? rootEnv[key] ?? undefined;
 
@@ -111,6 +114,10 @@ export default defineConfig({
 	define: {
 		__SENTRY_DSN__: JSON.stringify(sentryEnv("SENTRY_DSN_WEB") ?? ""),
 		__SENTRY_RELEASE__: JSON.stringify(release),
+		// Optional; the footer hides the portfolio link when empty.
+		__PORTFOLIO_URL__: JSON.stringify(
+			process.env.PORTFOLIO_URL ?? rootEnv.PORTFOLIO_URL ?? "",
+		),
 		__SENTRY_TRACES_RATE__: rate("SENTRY_TRACES_SAMPLE_RATE", 0.1),
 		__SENTRY_REPLAY_RATE__: rate("SENTRY_REPLAY_SAMPLE_RATE", 0.05),
 	},

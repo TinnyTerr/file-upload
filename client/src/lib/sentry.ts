@@ -126,3 +126,28 @@ export async function openFeedback(): Promise<void> {
 	form?.appendToDom();
 	form?.open();
 }
+
+/** Whether the manual "upload replay" action can do anything. */
+export const replayAvailable = enabled;
+
+/**
+ * Forces the buffered session replay (the last ~60s, masked like every other
+ * replay) to upload now instead of waiting for an error. Resolves to the
+ * replay id, or null if Sentry/replay isn't running.
+ */
+export async function uploadReplay(): Promise<string | null> {
+	if (!enabled) return null;
+	const Sentry = sentry ?? (await import("@sentry/react"));
+	const replay = Sentry.getReplay();
+	if (!replay) return null;
+	// In buffer mode flush() switches to session mode and sends what's held.
+	await replay.flush();
+	const id = replay.getReplayId() ?? null;
+	if (id) {
+		Sentry.captureMessage("Manual replay upload", {
+			level: "info",
+			tags: { manual_replay: "1" },
+		});
+	}
+	return id;
+}

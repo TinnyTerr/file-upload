@@ -1,6 +1,7 @@
 import { Link, Outlet } from "react-router-dom";
 import { AppShell } from "@/components/layout/AppShell";
 import { Brand } from "@/components/layout/Brand";
+import { Footer } from "@/components/layout/Footer";
 import { FullPageSpinner } from "@/components/layout/FullPageSpinner";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/features/auth/hooks/auth";
@@ -32,9 +33,7 @@ export function WatchLayout() {
 			<main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 lg:py-8">
 				<Outlet />
 			</main>
-			<footer className="px-4 py-6 text-center text-xs text-muted-foreground">
-				Oxymoron (for files)
-			</footer>
+			<Footer />
 		</div>
 	);
 }
