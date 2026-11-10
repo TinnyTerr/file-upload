@@ -10,7 +10,7 @@ const read = (path: string) =>
 describe("UI design contracts", () => {
 	test("brand tagline uses the requested product slogan", () => {
 		expect(read("src/components/layout/Brand.tsx")).toContain("(for files)");
-		expect(read("src/components/layout/PublicShell.tsx")).toContain(
+		expect(read("src/components/layout/Footer.tsx")).toContain(
 			"Oxymoron (for files)",
 		);
 	});
