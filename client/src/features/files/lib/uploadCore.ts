@@ -10,7 +10,9 @@ import {
 	foldRate,
 	mergeRanges,
 	nextChunkLength,
+	penalizeRate,
 	RangeQueue,
+	retryLength,
 } from "./chunkPlanner";
 import {
 	forgetSession,
@@ -150,11 +152,11 @@ async function chunkedUpload(
 		windowStart = performance.now();
 	}
 
-	function backOff() {
+	function backOff(failedLength: number) {
 		concurrency = Math.max(MIN_CONCURRENT_CHUNKS, Math.floor(concurrency / 2));
 		// A failure is read as the link being slower than measured, so the next
 		// chunks shrink too: a timeout is most often a chunk that took too long.
-		if (rate !== null) rate /= 2;
+		rate = penalizeRate(rate, failedLength);
 	}
 
 	// Fixed pool of MAX_CONCURRENT_CHUNKS worker slots; a slot only pulls work
@@ -171,8 +173,9 @@ async function chunkedUpload(
 			}
 			const next = queue.take(nextChunkLength(rate));
 			if (!next) return;
-			const { offset, length } = next;
-			const body = payload.slice(offset, offset + length);
+			const { offset } = next;
+			let { length } = next;
+			let body = payload.slice(offset, offset + length);
 
 			let attempt = 0;
 			for (;;) {
@@ -201,8 +204,16 @@ async function chunkedUpload(
 						concurrency,
 						rate,
 					});
-					backOff();
+					backOff(length);
 					if (++attempt >= CHUNK_RETRIES) throw err;
+					// Retry smaller: the same oversized chunk would most likely hit
+					// the same timeout. The tail goes back to the queue.
+					const shrunk = retryLength(length, rate);
+					if (shrunk < length) {
+						queue.giveBack(offset + shrunk, length - shrunk);
+						length = shrunk;
+						body = payload.slice(offset, offset + length);
+					}
 					await delay(300 * attempt);
 				}
 			}

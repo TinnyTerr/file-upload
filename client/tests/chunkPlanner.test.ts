@@ -7,8 +7,10 @@ import {
 	foldRate,
 	mergeRanges,
 	nextChunkLength,
+	penalizeRate,
 	RATE_SMOOTHING,
 	RangeQueue,
+	retryLength,
 	TARGET_CHUNK_SECONDS,
 	uncoveredRanges,
 } from "../src/features/files/lib/chunkPlanner";
@@ -137,5 +139,35 @@ describe("RangeQueue", () => {
 			offset: total - 10 * KIB,
 			length: 10 * KIB,
 		});
+	});
+});
+
+describe("failure handling", () => {
+	test("penalizeRate halves an existing rate", () => {
+		expect(penalizeRate(4 * MIB, 10 * MIB)).toBe(2 * MIB);
+	});
+
+	test("penalizeRate seeds from the failed chunk when there is no rate", () => {
+		const r = penalizeRate(null, CHUNK_INITIAL);
+		expect(r).toBe(CHUNK_INITIAL / TARGET_CHUNK_SECONDS / 2);
+		expect(nextChunkLength(r)).toBeLessThan(CHUNK_INITIAL);
+	});
+
+	test("retryLength shrinks to the penalized size", () => {
+		const r = penalizeRate(null, 60 * MIB);
+		expect(retryLength(60 * MIB, r)).toBe(nextChunkLength(r));
+	});
+
+	test("retryLength keeps the chunk when the remainder would be under CHUNK_MIN", () => {
+		expect(retryLength(CHUNK_MIN + 10, 1)).toBe(CHUNK_MIN + 10);
+	});
+
+	test("giveBack returns a range that is handed out again", () => {
+		const q = new RangeQueue(10 * MIB, []);
+		const a = q.take(4 * MIB);
+		expect(a).toEqual({ offset: 0, length: 4 * MIB });
+		q.giveBack(2 * MIB, 2 * MIB);
+		expect(q.take(2 * MIB)).toEqual({ offset: 2 * MIB, length: 2 * MIB });
+		expect(q.take(MIB)).toEqual({ offset: 4 * MIB, length: MIB });
 	});
 });

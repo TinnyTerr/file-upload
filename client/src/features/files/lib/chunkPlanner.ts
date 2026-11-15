@@ -36,6 +36,33 @@ export function foldRate(rate: number | null, sample: ChunkSample): number {
 	return RATE_SMOOTHING * observed + (1 - RATE_SMOOTHING) * rate;
 }
 
+/** The rate after a failed chunk. A failure (timeout, 413, dropped
+ * connection) is read as the link being slower than measured, so the rate is
+ * halved. With no rate yet, the failed chunk itself is the evidence: it was
+ * too big to land in TARGET_CHUNK_SECONDS, so the rate is seeded at half of
+ * what would have sized it. */
+export function penalizeRate(
+	rate: number | null,
+	failedLength: number,
+	targetSeconds: number = TARGET_CHUNK_SECONDS,
+): number {
+	const base = rate !== null && rate > 0 ? rate : failedLength / targetSeconds;
+	return base / 2;
+}
+
+/**
+ * How much of a failed chunk to retry, given the penalized rate. Shrinks only
+ * when both halves stay at or above CHUNK_MIN, so the remainder handed back to
+ * the queue never has to be widened over bytes still in flight.
+ */
+export function retryLength(failedLength: number, rate: number | null): number {
+	const want = nextChunkLength(rate);
+	if (want >= failedLength || failedLength - want < CHUNK_MIN) {
+		return failedLength;
+	}
+	return want;
+}
+
 /** Length for the next chunk. Before a rate exists, the initial size. */
 export function nextChunkLength(
 	rate: number | null,
@@ -101,6 +128,14 @@ export class RangeQueue {
 	/** True once every missing byte has been handed out (not yet necessarily sent). */
 	get exhausted(): boolean {
 		return this.gaps.every(([start, end]) => start >= end);
+	}
+
+	/** Returns `[offset, offset + length)` to the queue, e.g. the tail of a
+	 * chunk that was shrunk after a failure. */
+	giveBack(offset: number, length: number): void {
+		if (length <= 0) return;
+		this.gaps.push([offset, offset + length]);
+		this.gaps.sort((a, b) => a[0] - b[0]);
 	}
 
 	take(want: number): PlannedChunk | null {
