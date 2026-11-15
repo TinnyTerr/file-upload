@@ -3,11 +3,11 @@ import { errorMessage } from "@/config/api";
 import {
 	foldRate,
 	isTooLarge,
-	lowerCeiling,
 	nextChunkLength,
 	penalizeRate,
 	RangeQueue,
 	retryLength,
+	SizeLimit,
 } from "@/features/files/lib/chunkPlanner";
 import { connectionService } from "../services/connectionService";
 
@@ -124,8 +124,7 @@ export function useConnectionTest() {
 				const queue = new RangeQueue(bytes, []);
 				const rows: TraceRow[] = [];
 				let rate: number | null = null;
-				let ceiling: number | null = null;
-				let largestOk = 0;
+				const limit = new SizeLimit();
 				const started = performance.now();
 				const publish = (done: boolean) =>
 					setUpload({
@@ -139,7 +138,9 @@ export function useConnectionTest() {
 				const worker = async () => {
 					for (;;) {
 						if (signal.aborted) throw new DOMException("aborted", "AbortError");
-						const next = queue.take(nextChunkLength(rate, undefined, ceiling));
+						const next = queue.take(
+							nextChunkLength(rate, undefined, limit.ceiling),
+						);
 						if (!next) return;
 						const { offset } = next;
 						let { length } = next;
@@ -157,7 +158,7 @@ export function useConnectionTest() {
 								// Same reaction as a real upload: a 413 caps the size,
 								// anything else halves the rate; either way retry smaller.
 								if (isTooLarge(err)) {
-									ceiling = lowerCeiling(ceiling, length, largestOk);
+									limit.tooLarge(length);
 								} else {
 									rate = penalizeRate(rate, length);
 								}
@@ -168,22 +169,25 @@ export function useConnectionTest() {
 									seconds: (performance.now() - t0) / 1000,
 									chunkRate: 0,
 									smoothedRate: rate ?? 0,
-									nextLength: nextChunkLength(rate, undefined, ceiling),
+									nextLength: nextChunkLength(rate, undefined, limit.ceiling),
 									error: errorMessage(err),
 								});
 								publish(false);
-								if (++attempt >= CHUNK_RETRIES) throw err;
-								const shrunk = retryLength(length, rate, ceiling);
+								const shrunk = retryLength(length, rate, limit.ceiling);
+								// A 413 that shrinks the chunk is the limit search making
+								// progress, so it costs no retry.
+								const searching = isTooLarge(err) && shrunk < length;
+								if (!searching && ++attempt >= CHUNK_RETRIES) throw err;
 								if (shrunk < length) {
 									queue.giveBack(offset + shrunk, length - shrunk);
 									length = shrunk;
 								}
-								await delay(300 * attempt);
+								await delay(300 * Math.max(1, attempt));
 								continue;
 							}
 							const seconds = (performance.now() - t0) / 1000;
 							rate = foldRate(rate, { bytes: length, seconds });
-							largestOk = Math.max(largestOk, length);
+							limit.landed(length);
 							rows.push({
 								n: rows.length + 1,
 								offset,
@@ -191,7 +195,7 @@ export function useConnectionTest() {
 								seconds,
 								chunkRate: seconds > 0 ? length / seconds : 0,
 								smoothedRate: rate,
-								nextLength: nextChunkLength(rate, undefined, ceiling),
+								nextLength: nextChunkLength(rate, undefined, limit.ceiling),
 							});
 							break;
 						}
