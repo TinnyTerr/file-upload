@@ -5,13 +5,14 @@ import {
 	CHUNK_MIN,
 	coveredBytes,
 	foldRate,
-	lowerCeiling,
+	LIMIT_PRECISION,
 	mergeRanges,
 	nextChunkLength,
 	penalizeRate,
 	RATE_SMOOTHING,
 	RangeQueue,
 	retryLength,
+	SizeLimit,
 	TARGET_CHUNK_SECONDS,
 	uncoveredRanges,
 } from "../src/features/files/lib/chunkPlanner";
@@ -183,21 +184,50 @@ describe("oversized chunks", () => {
 		expect(nextChunkLength(r)).toBe(clampHalf(CHUNK_MAX));
 	});
 
-	test("a 413 ceiling caps the next chunk however fast the link is", () => {
-		const ceiling = lowerCeiling(null, CHUNK_MAX, 0);
-		expect(nextChunkLength(fastRate, undefined, ceiling)).toBe(ceiling);
+	test("a 413 caps the next chunk however fast the link is", () => {
+		const limit = new SizeLimit();
+		expect(limit.ceiling).toBeNull();
+		limit.tooLarge(CHUNK_MAX);
+		const ceiling = limit.ceiling as number;
 		expect(ceiling).toBeLessThan(CHUNK_MAX);
+		expect(nextChunkLength(fastRate, undefined, ceiling)).toBe(ceiling);
 		expect(retryLength(CHUNK_MAX, fastRate, ceiling)).toBe(ceiling);
 	});
 
-	test("the ceiling uses the largest chunk that landed when it is under the failed one", () => {
-		expect(lowerCeiling(null, CHUNK_MAX, 40 * MIB)).toBe(40 * MIB);
+	test("the cap probes halfway between what landed and what got a 413", () => {
+		const limit = new SizeLimit();
+		limit.landed(20 * MIB);
+		limit.tooLarge(60 * MIB);
+		expect(limit.ceiling).toBe(40 * MIB);
+		limit.landed(40 * MIB);
+		expect(limit.ceiling).toBe(50 * MIB);
+		limit.tooLarge(50 * MIB);
+		expect(limit.ceiling).toBe(45 * MIB);
 	});
 
-	test("the ceiling only goes down", () => {
-		const first = lowerCeiling(null, CHUNK_MAX, 0);
-		expect(lowerCeiling(first, CHUNK_MAX, 0)).toBe(first);
-		expect(lowerCeiling(first, first, 0)).toBe(Math.round(first / 2));
+	test("converges on the real limit and then holds at the known-good size", () => {
+		const real = 47 * MIB; // proxy rejects anything above this
+		const limit = new SizeLimit();
+		limit.tooLarge(CHUNK_MAX);
+		for (let i = 0; i < 20 && !limit.settled; i++) {
+			const c = limit.ceiling as number;
+			if (c <= real) limit.landed(c);
+			else limit.tooLarge(c);
+		}
+		expect(limit.settled).toBe(true);
+		const held = limit.ceiling as number;
+		expect(held).toBeLessThanOrEqual(real);
+		expect(real - held).toBeLessThanOrEqual(LIMIT_PRECISION);
+		limit.landed(held);
+		expect(limit.ceiling).toBe(held);
+	});
+
+	test("a 413 under a size that landed restarts the search below it", () => {
+		const limit = new SizeLimit();
+		limit.landed(40 * MIB);
+		limit.tooLarge(30 * MIB);
+		expect(limit.good).toBeLessThan(30 * MIB);
+		expect(limit.ceiling as number).toBeLessThan(30 * MIB);
 	});
 
 	test("the ceiling applies before any rate exists", () => {

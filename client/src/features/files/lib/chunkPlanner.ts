@@ -57,21 +57,44 @@ export function isTooLarge(err: unknown): boolean {
 	return err instanceof ApiError && err.status === 413;
 }
 
+/** Once the 413 search has narrowed the limit to within this, it stops probing. */
+export const LIMIT_PRECISION = 5 * 1024 * 1024;
+
 /**
- * The size cap after a 413. Something in front of the app (a proxy body
- * limit) rejected `failedLength`, which says nothing about link speed and
- * won't go away by retrying, so it becomes a hard ceiling for the rest of the
- * transfer. The largest chunk that has landed is known to fit, so it's used if
- * it's under the failed one; otherwise half the failed length.
+ * Finds the body-size limit something in front of the app (a proxy) enforces,
+ * from 413s. Before the first 413 there is no cap. After it, the cap sits
+ * halfway between the largest chunk that landed (`good`) and the smallest that
+ * got a 413 (`bad`), so successive chunks binary-search upward toward the
+ * limit. Once the two are within LIMIT_PRECISION the search stops and the cap
+ * stays at `good`, the size known to fit.
  */
-export function lowerCeiling(
-	ceiling: number | null,
-	failedLength: number,
-	largestOk: number,
-): number {
-	const fits =
-		largestOk > 0 && largestOk < failedLength ? largestOk : failedLength / 2;
-	return clampLength(Math.min(ceiling ?? Number.POSITIVE_INFINITY, fits));
+export class SizeLimit {
+	good = 0;
+	bad: number | null = null;
+
+	/** Cap for the next chunk, or `null` if no 413 has been seen. */
+	get ceiling(): number | null {
+		if (this.bad === null) return null;
+		if (this.settled) return clampLength(this.good);
+		return clampLength((this.good + this.bad) / 2);
+	}
+
+	/** True once the limit is known to within LIMIT_PRECISION. */
+	get settled(): boolean {
+		return this.bad !== null && this.bad - this.good <= LIMIT_PRECISION;
+	}
+
+	landed(length: number): void {
+		if (this.bad !== null && length >= this.bad) return; // flaky proxy; trust the 413
+		this.good = Math.max(this.good, length);
+	}
+
+	tooLarge(length: number): void {
+		this.bad = Math.min(this.bad ?? Number.POSITIVE_INFINITY, length);
+		// A 413 at or under a size that landed means the limit moved (or is
+		// flaky): restart the search below it.
+		if (this.good >= this.bad) this.good = Math.floor(this.bad / 2);
+	}
 }
 
 /**
