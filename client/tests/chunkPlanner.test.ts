@@ -5,6 +5,7 @@ import {
 	CHUNK_MIN,
 	coveredBytes,
 	foldRate,
+	lowerCeiling,
 	mergeRanges,
 	nextChunkLength,
 	penalizeRate,
@@ -143,8 +144,8 @@ describe("RangeQueue", () => {
 });
 
 describe("failure handling", () => {
-	test("penalizeRate halves an existing rate", () => {
-		expect(penalizeRate(4 * MIB, 10 * MIB)).toBe(2 * MIB);
+	test("penalizeRate halves an existing rate that is under the failed chunk's", () => {
+		expect(penalizeRate(MIB / 10, 10 * MIB)).toBe(MIB / 20);
 	});
 
 	test("penalizeRate seeds from the failed chunk when there is no rate", () => {
@@ -171,3 +172,39 @@ describe("failure handling", () => {
 		expect(q.take(MIB)).toEqual({ offset: 4 * MIB, length: MIB });
 	});
 });
+
+describe("oversized chunks", () => {
+	// The reported case: rate climbed until chunks clamped at CHUNK_MAX, then a
+	// proxy answered 413 and every retry went out at CHUNK_MAX again.
+	const fastRate = 50 * MIB; // wants 750 MiB per chunk, clamped to 70
+
+	test("penalizeRate always halves the failed chunk, even when the rate asks for far more", () => {
+		const r = penalizeRate(fastRate, CHUNK_MAX);
+		expect(nextChunkLength(r)).toBe(clampHalf(CHUNK_MAX));
+	});
+
+	test("a 413 ceiling caps the next chunk however fast the link is", () => {
+		const ceiling = lowerCeiling(null, CHUNK_MAX, 0);
+		expect(nextChunkLength(fastRate, undefined, ceiling)).toBe(ceiling);
+		expect(ceiling).toBeLessThan(CHUNK_MAX);
+		expect(retryLength(CHUNK_MAX, fastRate, ceiling)).toBe(ceiling);
+	});
+
+	test("the ceiling uses the largest chunk that landed when it is under the failed one", () => {
+		expect(lowerCeiling(null, CHUNK_MAX, 40 * MIB)).toBe(40 * MIB);
+	});
+
+	test("the ceiling only goes down", () => {
+		const first = lowerCeiling(null, CHUNK_MAX, 0);
+		expect(lowerCeiling(first, CHUNK_MAX, 0)).toBe(first);
+		expect(lowerCeiling(first, first, 0)).toBe(Math.round(first / 2));
+	});
+
+	test("the ceiling applies before any rate exists", () => {
+		expect(nextChunkLength(null, undefined, 512 * KIB)).toBe(512 * KIB);
+	});
+});
+
+function clampHalf(n: number) {
+	return Math.round(n / 2);
+}

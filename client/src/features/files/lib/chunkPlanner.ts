@@ -8,6 +8,7 @@
  * admin connection test run the same arithmetic and the debug page shows the
  * numbers a real upload would use.
  */
+import { ApiError } from "@/config/api";
 import type { ByteRange } from "../services/filesService";
 
 /** Mirrors the server's CHUNK_MIN_SIZE / CHUNK_MAX_SIZE. */
@@ -36,40 +37,72 @@ export function foldRate(rate: number | null, sample: ChunkSample): number {
 	return RATE_SMOOTHING * observed + (1 - RATE_SMOOTHING) * rate;
 }
 
-/** The rate after a failed chunk. A failure (timeout, 413, dropped
- * connection) is read as the link being slower than measured, so the rate is
- * halved. With no rate yet, the failed chunk itself is the evidence: it was
- * too big to land in TARGET_CHUNK_SECONDS, so the rate is seeded at half of
- * what would have sized it. */
+/** The rate after a failed chunk. A failure (timeout, dropped connection) is
+ * read as the link being slower than measured, so the next chunk is sized to
+ * at most half of the one that failed: the rate is first capped to what would
+ * have sized the failed chunk (an EWMA that asks for far more than CHUNK_MAX
+ * would otherwise still clamp straight back to CHUNK_MAX), then halved. */
 export function penalizeRate(
 	rate: number | null,
 	failedLength: number,
 	targetSeconds: number = TARGET_CHUNK_SECONDS,
 ): number {
-	const base = rate !== null && rate > 0 ? rate : failedLength / targetSeconds;
+	const sized = failedLength / targetSeconds;
+	const base = rate !== null && rate > 0 ? Math.min(rate, sized) : sized;
 	return base / 2;
 }
 
+/** A 413: the request body was over some limit (usually a proxy's). */
+export function isTooLarge(err: unknown): boolean {
+	return err instanceof ApiError && err.status === 413;
+}
+
 /**
- * How much of a failed chunk to retry, given the penalized rate. Shrinks only
- * when both halves stay at or above CHUNK_MIN, so the remainder handed back to
- * the queue never has to be widened over bytes still in flight.
+ * The size cap after a 413. Something in front of the app (a proxy body
+ * limit) rejected `failedLength`, which says nothing about link speed and
+ * won't go away by retrying, so it becomes a hard ceiling for the rest of the
+ * transfer. The largest chunk that has landed is known to fit, so it's used if
+ * it's under the failed one; otherwise half the failed length.
  */
-export function retryLength(failedLength: number, rate: number | null): number {
-	const want = nextChunkLength(rate);
+export function lowerCeiling(
+	ceiling: number | null,
+	failedLength: number,
+	largestOk: number,
+): number {
+	const fits =
+		largestOk > 0 && largestOk < failedLength ? largestOk : failedLength / 2;
+	return clampLength(Math.min(ceiling ?? Number.POSITIVE_INFINITY, fits));
+}
+
+/**
+ * How much of a failed chunk to retry. Shrinks only when both halves stay at
+ * or above CHUNK_MIN, so the remainder handed back to the queue never has to
+ * be widened over bytes still in flight.
+ */
+export function retryLength(
+	failedLength: number,
+	rate: number | null,
+	ceiling: number | null = null,
+): number {
+	const want = nextChunkLength(rate, TARGET_CHUNK_SECONDS, ceiling);
 	if (want >= failedLength || failedLength - want < CHUNK_MIN) {
 		return failedLength;
 	}
 	return want;
 }
 
-/** Length for the next chunk. Before a rate exists, the initial size. */
+/** Length for the next chunk: the initial size before a rate exists, never
+ * above `ceiling` once a 413 has set one. */
 export function nextChunkLength(
 	rate: number | null,
 	targetSeconds: number = TARGET_CHUNK_SECONDS,
+	ceiling: number | null = null,
 ): number {
-	if (rate === null || rate <= 0) return CHUNK_INITIAL;
-	return clampLength(rate * targetSeconds);
+	const want =
+		rate === null || rate <= 0
+			? CHUNK_INITIAL
+			: clampLength(rate * targetSeconds);
+	return ceiling === null ? want : Math.min(want, clampLength(ceiling));
 }
 
 /** Merges `[start, end)` ranges, joining overlapping or touching ones. */

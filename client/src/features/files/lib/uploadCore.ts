@@ -8,6 +8,8 @@ import type { UploadOptions, UploadResult } from "../types";
 import {
 	coveredBytes,
 	foldRate,
+	isTooLarge,
+	lowerCeiling,
 	mergeRanges,
 	nextChunkLength,
 	penalizeRate,
@@ -131,6 +133,10 @@ async function chunkedUpload(
 	// is measured on its own, so the rate already reflects how many slots share
 	// the link: sizing to it keeps every chunk near TARGET_CHUNK_SECONDS.
 	let rate: number | null = null;
+	// Hard cap on chunk length, set by a 413 from a proxy body limit, and the
+	// largest chunk known to fit under it.
+	let ceiling: number | null = null;
+	let largestOk = 0;
 
 	function sampleThroughput(bytes: number) {
 		windowBytes += bytes;
@@ -152,7 +158,12 @@ async function chunkedUpload(
 		windowStart = performance.now();
 	}
 
-	function backOff(failedLength: number) {
+	function backOff(err: unknown, failedLength: number) {
+		if (isTooLarge(err)) {
+			// Too big, not too slow: cap the size, leave rate and concurrency.
+			ceiling = lowerCeiling(ceiling, failedLength, largestOk);
+			return;
+		}
 		concurrency = Math.max(MIN_CONCURRENT_CHUNKS, Math.floor(concurrency / 2));
 		// A failure is read as the link being slower than measured, so the next
 		// chunks shrink too: a timeout is most often a chunk that took too long.
@@ -171,7 +182,7 @@ async function chunkedUpload(
 				await delay(150);
 				continue;
 			}
-			const next = queue.take(nextChunkLength(rate));
+			const next = queue.take(nextChunkLength(rate, undefined, ceiling));
 			if (!next) return;
 			const { offset } = next;
 			let { length } = next;
@@ -193,6 +204,7 @@ async function chunkedUpload(
 						bytes: length,
 						seconds: (performance.now() - started) / 1000,
 					});
+					largestOk = Math.max(largestOk, length);
 					break;
 				} catch (err) {
 					if (signal?.aborted) throw err;
@@ -204,11 +216,11 @@ async function chunkedUpload(
 						concurrency,
 						rate,
 					});
-					backOff(length);
+					backOff(err, length);
 					if (++attempt >= CHUNK_RETRIES) throw err;
 					// Retry smaller: the same oversized chunk would most likely hit
-					// the same timeout. The tail goes back to the queue.
-					const shrunk = retryLength(length, rate);
+					// the same timeout or limit. The tail goes back to the queue.
+					const shrunk = retryLength(length, rate, ceiling);
 					if (shrunk < length) {
 						queue.giveBack(offset + shrunk, length - shrunk);
 						length = shrunk;
