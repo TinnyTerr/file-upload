@@ -3,7 +3,9 @@ import { errorMessage } from "@/config/api";
 import {
 	foldRate,
 	nextChunkLength,
+	penalizeRate,
 	RangeQueue,
+	retryLength,
 } from "@/features/files/lib/chunkPlanner";
 import { connectionService } from "../services/connectionService";
 
@@ -18,6 +20,8 @@ export interface TraceRow {
 	smoothedRate: number;
 	/** What the next chunk will be sized to. */
 	nextLength: number;
+	/** Set when this attempt failed: the error, with the HTTP status if any. */
+	error?: string;
 }
 
 export interface UploadRun {
@@ -50,6 +54,12 @@ function randomBlob(bytes: number): Blob {
 }
 
 const TRACE_KEEP = 200;
+/** Matches uploadCore's CHUNK_RETRIES. */
+const CHUNK_RETRIES = 3;
+
+function delay(ms: number) {
+	return new Promise((r) => setTimeout(r, ms));
+}
 
 /** Runs the connection probes. One at a time; starting one cancels the last. */
 export function useConnectionTest() {
@@ -127,24 +137,54 @@ export function useConnectionTest() {
 						if (signal.aborted) throw new DOMException("aborted", "AbortError");
 						const next = queue.take(nextChunkLength(rate));
 						if (!next) return;
-						const { offset, length } = next;
-						const t0 = performance.now();
-						await connectionService.uploadChunk(
-							length,
-							payload.slice(offset, offset + length),
-							signal,
-						);
-						const seconds = (performance.now() - t0) / 1000;
-						rate = foldRate(rate, { bytes: length, seconds });
-						rows.push({
-							n: rows.length + 1,
-							offset,
-							length,
-							seconds,
-							chunkRate: seconds > 0 ? length / seconds : 0,
-							smoothedRate: rate,
-							nextLength: nextChunkLength(rate),
-						});
+						const { offset } = next;
+						let { length } = next;
+						let attempt = 0;
+						for (;;) {
+							const t0 = performance.now();
+							try {
+								await connectionService.uploadChunk(
+									length,
+									payload.slice(offset, offset + length),
+									signal,
+								);
+							} catch (err) {
+								if (signal.aborted) throw err;
+								// Same reaction as a real upload: halve the rate, retry smaller.
+								rate = penalizeRate(rate, length);
+								rows.push({
+									n: rows.length + 1,
+									offset,
+									length,
+									seconds: (performance.now() - t0) / 1000,
+									chunkRate: 0,
+									smoothedRate: rate,
+									nextLength: nextChunkLength(rate),
+									error: errorMessage(err),
+								});
+								publish(false);
+								if (++attempt >= CHUNK_RETRIES) throw err;
+								const shrunk = retryLength(length, rate);
+								if (shrunk < length) {
+									queue.giveBack(offset + shrunk, length - shrunk);
+									length = shrunk;
+								}
+								await delay(300 * attempt);
+								continue;
+							}
+							const seconds = (performance.now() - t0) / 1000;
+							rate = foldRate(rate, { bytes: length, seconds });
+							rows.push({
+								n: rows.length + 1,
+								offset,
+								length,
+								seconds,
+								chunkRate: seconds > 0 ? length / seconds : 0,
+								smoothedRate: rate,
+								nextLength: nextChunkLength(rate),
+							});
+							break;
+						}
 						publish(false);
 					}
 				};

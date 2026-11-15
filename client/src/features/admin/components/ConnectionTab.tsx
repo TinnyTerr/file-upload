@@ -220,12 +220,18 @@ export function ConnectionTab() {
 									</thead>
 									<tbody>
 										{t.upload.rows.map((r) => (
-											<tr key={r.n} className="border-t">
+											<tr
+												key={r.n}
+												className={`border-t ${r.error ? "text-destructive" : ""}`}
+												title={r.error}
+											>
 												<td className="p-2">{r.n}</td>
 												<td className="p-2">{size(r.offset)}</td>
 												<td className="p-2">{size(r.length)}</td>
 												<td className="p-2">{r.seconds.toFixed(2)} s</td>
-												<td className="p-2">{rate(r.chunkRate)}</td>
+												<td className="p-2">
+													{r.error ? "failed" : rate(r.chunkRate)}
+												</td>
 												<td className="p-2">{rate(r.smoothedRate)}</td>
 												<td className="p-2">{size(r.nextLength)}</td>
 											</tr>
