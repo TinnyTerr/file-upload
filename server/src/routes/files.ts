@@ -2843,6 +2843,7 @@ export function filesRouter(state: AppState): Router {
 				"X-Content-Type-Options": "nosniff",
 				"Referrer-Policy": "no-referrer",
 				"Content-Type": "application/octet-stream",
+				"Content-Length": String(fileObj.size_bytes),
 			});
 			try {
 				for await (const chunk of source) {
