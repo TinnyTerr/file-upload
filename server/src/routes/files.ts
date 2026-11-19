@@ -1,7 +1,3 @@
-import { ZipArchive } from "archiver";
-import busboy from "busboy";
-import type { Request, Response } from "express";
-import { Router } from "express";
 import { randomBytes } from "node:crypto";
 import {
 	createReadStream,
@@ -18,6 +14,10 @@ import {
 import { rm } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
+import { ZipArchive } from "archiver";
+import busboy from "busboy";
+import type { Request, Response } from "express";
+import { Router } from "express";
 import type { AppState } from "../appState.ts";
 import { recordAudit } from "../audit.ts";
 import { replicateFile } from "../cluster/replication.ts";
@@ -95,8 +95,8 @@ import {
 } from "../storage/rekey.ts";
 import {
 	ensureBlobAvailable,
-	plaintextStream,
 	PlaintextUnavailable,
+	plaintextStream,
 } from "../storage/streaming.ts";
 import { deleteThumbnail } from "../storage/thumbnail.ts";
 import { memberSource, safeArcname, storedZipSize } from "../storage/zip.ts";
