@@ -16,6 +16,7 @@ import { formatBytes } from "@/lib/bytes";
 import { useDiskStats } from "../hooks/useAdminDashboard";
 import { AuditTab } from "./AuditTab";
 import { BackendTab } from "./BackendTab";
+import { ConnectionTab } from "./ConnectionTab";
 import { FilesTab } from "./FilesTab";
 import { KeysTab } from "./KeysTab";
 import { OverviewTab } from "./OverviewTab";
@@ -82,6 +83,12 @@ export function AdminPage() {
 			value: "backend",
 			label: "Backend",
 			el: <BackendTab />,
+			allowed: isMaster,
+		},
+		{
+			value: "connection",
+			label: "Connection",
+			el: <ConnectionTab />,
 			allowed: isMaster,
 		},
 	].filter((t) => t.allowed);

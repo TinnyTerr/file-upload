@@ -416,6 +416,7 @@ export function publicRouter(state: AppState): Router {
 					res.writeHead(200, {
 						...baseHeaders,
 						"Content-Type": f.content_type || "application/octet-stream",
+						"Content-Length": String(f.size_bytes),
 					});
 					// Compression order mirrors the two possible producers: upload-time
 					// compression wraps ENC(ZSTD(x)); the archive job produces ZSTD(ENC(x)).
@@ -441,6 +442,7 @@ export function publicRouter(state: AppState): Router {
 				res.writeHead(200, {
 					...baseHeaders,
 					"Content-Type": f.content_type || "application/octet-stream",
+					"Content-Length": String(f.size_bytes),
 				});
 				try {
 					for await (const chunk of decryptStream(perFileKey, fullPath)) {
@@ -634,6 +636,7 @@ export function publicRouter(state: AppState): Router {
 						f.original_filename,
 						"inline",
 					),
+					"Content-Length": String(f.size_bytes),
 				});
 				try {
 					for await (const chunk of source) {

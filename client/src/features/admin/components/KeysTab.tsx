@@ -71,7 +71,9 @@ function UserSection({
 				<div className="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted">
 					<User className="size-3.5 text-muted-foreground" />
 				</div>
-				<span className="flex-1 text-sm font-semibold">{username}</span>
+				<span className="flex-1 text-sm font-semibold" data-sentry-mask>
+					{username}
+				</span>
 				<span className="text-xs text-muted-foreground">
 					{keys.length} {keys.length === 1 ? "key" : "keys"}
 				</span>

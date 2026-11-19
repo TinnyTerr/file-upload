@@ -15,3 +15,9 @@ export function scrubUrl(url: string): string {
 export function isSecretRoute(pathname: string, search: string): boolean {
 	return /^\/(file|d)\//.test(pathname) || /[?&]receive=/.test(search);
 }
+
+/** Pages that handle credentials or account details. Replay records nothing
+ * on them at all, rather than trusting each element to be tagged. */
+export function isPrivateRoute(pathname: string): boolean {
+	return /^\/(login|account\/|oauth\/)/.test(pathname);
+}

@@ -16,7 +16,7 @@ pnpm-lock.yaml
 
 # --- Build output -----------------------------------------------------------
 # The client is built into public/ at deploy time (`bun run build`).
-public/
+/public/
 dist/
 build/
 *.tsbuildinfo

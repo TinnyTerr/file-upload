@@ -75,6 +75,23 @@ export function receiveUrl(token: string): string {
 	return `${window.location.origin}/?receive=${encodeURIComponent(token)}`;
 }
 
+/** Append the password as a URL fragment (`#pw=`). Fragments never reach the
+ * server or its logs; the upload page reads it so the uploader needn't type it. */
+export function withPassword(url: string, password: string): string {
+	return `${url.replace(/#.*$/, "")}#pw=${encodeURIComponent(password)}`;
+}
+
+/** The password carried in the current page's fragment, if any. */
+export function passwordFromHash(hash: string): string {
+	const m = /(?:^#|&)pw=([^&]*)/.exec(hash);
+	if (!m) return "";
+	try {
+		return decodeURIComponent(m[1]);
+	} catch {
+		return "";
+	}
+}
+
 export const dropboxService = {
 	create: (body: {
 		expires_in_seconds?: number;

@@ -128,7 +128,7 @@ export function OverviewTab() {
 						<CardTitle className="text-base">Per-user storage</CardTitle>
 						<CardDescription>Top consumers by used bytes.</CardDescription>
 					</CardHeader>
-					<CardContent>
+					<CardContent data-sentry-mask>
 						<QuotaBars
 							rows={
 								data.fun_stats.top_storage_users.length

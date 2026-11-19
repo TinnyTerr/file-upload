@@ -8,11 +8,34 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv, type Plugin } from "vite";
 
-const BACKEND = process.env.VITE_BACKEND_URL ?? "http://127.0.0.1:8000";
+/** The same `PORT` the server listens on. Resolution mirrors server/src/config.ts:
+ * environment first, then the app.env the server reads (FILEUPLOAD_CONFIG, else
+ * the repo-root data/app.env that the root `dev` script points both sides at),
+ * then the 8000 default. Without this the proxy silently targets 8000 even when
+ * app.env sets another PORT, and every /api call 502s. */
+function serverPort(): string {
+	if (process.env.PORT) return process.env.PORT.trim();
+	const configPath =
+		process.env.FILEUPLOAD_CONFIG ??
+		fileURLToPath(new URL("../data/app.env", import.meta.url));
+	if (existsSync(configPath)) {
+		for (const line of readFileSync(configPath, "utf-8").split("\n")) {
+			const m = /^\s*PORT\s*=\s*(.*?)\s*$/.exec(line);
+			if (m?.[1]) return m[1];
+		}
+	}
+	return "8000";
+}
+
+const BACKEND =
+	process.env.VITE_BACKEND_URL ?? `http://127.0.0.1:${serverPort()}`;
 
 // DSNs live in the repo-root .env, one per surface. Only the web one is baked
 // into this bundle; the server and desktop keys never reach the browser.
-const rootEnv = loadEnv(process.env.NODE_ENV ?? "development", "..", "SENTRY_");
+const rootEnv = loadEnv(process.env.NODE_ENV ?? "development", "..", [
+	"SENTRY_",
+	"PORTFOLIO_",
+]);
 const sentryEnv = (key: string): string | undefined =>
 	process.env[key] ?? rootEnv[key] ?? undefined;
 
@@ -91,6 +114,10 @@ export default defineConfig({
 	define: {
 		__SENTRY_DSN__: JSON.stringify(sentryEnv("SENTRY_DSN_WEB") ?? ""),
 		__SENTRY_RELEASE__: JSON.stringify(release),
+		// Optional; the footer hides the portfolio link when empty.
+		__PORTFOLIO_URL__: JSON.stringify(
+			process.env.PORTFOLIO_URL ?? rootEnv.PORTFOLIO_URL ?? "",
+		),
 		__SENTRY_TRACES_RATE__: rate("SENTRY_TRACES_SAMPLE_RATE", 0.1),
 		__SENTRY_REPLAY_RATE__: rate("SENTRY_REPLAY_SAMPLE_RATE", 0.05),
 	},

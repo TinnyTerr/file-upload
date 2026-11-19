@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Brand } from "./Brand";
+import { Footer } from "./Footer";
 
 type ShellWidth = "narrow" | "wide";
 
@@ -46,9 +47,7 @@ export function PublicShell({ children }: { children: React.ReactNode }) {
 				>
 					{children}
 				</main>
-				<footer className="px-4 py-6 text-center text-xs text-muted-foreground">
-					Oxymoron (for files)
-				</footer>
+				<Footer />
 			</div>
 		</WidthContext.Provider>
 	);

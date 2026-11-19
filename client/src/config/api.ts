@@ -20,7 +20,9 @@ export type ErrorDetail = string | Record<string, unknown>;
 export class ApiError extends Error {
 	status: number;
 	detail: ErrorDetail;
-	constructor(status: number, detail: ErrorDetail) {
+	/** Response headers, kept so callers can log proxy fingerprints (cf-ray). */
+	headers?: Headers;
+	constructor(status: number, detail: ErrorDetail, headers?: Headers) {
 		super(
 			typeof detail === "string"
 				? detail
@@ -29,6 +31,7 @@ export class ApiError extends Error {
 		this.name = "ApiError";
 		this.status = status;
 		this.detail = detail;
+		this.headers = headers;
 	}
 }
 
@@ -72,7 +75,7 @@ async function parseError(res: Response): Promise<ApiError> {
 	} catch {
 		/* non-JSON error body */
 	}
-	return new ApiError(res.status, detail);
+	return new ApiError(res.status, detail, res.headers);
 }
 
 async function request<T>(

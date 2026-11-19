@@ -21,7 +21,7 @@ export function NewKeyModal({
 }) {
 	return (
 		<Dialog open={!!apiKey} onOpenChange={(o) => !o && onClose()}>
-			<DialogContent className="max-w-md">
+			<DialogContent className="max-w-md" data-sentry-mask>
 				<DialogHeader>
 					<DialogTitle>API key #{apiKey?.user_key_number}</DialogTitle>
 					<DialogDescription>

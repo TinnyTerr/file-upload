@@ -234,7 +234,9 @@ export function AuditTab() {
 												<TableCell className="font-mono text-xs text-muted-foreground">
 													{e.id}
 												</TableCell>
-												<TableCell className="font-medium">{e.actor}</TableCell>
+												<TableCell className="font-medium" data-sentry-mask>
+													{e.actor}
+												</TableCell>
 												<TableCell>
 													<Badge variant={actionVariant(e.action)}>
 														{e.action}
@@ -243,7 +245,10 @@ export function AuditTab() {
 												<TableCell className="font-mono text-xs text-muted-foreground">
 													{e.target ?? "—"}
 												</TableCell>
-												<TableCell className="font-mono text-xs text-muted-foreground">
+												<TableCell
+													className="font-mono text-xs text-muted-foreground"
+													data-sentry-mask
+												>
 													{e.ip ?? "—"}
 												</TableCell>
 												<TableCell className="whitespace-nowrap text-xs text-muted-foreground">
@@ -259,7 +264,9 @@ export function AuditTab() {
 												<TableCell className="text-xs">
 													{e.node_name || e.node_id}
 												</TableCell>
-												<TableCell className="font-medium">{e.actor}</TableCell>
+												<TableCell className="font-medium" data-sentry-mask>
+													{e.actor}
+												</TableCell>
 												<TableCell>
 													<Badge variant={actionVariant(e.action)}>
 														{e.action}
@@ -268,7 +275,10 @@ export function AuditTab() {
 												<TableCell className="font-mono text-xs text-muted-foreground">
 													{e.target ?? "—"}
 												</TableCell>
-												<TableCell className="font-mono text-xs text-muted-foreground">
+												<TableCell
+													className="font-mono text-xs text-muted-foreground"
+													data-sentry-mask
+												>
 													{e.ip ?? "—"}
 												</TableCell>
 												<TableCell className="whitespace-nowrap text-xs text-muted-foreground">

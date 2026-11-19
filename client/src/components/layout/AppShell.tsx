@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Outlet, useMatch } from "react-router-dom";
 import { cn } from "@/lib/cn";
+import { Footer } from "./Footer";
 import { Header } from "./Header";
 import { DesktopSidebar } from "./Sidebar";
 
@@ -44,6 +45,7 @@ export function AppShell() {
 				>
 					<Outlet />
 				</main>
+				{!isExplorer && <Footer />}
 			</div>
 		</div>
 	);

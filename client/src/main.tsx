@@ -8,6 +8,7 @@ import { RevealedKeyProvider } from "@/features/drive/hooks/useRevealedKeys";
 import { UploadProvider } from "@/features/files/hooks/useUpload";
 import { present } from "@/lib/present";
 import { initSentry } from "@/lib/sentry";
+import { registerServiceWorker } from "@/lib/serviceWorker";
 import { DialogProvider } from "@/providers/DialogProvider";
 import { QueryProvider } from "@/providers/QueryProvider";
 import { ThemeProvider } from "@/providers/ThemeProvider";
@@ -16,6 +17,7 @@ import App from "./App";
 import "./index.css";
 
 initSentry();
+registerServiceWorker();
 
 // Apply saved theme before first paint (avoids FOUC). `ThemeProvider` is the
 // ongoing reactive owner once mounted; this only has to get the very first

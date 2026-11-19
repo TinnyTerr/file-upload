@@ -33,7 +33,7 @@ interface Props {
 export function UserFormDialog({ open, onClose, editing }: Props) {
 	return (
 		<Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-			<DialogContent className="max-w-md">
+			<DialogContent className="max-w-md" data-sentry-mask>
 				{/* Keyed on the user being edited, so the fields always start from
 				    that user's current values instead of the previous target's. */}
 				{open && (

@@ -49,7 +49,10 @@ export function PermissionsDialog({
 
 	return (
 		<Dialog open={!!user} onOpenChange={(o) => !o && onClose()}>
-			<DialogContent className="max-h-[85vh] max-w-lg overflow-y-auto">
+			<DialogContent
+				className="max-h-[85vh] max-w-lg overflow-y-auto"
+				data-sentry-mask
+			>
 				<DialogHeader>
 					<DialogTitle>Permissions · {user.username}</DialogTitle>
 					<DialogDescription>
